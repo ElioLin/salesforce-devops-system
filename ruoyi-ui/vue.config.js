@@ -1,3 +1,4 @@
+const MonacoWebpackPlugin = require('monaco-editor-webpack-plugin');
 'use strict'
 const path = require('path')
 
@@ -28,6 +29,21 @@ module.exports = {
   // 如果你不需要生产环境的 source map，可以将其设置为 false 以加速生产环境构建。
   productionSourceMap: false,
   transpileDependencies: ['quill'],
+  configureWebpack: {
+    name: name,
+    resolve: {
+      alias: {
+        '@': resolve('src')
+      }
+    },
+    // 2. 在这里添加 plugins 配置
+    plugins: [
+      new MonacoWebpackPlugin({
+        // 按需加载语言，减少打包体积
+        languages: ['java', 'apex', 'xml', 'javascript', 'json'] 
+      })
+    ]
+  },
   // webpack-dev-server 相关配置
   devServer: {
     host: '0.0.0.0',

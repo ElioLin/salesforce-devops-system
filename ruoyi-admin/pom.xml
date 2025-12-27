@@ -61,6 +61,10 @@
             <artifactId>ruoyi-generator</artifactId>
         </dependency>
 
+        <dependency>
+            <groupId>com.ruoyi</groupId>
+            <artifactId>ruoyi-salesforce</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
