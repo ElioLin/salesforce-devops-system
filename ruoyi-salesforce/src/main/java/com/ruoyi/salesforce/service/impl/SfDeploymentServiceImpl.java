@@ -9,6 +9,7 @@ import com.ruoyi.salesforce.mapper.SfDeploymentItemMapper;
 import com.ruoyi.salesforce.mapper.SfDeploymentMapper;
 import com.ruoyi.salesforce.service.ISfDeploymentService;
 import com.ruoyi.salesforce.service.ISfMetadataService;
+import com.ruoyi.salesforce.utils.PackageXmlBuilder;
 import com.sforce.soap.metadata.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,7 +17,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.ByteArrayOutputStream;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import org.apache.commons.codec.digest.DigestUtils;
+import java.io.ByteArrayInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 import java.util.concurrent.CompletableFuture;
 
 @Service
@@ -302,5 +309,162 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         }
         update.setErrorMsg(errorMsg);
         sfDeploymentMapper.updateById(update);
+    }
+
+    @Override
+    public void checkDiffStatus(Long deploymentId) {
+        SfDeployment deployment = selectSfDeploymentById(deploymentId);
+        if (deployment == null || deployment.getTargetOrgId() == null) {
+            throw new RuntimeException("请先设置目标环境");
+        }
+
+        List<SfDeploymentItem> items = selectItems(deploymentId);
+        if (items.isEmpty()) return;
+
+        // 1. 状态置为 Comparing
+        for (SfDeploymentItem item : items) {
+            item.setDiffStatus("Comparing");
+            sfDeploymentItemMapper.updateById(item);
+        }
+
+        // 2. 异步比对
+        CompletableFuture.runAsync(() -> {
+            try {
+                doCalculateDiff(deployment, items);
+            } catch (Exception e) {
+                log.error("比对失败", e);
+                for (SfDeploymentItem item : items) {
+                    item.setDiffStatus("Unknown");
+                    sfDeploymentItemMapper.updateById(item);
+                }
+            }
+        });
+    }
+
+    private void doCalculateDiff(SfDeployment deployment, List<SfDeploymentItem> items) throws Exception {
+        com.sforce.soap.metadata.Package manifest = generateManifestObject(items);
+
+        // 并行拉取
+        CompletableFuture<Map<String, String>> sourceFuture = CompletableFuture.supplyAsync(() ->
+                retrieveAndHash(deployment.getSourceOrgId(), manifest)
+        );
+        CompletableFuture<Map<String, String>> targetFuture = CompletableFuture.supplyAsync(() ->
+                retrieveAndHash(deployment.getTargetOrgId(), manifest)
+        );
+
+        CompletableFuture.allOf(sourceFuture, targetFuture).join();
+
+        Map<String, String> sourceHashMap = sourceFuture.get();
+        Map<String, String> targetHashMap = targetFuture.get();
+
+        for (SfDeploymentItem item : items) {
+            // 【关键修复】使用更智能的查找逻辑，不仅仅靠文件名匹配
+            String sourceHash = findHash(sourceHashMap, item.getMemberName());
+            String targetHash = findHash(targetHashMap, item.getMemberName());
+
+            String status;
+            if (sourceHash == null) {
+                status = "Invalid"; // 源环境未找到文件
+            } else if (targetHash == null) {
+                status = "New"; // 目标环境未找到文件
+            } else if (sourceHash.equals(targetHash)) {
+                status = "Same"; // 哈希一致
+            } else {
+                status = "Changed"; // 哈希不同
+            }
+
+            item.setDiffStatus(status);
+            item.setLastCheckTime(new Date());
+            sfDeploymentItemMapper.updateById(item);
+        }
+    }
+
+    /**
+     * 【关键修复】更智能的哈希查找
+     * 解决问题：ZIP里的文件名是 MyClass.cls，但 memberName 是 MyClass，导致找不到。
+     * 同时优先匹配代码文件，忽略 -meta.xml（除非只有 meta.xml）
+     */
+    private String findHash(Map<String, String> map, String memberName) {
+        String bestMatchHash = null;
+
+        // 1. 精确匹配 (虽然不太可能，因为zip里都有后缀)
+        if (map.containsKey(memberName)) return map.get(memberName);
+
+        // 2. 前缀匹配
+        // 遍历 map 寻找文件名以 "memberName." 开头的 entry
+        // 例如 memberName="MyClass", 匹配 "MyClass.cls", "MyClass.trigger", "MyClass.cls-meta.xml"
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            String fileName = entry.getKey();
+
+            // 检查文件名是否匹配 (注意：要确保是全名匹配，防止 MyClass 匹配到 MyClassTest)
+            // 逻辑：文件名必须以 memberName + "." 开头
+            if (fileName.startsWith(memberName + ".")) {
+                // 如果还没有匹配项，先存下来
+                if (bestMatchHash == null) {
+                    bestMatchHash = entry.getValue();
+                }
+
+                // 优化：如果有多个文件 (如 .cls 和 .cls-meta.xml)，优先返回非 meta 文件
+                // 因为通常我们关心代码内容的变更
+                if (!fileName.endsWith("-meta.xml")) {
+                    return entry.getValue(); // 找到代码文件，直接返回
+                }
+            }
+        }
+        return bestMatchHash;
+    }
+
+    private Map<String, String> retrieveAndHash(Long orgId, com.sforce.soap.metadata.Package manifest) {
+        Map<String, String> resultMap = new HashMap<>();
+        try {
+            // 复用 MetadataService
+            byte[] zipData = sfMetadataService.retrieveZipByManifest(orgId, manifest);
+            if (zipData == null) return resultMap;
+
+            try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
+                ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    if (entry.isDirectory() || entry.getName().endsWith("package.xml")) continue;
+
+                    // 读取内容
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[1024];
+                    int len;
+                    while ((len = zis.read(buffer)) > 0) {
+                        bos.write(buffer, 0, len);
+                    }
+                    String md5 = DigestUtils.md5Hex(bos.toByteArray());
+
+                    // 【关键修复】处理文件名
+                    // ZIP 路径可能是 "unpackaged/classes/MyClass.cls" 或 "classes/MyClass.cls"
+                    String fullPath = entry.getName();
+                    // 只取最后的文件名部分
+                    String simpleName = fullPath.substring(fullPath.lastIndexOf("/") + 1);
+
+                    resultMap.put(simpleName, md5);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Org {} 拉取比对文件失败 (可能是目标环境不存在这些文件): {}", orgId, e.getMessage());
+        }
+        return resultMap;
+    }
+
+    private com.sforce.soap.metadata.Package generateManifestObject(List<SfDeploymentItem> items) {
+        com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
+        Map<String, List<String>> typesMap = new HashMap<>();
+        for (SfDeploymentItem item : items) {
+            typesMap.computeIfAbsent(item.getMetadataType(), k -> new ArrayList<>()).add(item.getMemberName());
+        }
+        List<PackageTypeMembers> typeMembersList = new ArrayList<>();
+        for (Map.Entry<String, List<String>> entry : typesMap.entrySet()) {
+            PackageTypeMembers typeMembers = new PackageTypeMembers();
+            typeMembers.setName(entry.getKey());
+            typeMembers.setMembers(entry.getValue().toArray(new String[0]));
+            typeMembersList.add(typeMembers);
+        }
+        manifest.setTypes(typeMembersList.toArray(new PackageTypeMembers[0]));
+        manifest.setVersion("58.0");
+        return manifest;
     }
 }

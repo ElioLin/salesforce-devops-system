@@ -92,3 +92,11 @@ export function quickDeploy(id) {
       method: 'post'
     })
  }
+
+ // 触发状态计算
+export function checkDiffStatus(deploymentId) {
+    return request({
+      url: '/salesforce/deployment/item/checkStatus/' + deploymentId,
+      method: 'post'
+    })
+}

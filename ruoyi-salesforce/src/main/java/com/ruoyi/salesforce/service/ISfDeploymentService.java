@@ -47,4 +47,9 @@ public interface ISfDeploymentService extends IService<SfDeployment> {
     String checkDeployStatus(Long targetOrgId, String processId) throws Exception;
 
     void quickDeploy(Long deploymentId);
+
+    /**
+     * 异步计算部署包内所有明细的状态
+     */
+    void checkDiffStatus(Long deploymentId);
 }

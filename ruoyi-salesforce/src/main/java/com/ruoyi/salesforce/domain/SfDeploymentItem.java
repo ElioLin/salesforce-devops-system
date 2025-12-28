@@ -24,6 +24,26 @@ public class SfDeploymentItem {
 
     private Date createTime;
 
+    private String diffStatus;
+    private Date lastCheckTime;
+
+    // Getter & Setter
+    public String getDiffStatus() {
+        return diffStatus;
+    }
+
+    public void setDiffStatus(String diffStatus) {
+        this.diffStatus = diffStatus;
+    }
+
+    public Date getLastCheckTime() {
+        return lastCheckTime;
+    }
+
+    public void setLastCheckTime(Date lastCheckTime) {
+        this.lastCheckTime = lastCheckTime;
+    }
+
     // Getter & Setter
     public Long getId() {
         return id;

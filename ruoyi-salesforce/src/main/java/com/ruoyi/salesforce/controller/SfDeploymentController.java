@@ -154,4 +154,13 @@ public class SfDeploymentController extends BaseController {
             return AjaxResult.error(e.getMessage());
         }
     }
+
+    /**
+     * 触发状态计算
+     */
+    @PostMapping("/item/checkStatus/{deploymentId}")
+    public AjaxResult checkStatus(@PathVariable Long deploymentId) {
+        sfDeploymentService.checkDiffStatus(deploymentId);
+        return AjaxResult.success("状态计算已在后台开始");
+    }
 }
