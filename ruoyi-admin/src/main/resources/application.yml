@@ -12,6 +12,10 @@ ruoyi:
   addressEnabled: false
   # 验证码类型 math 数字计算 char 字符验证
   captchaType: math
+  # Salesforce配置
+  salesforce:
+    # 你的回调地址，本地开发用 localhost，线上改成你的域名
+    callbackUrl: http://localhost:8080/system/sf/callback
 
 # 开发环境配置
 server:

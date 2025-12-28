@@ -7,6 +7,7 @@ import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.service.ISfOrgService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -14,6 +15,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
 
 /**
  * Salesforce 授权认证 Controller
@@ -25,49 +28,48 @@ public class SfAuthController {
     @Autowired
     private ISfOrgService sfOrgService;
 
+    // 从配置文件读取回调地址
+    @Value("${ruoyi.salesforce.callbackUrl}")
+    private String callbackUrl;
+
     /**
      * 1. 获取授权URL
-     * 前端点击“去授权”按钮时调用此接口，返回 Salesforce 的 OAuth 登录地址
-     * http://localhost:8080/system/sf/authUrl?Id=1
-     * @param id 数据库中 sf_org 表的主键ID
-     * @return 包含跳转 URL 的 JSON
      */
     @GetMapping("/authUrl")
     public AjaxResult getAuthUrl(@RequestParam("Id") Long id) {
-        // 1. 查询数据库中的 Org 配置信息
         SfOrg org = sfOrgService.selectSfOrgById(id);
         if (org == null) {
             return AjaxResult.error("未找到指定的Org配置，ID: " + id);
         }
 
-        // 2. 判断环境类型，决定使用 login.salesforce.com (生产) 还是 test.salesforce.com (沙盒)
-        // 假设数据库存的是 "Production" 或 "Sandbox"
         String instance = "Production".equalsIgnoreCase(org.getOrgType()) ?
                 "https://login.salesforce.com" : "https://test.salesforce.com";
 
-        // 3. 拼接 OAuth 2.0 授权地址
-        // 这里的 redirect_uri 必须和 Salesforce Connected App 里配置的完全一致
-        String redirectUri = "http://localhost:8080/system/sf/callback";
+        try {
+            // 【修正】使用 "UTF-8" 字符串，兼容 Java 8
+            String encodedRedirectUri = URLEncoder.encode(callbackUrl, "UTF-8");
 
-        String authUrl = instance + "/services/oauth2/authorize" +
-                "?response_type=code" +
-                "&client_id=" + org.getClientId() +
-                "&redirect_uri=" + redirectUri +
-                "&state=" + id; // 将 orgId 作为 state 透传，以便回调时知道是更新哪条记录
+            String authUrl = instance + "/services/oauth2/authorize" +
+                    "?response_type=code" +
+                    "&prompt=login" + // 强制登录，防止串号
+                    "&scope=full refresh_token offline_access" + // 获取刷新令牌
+                    "&client_id=" + org.getClientId() +
+                    "&redirect_uri=" + encodedRedirectUri +
+                    "&state=" + id;
 
-        return AjaxResult.success("操作成功", authUrl);
+            return AjaxResult.success("操作成功", authUrl);
+        } catch (UnsupportedEncodingException e) {
+            return AjaxResult.error("生成授权链接失败: 编码异常");
+        }
     }
 
     /**
      * 2. 回调接口
-     * Salesforce 登录成功后，会自动跳转回这个地址，并携带 code 和 state
-     *
-     * @param code Salesforce 返回的授权码
-     * @param state 我们之前透传过去的 orgId
-     * @param response 用于页面重定向
      */
     @GetMapping("/callback")
     public void callback(String code, String state, HttpServletResponse response) throws IOException {
+        response.setContentType("text/html;charset=utf-8");
+
         if (code == null || state == null) {
             response.getWriter().write("Error: Missing code or state parameter.");
             return;
@@ -81,59 +83,61 @@ public class SfAuthController {
             return;
         }
 
-        // --- 步骤 1: 换取 Token ---
-        String instance = "Production".equalsIgnoreCase(org.getOrgType()) ?
-                "https://login.salesforce.com" : "https://test.salesforce.com";
-        String tokenUrl = instance + "/services/oauth2/token";
-        String redirectUri = "http://localhost:8080/system/sf/callback";
+        try {
+            String instance = "Production".equalsIgnoreCase(org.getOrgType()) ?
+                    "https://login.salesforce.com" : "https://test.salesforce.com";
+            String tokenUrl = instance + "/services/oauth2/token";
 
-        String result = HttpRequest.post(tokenUrl)
-                .form("grant_type", "authorization_code")
-                .form("client_id", org.getClientId())
-                .form("client_secret", org.getClientSecret())
-                .form("redirect_uri", redirectUri)
-                .form("code", code)
-                .execute()
-                .body();
-
-        JSONObject json = JSONUtil.parseObj(result);
-
-        // --- 步骤 2: 获取用户信息 (新增逻辑) ---
-        if (json.getStr("access_token") != null) {
-            String accessToken = json.getStr("access_token");
-            String idUrl = json.getStr("id"); // 类似于: https://login.salesforce.com/id/00D.../005...
-
-            // 【关键】调用 Identity API 获取 Username 和 OrgId
-            // 拿着 Access Token 去访问这个 idUrl
-            String identityResponse = HttpRequest.get(idUrl)
-                    .header("Authorization", "Bearer " + accessToken)
+            // 1. 换取 Token
+            // 注意：这里使用 Hutool 的 HttpRequest，它会自动处理参数编码，所以 callbackUrl 直接传即可
+            String result = HttpRequest.post(tokenUrl)
+                    .form("grant_type", "authorization_code")
+                    .form("client_id", org.getClientId())
+                    .form("client_secret", org.getClientSecret())
+                    .form("redirect_uri", callbackUrl) // 这里直接传原始URL
+                    .form("code", code)
                     .execute()
                     .body();
 
-            JSONObject identityJson = JSONUtil.parseObj(identityResponse);
+            JSONObject json = JSONUtil.parseObj(result);
 
-            // 提取关键信息
-            String username = identityJson.getStr("username");       // 用户名
-            String orgId = identityJson.getStr("organization_id");   // Org ID (00D开头)
-            // String userId = identityJson.getStr("user_id");       // User ID (可选)
+            if (json.getStr("access_token") != null) {
+                String accessToken = json.getStr("access_token");
+                String idUrl = json.getStr("id");
 
-            // --- 步骤 3: 更新数据库 ---
-            org.setAccessToken(accessToken);
-            org.setRefreshToken(json.getStr("refresh_token"));
-            org.setInstanceUrl(json.getStr("instance_url"));
+                // 2. 获取 refresh_token (非常重要，用于自动续期)
+                String refreshToken = json.getStr("refresh_token");
 
-            // 填入刚才获取的身份信息
-            org.setUsername(username);
-            org.setOrgId(orgId);
+                // 3. 获取用户信息
+                String identityResponse = HttpRequest.get(idUrl)
+                        .header("Authorization", "Bearer " + accessToken)
+                        .execute()
+                        .body();
 
-            sfOrgService.updateSfOrg(org);
+                JSONObject identityJson = JSONUtil.parseObj(identityResponse);
+                String username = identityJson.getStr("username");
+                String orgId = identityJson.getStr("organization_id");
 
-            // 成功跳转
-            response.sendRedirect("http://localhost:80/salesforce/org?msg=success");
-        } else {
-            // 失败处理
-            response.setContentType("text/html;charset=utf-8");
-            response.getWriter().write("<h1>Auth Failed</h1><p>" + result + "</p>");
+                // 4. 更新数据库
+                org.setAccessToken(accessToken);
+                // 只有显式授权才会返回 refresh_token，如果返回了就更新
+                if (refreshToken != null) {
+                    org.setRefreshToken(refreshToken);
+                }
+                org.setInstanceUrl(json.getStr("instance_url"));
+                org.setUsername(username);
+                org.setOrgId(orgId);
+
+                sfOrgService.updateSfOrg(org);
+
+                // 成功页面
+                response.getWriter().write("<h1 style='color:green'>授权成功！</h1><p>您可以关闭此窗口并刷新列表。</p><script>setTimeout(function(){window.close()}, 2000);</script>");
+            } else {
+                response.getWriter().write("<h1>Auth Failed</h1><p>" + result + "</p>");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            response.getWriter().write("<h1>System Error</h1><p>" + e.getMessage() + "</p>");
         }
     }
 }

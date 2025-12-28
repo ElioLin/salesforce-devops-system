@@ -13,6 +13,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Salesforce部署包 Controller
@@ -162,5 +163,18 @@ public class SfDeploymentController extends BaseController {
     public AjaxResult checkStatus(@PathVariable Long deploymentId) {
         sfDeploymentService.checkDiffStatus(deploymentId);
         return AjaxResult.success("状态计算已在后台开始");
+    }
+
+    /**
+     * 【新增】预览部署包内容
+     */
+    @GetMapping("/preview/{id}")
+    public AjaxResult preview(@PathVariable("id") Long id) {
+        try {
+            Map<String, Object> result = sfDeploymentService.previewPackage(id);
+            return AjaxResult.success(result);
+        } catch (Exception e) {
+            return AjaxResult.error(e.getMessage());
+        }
     }
 }

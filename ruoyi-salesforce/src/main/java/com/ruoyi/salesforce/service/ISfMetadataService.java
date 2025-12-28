@@ -58,4 +58,9 @@ public interface ISfMetadataService {
      * 【新增】获取 Org 支持的所有元数据类型
      */
     List<String> getAllMetadataTypes(Long orgId) throws Exception;
+
+    /**
+     * 【新增】强制从 Salesforce 刷新元数据缓存
+     */
+    List<FileProperties> refreshMetadataCache(Long orgId, String type) throws Exception;
 }

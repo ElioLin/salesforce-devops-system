@@ -9,6 +9,8 @@ import com.ruoyi.salesforce.mapper.SfDeploymentItemMapper;
 import com.ruoyi.salesforce.mapper.SfDeploymentMapper;
 import com.ruoyi.salesforce.service.ISfDeploymentService;
 import com.ruoyi.salesforce.service.ISfMetadataService;
+import com.ruoyi.salesforce.utils.PackageXmlBuilder;
+import com.ruoyi.salesforce.utils.ProfileCleaner;
 import com.sforce.soap.metadata.*;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
@@ -19,6 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.zip.ZipEntry;
@@ -152,6 +157,14 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 throw new RuntimeException("提取代码失败：返回的ZIP包为空");
             }
             log.info("提取成功，ZIP大小: {} bytes", zipBytes.length);
+
+            // ========================================================
+            // 【核心优化】清洗 Profile，移除全局系统权限，只保留关联元数据权限
+            // ========================================================
+            log.info("开始清洗 Profile 文件...");
+            zipBytes = ProfileCleaner.clean(zipBytes);
+            log.info("Profile 清洗完成，新ZIP大小: {} bytes", zipBytes.length);
+            // ========================================================
 
             // 3. 部署到目标环境
             log.info("开始部署，Org: {}", deployment.getTargetOrgId());
@@ -464,5 +477,119 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         }
         update.setErrorMsg(errorMsg);
         sfDeploymentMapper.updateById(update);
+    }
+
+    // ================== 【新增】预览部署包功能 ==================
+
+    @Override
+    public Map<String, Object> previewPackage(Long deploymentId) {
+        SfDeployment deployment = selectSfDeploymentById(deploymentId);
+        if (deployment == null) throw new ServiceException("部署包不存在");
+
+        List<SfDeploymentItem> items = selectItems(deploymentId);
+        if (items.isEmpty()) throw new ServiceException("部署包为空，请先添加元数据");
+
+        // 1. 构建清单
+        com.sforce.soap.metadata.Package manifest = PackageXmlBuilder.build(items);
+
+        // 2. 从源环境拉取 ZIP
+        byte[] zipBytes;
+        try {
+            log.info("正在生成预览包，源环境: {}", deployment.getSourceOrgId());
+            zipBytes = sfMetadataService.retrieveZipByManifest(deployment.getSourceOrgId(), manifest);
+        } catch (Exception e) {
+            throw new ServiceException("生成预览包失败: " + e.getMessage());
+        }
+
+        if (zipBytes == null || zipBytes.length == 0) {
+            throw new ServiceException("源环境返回的部署包为空");
+        }
+
+        // 3. 执行 Profile 清洗 (保证预览内容与实际部署一致)
+        zipBytes = ProfileCleaner.clean(zipBytes);
+
+        // 4. 解析 ZIP 包结构
+        List<String> fileList = new ArrayList<>();
+        String packageXmlContent = "";
+
+        // 标记是否已找到主清单，防止被覆盖
+        boolean foundMainManifest = false;
+
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+
+                // 过滤文件夹
+                if (!entry.isDirectory()) {
+                    fileList.add(name);
+
+                    // 【核心修复】精准匹配 package.xml
+                    // 1. 优先匹配 unpackaged/package.xml (标准结构)
+                    // 2. 其次匹配 package.xml (单包结构)
+                    // 3. 只有当还没找到主清单时才读取，防止被后续同名文件覆盖
+                    if (!foundMainManifest) {
+                        if ("unpackaged/package.xml".equals(name) || "package.xml".equals(name)) {
+                            packageXmlContent = new String(readStream(zis), StandardCharsets.UTF_8);
+                            foundMainManifest = true;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            throw new ServiceException("解析部署包内容失败: " + e.getMessage());
+        }
+
+        // 如果 ZIP 里实在没找到（极少情况），为了不显示空，我们可以手动根据 items 生成一个预览
+        if (packageXmlContent.isEmpty()) {
+            packageXmlContent = "\n" +
+                    generateXmlStringFromManifest(items);
+        }
+
+        // 排序文件列表
+        Collections.sort(fileList);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("files", fileList);
+        result.put("packageXml", packageXmlContent);
+        result.put("size", zipBytes.length);
+
+        return result;
+    }
+
+    /**
+     * 辅助方法：手动生成 XML 字符串 (作为兜底方案)
+     */
+    private String generateXmlStringFromManifest(List<SfDeploymentItem> items) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        sb.append("<Package xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n");
+
+        Map<String, List<String>> typesMap = new HashMap<>();
+        for (SfDeploymentItem item : items) {
+            typesMap.computeIfAbsent(item.getMetadataType(), k -> new ArrayList<>()).add(item.getMemberName());
+        }
+
+        for (Map.Entry<String, List<String>> entry : typesMap.entrySet()) {
+            sb.append("    <types>\n");
+            for (String member : entry.getValue()) {
+                sb.append("        <members>").append(member).append("</members>\n");
+            }
+            sb.append("        <name>").append(entry.getKey()).append("</name>\n");
+            sb.append("    </types>\n");
+        }
+
+        sb.append("    <version>58.0</version>\n");
+        sb.append("</Package>");
+        return sb.toString();
+    }
+
+    // 辅助流读取 (保持不变)
+    private byte[] readStream(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int len;
+        while ((len = in.read(buffer)) > 0) out.write(buffer, 0, len);
+        return out.toByteArray();
     }
 }

@@ -109,3 +109,12 @@ export function getMetadataTypes(orgId) {
     params: { orgId }
   })
 }
+
+// 【新增】预览部署包 (生成ZIP但不部署)
+export function previewDeploymentPackage(id) {
+  return request({
+    url: '/salesforce/deployment/preview/' + id,
+    method: 'get',
+    timeout: 60000 // 预览需要去Salesforce拉包，设置长超时
+  })
+}

@@ -40,55 +40,43 @@ public class SfMetadataController {
      * 获取元数据列表 (支持分页)
      * URL: /system/sf/meta/list?orgId=1&type=ApexClass&pageNum=1&pageSize=10
      */
+    /**
+     * 【优化】获取元数据列表
+     * 这里的 listMetadata 现在会优先读取缓存，速度极快
+     */
     @GetMapping("/list")
     public TableDataInfo list(@RequestParam("orgId") Long orgId,
                               @RequestParam("type") String type,
                               @RequestParam(value = "pageNum", defaultValue = "1") Integer pageNum,
                               @RequestParam(value = "pageSize", defaultValue = "10") Integer pageSize,
-                              @RequestParam(value = "keyword", required = false) String keyword) { // 支持搜索
+                              @RequestParam(value = "keyword", required = false) String keyword) {
         try {
-            // 1. 调用 Service 获取【全部】数据
-            // (注意：因为SF API限制，我们必须先全拿下来，再在内存里分)
+            // 调用 Service (优先读缓存)
             List<FileProperties> allList = sfMetadataService.listMetadata(orgId, type);
 
-            // 2. 内存过滤 (如果有搜索关键词)
+            // 内存搜索
             if (StringUtils.isNotEmpty(keyword)) {
                 allList = allList.stream()
                         .filter(item -> item.getFullName().toLowerCase().contains(keyword.toLowerCase()))
                         .collect(Collectors.toList());
             }
 
-            // 3. 内存分页计算 (核心逻辑)
+            // 内存分页
             int total = allList.size();
-            // 计算开始索引: (第几页 - 1) * 每页几条
             int fromIndex = (pageNum - 1) * pageSize;
-            // 计算结束索引: 也就是取 min(理论结束位置, 总长度)，防止越界
             int toIndex = Math.min(fromIndex + pageSize, total);
+            List<FileProperties> pageList = (fromIndex > total) ? new ArrayList<>() : allList.subList(fromIndex, toIndex);
 
-            List<FileProperties> pageList;
-            if (fromIndex > total) {
-                // 如果请求的页码超出了范围，返回空
-                pageList = new ArrayList<>();
-            } else {
-                // 截取子列表
-                pageList = allList.subList(fromIndex, toIndex);
-            }
-
-            // 4. 封装成若依标准表格对象返回
             TableDataInfo rspData = new TableDataInfo();
             rspData.setCode(0);
-            rspData.setMsg("查询成功");
-            rspData.setRows(pageList); // 只返回这一页的数据
-            rspData.setTotal(total);   // 告诉前端总共有多少条
+            rspData.setRows(pageList);
+            rspData.setTotal(total);
             return rspData;
-
         } catch (Exception e) {
-            e.printStackTrace();
-            // 失败时返回空表格
-            TableDataInfo rspData = new TableDataInfo();
-            rspData.setCode(500);
-            rspData.setMsg("查询失败：" + e.getMessage());
-            return rspData;
+            TableDataInfo rsp = new TableDataInfo();
+            rsp.setCode(500);
+            rsp.setMsg(e.getMessage());
+            return rsp;
         }
     }
 
@@ -136,6 +124,20 @@ public class SfMetadataController {
             return AjaxResult.success(types);
         } catch (Exception e) {
             return AjaxResult.error("获取类型失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 【新增】强制从 Salesforce 同步 (刷新缓存)
+     */
+    @GetMapping("/sync")
+    public AjaxResult sync(@RequestParam("orgId") Long orgId, @RequestParam("type") String type) {
+        try {
+            // 强制刷新并返回新列表的条数
+            List<FileProperties> list = sfMetadataService.refreshMetadataCache(orgId, type);
+            return AjaxResult.success("同步成功，共获取 " + list.size() + " 条数据");
+        } catch (Exception e) {
+            return AjaxResult.error("同步失败: " + e.getMessage());
         }
     }
 }

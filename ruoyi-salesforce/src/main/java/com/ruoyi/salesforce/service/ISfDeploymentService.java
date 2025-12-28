@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import com.ruoyi.salesforce.domain.SfDeployment;
 import com.ruoyi.salesforce.domain.SfDeploymentItem;
 import java.util.List;
+import java.util.Map;
 
 public interface ISfDeploymentService extends IService<SfDeployment> {
     // 查询列表
@@ -52,4 +53,7 @@ public interface ISfDeploymentService extends IService<SfDeployment> {
      * 异步计算部署包内所有明细的状态
      */
     void checkDiffStatus(Long deploymentId);
+
+    // 【新增】预览部署包
+    Map<String, Object> previewPackage(Long deploymentId);
 }

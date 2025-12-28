@@ -10,16 +10,16 @@ import com.ruoyi.salesforce.domain.vo.SfDiffVo;
 import com.sforce.soap.metadata.*;
 import com.sforce.ws.ConnectionException;
 import com.sforce.ws.ConnectorConfig;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -27,30 +27,31 @@ import com.alibaba.fastjson2.JSON;
 
 @Service
 public class SfMetadataServiceImpl implements ISfMetadataService {
-
     @Autowired
     private ISfOrgService sfOrgService;
+
+    // 【新增】简单的内存缓存: Key = orgId_metadataType, Value = List<FileProperties>
+    // 注意：在集群环境下建议使用 Redis，这里为了简化架构直接用内存 Map
+    private static final Map<String, List<FileProperties>> METADATA_CACHE = new ConcurrentHashMap<>();
 
     /**
      * 获取 Metadata API 连接
      */
     @Override
     public MetadataConnection getMetadataConnection(Long orgId) throws ConnectionException {
-        // 1. 从数据库查 Token
         SfOrg org = sfOrgService.selectSfOrgById(orgId);
         if(org == null || org.getAccessToken() == null) {
             throw new ConnectionException("环境未配置或未授权，请先去绑定Org！");
         }
-
-        // 2. 配置连接信息
         ConnectorConfig config = new ConnectorConfig();
-        config.setSessionId(org.getAccessToken()); // 关键：填入 Access Token
-
-        // 3. 设置 API 端点
-        // 注意：instanceUrl 是 https://xxx.my.salesforce.com
-        // Metadata API 的地址必须手动拼接为: /services/Soap/m/{version}
+        config.setSessionId(org.getAccessToken());
         String metadataEndpoint = org.getInstanceUrl() + "/services/Soap/m/58.0";
         config.setServiceEndpoint(metadataEndpoint);
+
+        // 【核心优化】设置更长的超时时间 (单位：毫秒)
+        // 连接超时 30秒，读取超时 2分钟 (应对 CustomField 这种大量数据)
+        config.setConnectionTimeout(30000);
+        config.setReadTimeout(120000);
 
         return new MetadataConnection(config);
     }
@@ -192,33 +193,45 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         return "LightningComponentBundle".equals(type) || "AuraDefinitionBundle".equals(type);
     }
 
+    /**
+     * 获取元数据列表（优先读缓存）
+     */
     @Override
     public List<FileProperties> listMetadata(Long orgId, String type) throws Exception {
-        MetadataConnection connection = getMetadataConnection(orgId);
+        String cacheKey = orgId + "_" + type;
 
+        // 1. 如果缓存中有，直接返回（毫秒级响应）
+        if (METADATA_CACHE.containsKey(cacheKey)) {
+            return METADATA_CACHE.get(cacheKey);
+        }
+
+        // 2. 如果缓存没有，执行同步
+        return refreshMetadataCache(orgId, type);
+    }
+    /**
+     * 【新增】强制从 Salesforce 同步元数据并更新缓存
+     */
+    @Override
+    public List<FileProperties> refreshMetadataCache(Long orgId, String type) throws Exception {
+        MetadataConnection connection = getMetadataConnection(orgId);
         ListMetadataQuery query = new ListMetadataQuery();
         query.setType(type);
-        // query.setFolder(null); // 大部分 Metadata 不需要 folder，EmailTemplate 等需要，暂时先留空
 
-        // 调用 API
-        // Salesforce 限制一次 listMetadata 只能查 3 个 type，我们这里只查 1 个
-        FileProperties[] results = connection.listMetadata(
-                new ListMetadataQuery[]{query},
-                58.0
-        );
+        // 调用 Salesforce API (这是最耗时的一步)
+        FileProperties[] results = connection.listMetadata(new ListMetadataQuery[]{query}, 58.0);
 
         List<FileProperties> list = new ArrayList<>();
         if(results != null) {
-            for(FileProperties file : results) {
-                // 过滤掉未管理的包或者空名字的（可选）
-                if(file.getFullName() != null) {
-                    list.add(file);
-                }
+            for(FileProperties f : results) {
+                if(f.getFullName() != null) list.add(f);
             }
         }
-
-        // 建议按最后修改时间倒序排序，方便用户看到最近改的文件
+        // 排序
         list.sort((a, b) -> b.getLastModifiedDate().compareTo(a.getLastModifiedDate()));
+
+        // 更新缓存
+        String cacheKey = orgId + "_" + type;
+        METADATA_CACHE.put(cacheKey, list);
 
         return list;
     }
@@ -318,23 +331,29 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     }
 
     /**
-     * 【新增】动态获取 Salesforce 支持的所有元数据类型
+     * 【核心修复】动态获取 Salesforce 支持的所有元数据类型
+     * 修改点：遍历 ChildXmlNames，将 CustomField, ValidationRule 等加入列表
      */
     @Override
     public List<String> getAllMetadataTypes(Long orgId) throws Exception {
         MetadataConnection conn = getMetadataConnection(orgId);
-        // 调用 describeMetadata 获取所有类型
         DescribeMetadataResult result = conn.describeMetadata(58.0);
 
-        List<String> types = new ArrayList<>();
+        Set<String> typeSet = new HashSet<>(); // 使用 Set 去重
         if (result != null && result.getMetadataObjects() != null) {
             for (DescribeMetadataObject obj : result.getMetadataObjects()) {
-                types.add(obj.getXmlName());
-                // 如果需要支持子类型(如 CustomField)，可以在这里处理 ChildXmlNames
-                // 但通常 listMetadata 传父类型(CustomObject)即可，或者直接传 CustomField
-                // 这里为了列表完整性，我们只加顶级类型。前端如果需要查字段，通常是选 CustomField
+                typeSet.add(obj.getXmlName());
+
+                // 【新增】添加子类型 (如 CustomField, ValidationRule, RecordType 等)
+                if (obj.getChildXmlNames() != null) {
+                    for (String childName : obj.getChildXmlNames()) {
+                        typeSet.add(childName);
+                    }
+                }
             }
         }
+
+        List<String> types = new ArrayList<>(typeSet);
         Collections.sort(types);
         return types;
     }
