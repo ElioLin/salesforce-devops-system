@@ -10,48 +10,37 @@ import com.sforce.soap.metadata.MetadataConnection;
 
 public interface ISfMetadataService {
     /**
-     * 测试连接并列出前10个 Apex 类名
-     * @param orgId 数据库中的环境ID
-     * @return 类名列表
+     * 测试连接
      */
     List<String> testConnection(Long orgId) throws Exception;
 
     /**
-     * 拉取指定元数据的内容
-     * @param orgId 数据库Org ID
-     * @param type 元数据类型 (例如 ApexClass, ApexTrigger, CustomObject)
-     * @param memberName 元数据名称 (例如 MyClass)
-     * @return 代码内容字符串
+     * 【核心升级】智能拉取指定元数据的内容（支持LWC、字段等复杂类型）
      */
     String retrieveMetadata(Long orgId, String type, String memberName) throws Exception;
 
     /**
      * 通用查询元数据列表
-     * @param orgId 数据库OrgID
-     * @param type 元数据类型 (ApexClass, ApexTrigger, etc.)
-     * @return 元数据文件信息列表
      */
     List<FileProperties> listMetadata(Long orgId, String type) throws Exception;
 
     /**
      * 比对元数据
-     * @param sourceOrgId 源环境ID
-     * @param targetOrgId 目标环境ID
-     * @param type 元数据类型
-     * @param memberName 元数据名称
-     * @return 比对结果对象
      */
     SfDiffVo compareMetadata(Long sourceOrgId, Long targetOrgId, String type, String memberName) throws Exception;
 
-    // 根据 manifest 拉取 ZIP 包
+    /**
+     * 根据 manifest 拉取 ZIP 包
+     */
     byte[] retrieveZipByManifest(Long orgId, com.sforce.soap.metadata.Package manifest) throws Exception;
 
-    // 部署 ZIP 包
+    /**
+     * 部署 ZIP 包
+     */
     AsyncResult deployZip(Long orgId, byte[] zipData, DeployOptions options) throws Exception;
 
-
     /**
-     * 获取 Metadata API 连接 (这是之前你在 Impl 里写了但可能没在接口暴露的方法)
+     * 获取 Metadata API 连接
      */
     MetadataConnection getMetadataConnection(Long orgId) throws Exception;
 
@@ -62,9 +51,11 @@ public interface ISfMetadataService {
 
     /**
      * 快速部署 (Quick Deploy)
-     * @param orgId 目标环境ID
-     * @param validationId 之前验证成功的 Process ID
-     * @return 新的 Process ID
      */
     String deployRecentValidation(Long orgId, String validationId) throws Exception;
+
+    /**
+     * 【新增】获取 Org 支持的所有元数据类型
+     */
+    List<String> getAllMetadataTypes(Long orgId) throws Exception;
 }

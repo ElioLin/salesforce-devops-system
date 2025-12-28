@@ -100,3 +100,12 @@ export function checkDiffStatus(deploymentId) {
       method: 'post'
     })
 }
+
+// 【新增】获取所有支持的元数据类型
+export function getMetadataTypes(orgId) {
+  return request({
+    url: '/system/sf/meta/types',
+    method: 'get',
+    params: { orgId }
+  })
+}

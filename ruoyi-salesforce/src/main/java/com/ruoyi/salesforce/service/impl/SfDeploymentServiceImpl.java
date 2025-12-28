@@ -9,22 +9,24 @@ import com.ruoyi.salesforce.mapper.SfDeploymentItemMapper;
 import com.ruoyi.salesforce.mapper.SfDeploymentMapper;
 import com.ruoyi.salesforce.service.ISfDeploymentService;
 import com.ruoyi.salesforce.service.ISfMetadataService;
-import com.ruoyi.salesforce.utils.PackageXmlBuilder;
 import com.sforce.soap.metadata.*;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
-import org.apache.commons.codec.digest.DigestUtils;
-import java.io.ByteArrayInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
-import java.util.concurrent.CompletableFuture;
+
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONArray;
 
 @Service
 public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfDeployment> implements ISfDeploymentService {
@@ -40,7 +42,8 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     @Autowired
     private ISfMetadataService sfMetadataService;
 
-    // --- 基础 CRUD 方法 (保持不变) ---
+    // ================== 基础 CRUD (保持不变) ==================
+
     @Override
     public List<SfDeployment> selectSfDeploymentList(SfDeployment sfDeployment) {
         return this.baseMapper.selectSfDeploymentList(sfDeployment);
@@ -51,8 +54,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         SfDeployment deployment = this.baseMapper.selectSfDeploymentById(id);
         if(deployment != null) {
             List<SfDeploymentItem> items = sfDeploymentItemMapper.selectList(
-                    new LambdaQueryWrapper<SfDeploymentItem>()
-                            .eq(SfDeploymentItem::getDeploymentId, id)
+                    new LambdaQueryWrapper<SfDeploymentItem>().eq(SfDeploymentItem::getDeploymentId, id)
             );
             deployment.setItemList(items);
         }
@@ -73,6 +75,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             item.setDeploymentId(deploymentId);
             item.setCreateTime(new Date());
             item.setAction("Add");
+            item.setDiffStatus("Unknown"); // 默认状态
             sfDeploymentItemMapper.insert(item);
         }
     }
@@ -88,8 +91,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     public int deleteSfDeploymentByIds(Long[] ids) {
         for(Long id : ids) {
             sfDeploymentItemMapper.delete(
-                    new LambdaQueryWrapper<SfDeploymentItem>()
-                            .eq(SfDeploymentItem::getDeploymentId, id)
+                    new LambdaQueryWrapper<SfDeploymentItem>().eq(SfDeploymentItem::getDeploymentId, id)
             );
         }
         return sfDeploymentMapper.deleteBatchIds(Arrays.asList(ids));
@@ -103,12 +105,11 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     @Override
     public List<SfDeploymentItem> selectItems(Long deploymentId) {
         return sfDeploymentItemMapper.selectList(
-                new LambdaQueryWrapper<SfDeploymentItem>()
-                        .eq(SfDeploymentItem::getDeploymentId, deploymentId)
+                new LambdaQueryWrapper<SfDeploymentItem>().eq(SfDeploymentItem::getDeploymentId, deploymentId)
         );
     }
 
-    // ================== 异步部署逻辑 ==================
+    // ================== 部署核心逻辑 ==================
 
     @Override
     public void deployPackage(Long deploymentId, boolean checkOnly) {
@@ -122,44 +123,37 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         List<SfDeploymentItem> items = selectItems(deploymentId);
         if(items.isEmpty()) throw new ServiceException("部署包为空，请先添加元数据");
 
-        // 1. 更新状态为 Processing
+        // 更新状态
         deployment.setStatus("Processing");
         deployment.setErrorMsg("");
         sfDeploymentMapper.updateById(deployment);
 
-        // 2. 启动异步线程
+        // 异步执行
         CompletableFuture.runAsync(() -> {
             try {
                 processAsyncDeployment(deployment, items, checkOnly);
             } catch(Exception e) {
                 log.error("异步部署任务异常", e);
-                handleDeploymentError(deploymentId, "系统内部错误: " + e.getMessage());
+                handleDeploymentError(deployment.getId(), "系统内部错误: " + e.getMessage());
             }
         });
     }
 
     private void processAsyncDeployment(SfDeployment deployment, List<SfDeploymentItem> items, boolean checkOnly) {
         try {
-            // 阶段一：提取代码
+            // 1. 构建清单对象
+            com.sforce.soap.metadata.Package manifest = generateManifestObject(items);
+
+            // 2. 从源环境拉取 ZIP
             log.info("开始提取代码，Org: {}", deployment.getSourceOrgId());
-            MetadataConnection sourceConn = sfMetadataService.getMetadataConnection(deployment.getSourceOrgId());
+            byte[] zipBytes = sfMetadataService.retrieveZipByManifest(deployment.getSourceOrgId(), manifest);
 
-            RetrieveRequest retrieveRequest = new RetrieveRequest();
-            retrieveRequest.setApiVersion(58.0);
-            retrieveRequest.setUnpackaged(buildManifest(items)); // 使用内部构建方法
-
-            AsyncResult retrieveAsync = sourceConn.retrieve(retrieveRequest);
-            RetrieveResult retrieveResult = waitForRetrieveCompletion(sourceConn, retrieveAsync.getId());
-
-            if(retrieveResult.getStatus() != RetrieveStatus.Succeeded) {
-                handleDeploymentError(deployment.getId(), "提取代码失败: " + retrieveResult.getErrorMessage());
-                return;
+            if(zipBytes == null || zipBytes.length == 0) {
+                throw new RuntimeException("提取代码失败：返回的ZIP包为空");
             }
-
-            byte[] zipBytes = retrieveResult.getZipFile();
             log.info("提取成功，ZIP大小: {} bytes", zipBytes.length);
 
-            // 阶段二：部署代码
+            // 3. 部署到目标环境
             log.info("开始部署，Org: {}", deployment.getTargetOrgId());
             MetadataConnection targetConn = sfMetadataService.getMetadataConnection(deployment.getTargetOrgId());
 
@@ -168,6 +162,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             deployOptions.setRollbackOnError(true);
             deployOptions.setCheckOnly(checkOnly);
 
+            // 测试级别配置
             if("RunSpecifiedTests".equals(deployment.getTestLevel())) {
                 deployOptions.setTestLevel(TestLevel.RunSpecifiedTests);
                 if(deployment.getSpecifiedTests() != null) {
@@ -181,7 +176,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
             AsyncResult deployAsync = targetConn.deploy(zipBytes, deployOptions);
 
-            // 阶段三：更新状态为 Validating/Deploying 并记录 AsyncId
+            // 4. 更新数据库状态
             SfDeployment update = new SfDeployment();
             update.setId(deployment.getId());
             update.setStatus(checkOnly ? "Validating" : "Deploying");
@@ -196,19 +191,15 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         }
     }
 
-    // ================== 快速部署逻辑 ==================
-
     @Override
     public void quickDeploy(Long deploymentId) {
         SfDeployment deployment = selectSfDeploymentById(deploymentId);
         if(deployment == null) throw new ServiceException("部署包不存在");
 
-        // 必须是验证成功 (Succeeded) 且有 lastAsyncId
         if(!"Succeeded".equals(deployment.getStatus()) || deployment.getLastAsyncId() == null) {
             throw new ServiceException("只有【验证成功】的部署包才能使用快速部署");
         }
 
-        // 更新状态
         deployment.setStatus("Deploying");
         deployment.setErrorMsg("");
         sfDeploymentMapper.updateById(deployment);
@@ -216,20 +207,14 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         CompletableFuture.runAsync(() -> {
             try {
                 log.info("开始快速部署, Org: {}, ValidationId: {}", deployment.getTargetOrgId(), deployment.getLastAsyncId());
-
-                // 调用 Service 获取 String ID
                 String newProcessId = sfMetadataService.deployRecentValidation(
                         deployment.getTargetOrgId(),
                         deployment.getLastAsyncId()
                 );
-
                 SfDeployment update = new SfDeployment();
                 update.setId(deployment.getId());
                 update.setLastAsyncId(newProcessId);
                 sfDeploymentMapper.updateById(update);
-
-                log.info("快速部署已提交，New AsyncId: {}", newProcessId);
-
             } catch(Exception e) {
                 log.error("快速部署失败", e);
                 handleDeploymentError(deployment.getId(), "快速部署异常: " + e.getMessage());
@@ -237,92 +222,108 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         });
     }
 
-    // ================== 状态检查 & 回写 (关键修复) ==================
-
     @Override
     public String checkDeployStatus(Long targetOrgId, String processId) throws Exception {
-        // 1. 调用 Salesforce 接口查询
+        // 1. 获取 JSON 状态
         String statusJson = sfMetadataService.checkDeployStatus(targetOrgId, processId);
 
-        // 2. 【核心修复】解析状态并同步到数据库
-        // 简单字符串检查，避免依赖复杂 JSON 库
+        // 2. 解析 JSON
+        JSONObject result = JSONObject.parseObject(statusJson);
+        String status = result.getString("status");
+
         String finalStatus = null;
-        if(statusJson.contains("\"status\":\"Succeeded\"")) {
+        String errorMessage = null;
+
+        if("Succeeded".equals(status)) {
             finalStatus = "Succeeded";
-        } else if(statusJson.contains("\"status\":\"Failed\"") || statusJson.contains("\"status\":\"Canceled\"")) {
+        } else if("Failed".equals(status) || "Canceled".equals(status)) {
             finalStatus = "Failed";
-        }
 
-        // 如果是最终状态，更新数据库
-        if(finalStatus != null) {
-            // 根据 processId 找到对应的部署包
-            SfDeployment deploy = sfDeploymentMapper.selectOne(
-                    new LambdaQueryWrapper<SfDeployment>().eq(SfDeployment::getLastAsyncId, processId)
-            );
+            // --- 提取错误信息逻辑 ---
+            // 优先看顶层 errorMessage
+            errorMessage = result.getString("errorMessage");
 
-            // 只有当数据库状态还不是最终状态时才更新，避免重复更新
-            if(deploy != null && !finalStatus.equals(deploy.getStatus())) {
-                deploy.setStatus(finalStatus);
-                sfDeploymentMapper.updateById(deploy);
-                log.info("已同步部署包状态: ID={}, Status={}", deploy.getId(), finalStatus);
+            // 如果没顶层错误，深入 details 查找
+            if(errorMessage == null) {
+                JSONObject details = result.getJSONObject("details");
+                if(details != null) {
+                    // 1. 查找组件部署错误 (componentFailures)
+                    JSONArray failures = details.getJSONArray("componentFailures");
+                    if(failures != null && !failures.isEmpty()) {
+                        StringBuilder sb = new StringBuilder();
+                        // 最多只取前 5 条错误，防止数据库字段溢出
+                        int count = Math.min(failures.size(), 5);
+                        for(int i = 0; i < count; i++) {
+                            JSONObject fail = failures.getJSONObject(i);
+                            String fileName = fail.getString("fileName");
+                            String problem = fail.getString("problem");
+                            sb.append("[").append(fileName).append("] ").append(problem).append("\n");
+                        }
+                        if(failures.size() > 5) sb.append("... 以及更多错误");
+                        errorMessage = sb.toString();
+                    }
+
+                    // 2. 如果没有组件错误，查找测试运行错误 (runTestResult)
+                    if(errorMessage == null && details.containsKey("runTestResult")) {
+                        JSONObject testResult = details.getJSONObject("runTestResult");
+                        JSONArray testFailures = testResult.getJSONArray("failures");
+                        if(testFailures != null && !testFailures.isEmpty()) {
+                            StringBuilder sb = new StringBuilder("测试运行失败:\n");
+                            int count = Math.min(testFailures.size(), 5);
+                            for(int i = 0; i < count; i++) {
+                                JSONObject fail = testFailures.getJSONObject(i);
+                                String method = fail.getString("name") + "." + fail.getString("methodName");
+                                String msg = fail.getString("message");
+                                sb.append("[").append(method).append("] ").append(msg).append("\n");
+                            }
+                            errorMessage = sb.toString();
+                        }
+                    }
+                }
+            }
+            // 如果还是空的，给个默认提示
+            if(errorMessage == null) {
+                errorMessage = "Salesforce 部署失败，请前往 Salesforce 部署状态页面查看详情。";
             }
         }
 
+        // 3. 更新数据库
+        if(finalStatus != null) {
+            SfDeployment deploy = sfDeploymentMapper.selectOne(
+                    new LambdaQueryWrapper<SfDeployment>().eq(SfDeployment::getLastAsyncId, processId)
+            );
+            if(deploy != null) {
+                // 只有状态变化，或者这是最后一次确认，才更新
+                if(!finalStatus.equals(deploy.getStatus()) || errorMessage != null) {
+                    deploy.setStatus(finalStatus);
+                    if(errorMessage != null) {
+                        // 截断防止溢出数据库字段 (假设 varchar(2000))
+                        if(errorMessage.length() > 1900) {
+                            errorMessage = errorMessage.substring(0, 1900) + "...(错误信息过长)";
+                        }
+                        deploy.setErrorMsg(errorMessage);
+                    }
+                    sfDeploymentMapper.updateById(deploy);
+                }
+            }
+        }
         return statusJson;
     }
 
-    // --- 辅助方法 ---
-    private com.sforce.soap.metadata.Package buildManifest(List<SfDeploymentItem> items) {
-        com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
-        Map<String, List<String>> typesMap = new HashMap<>();
-        for(SfDeploymentItem item : items) {
-            typesMap.computeIfAbsent(item.getMetadataType(), k -> new ArrayList<>()).add(item.getMemberName());
-        }
-        List<PackageTypeMembers> typeMembersList = new ArrayList<>();
-        for(Map.Entry<String, List<String>> entry : typesMap.entrySet()) {
-            PackageTypeMembers typeMembers = new PackageTypeMembers();
-            typeMembers.setName(entry.getKey());
-            typeMembers.setMembers(entry.getValue().toArray(new String[0]));
-            typeMembersList.add(typeMembers);
-        }
-        manifest.setTypes(typeMembersList.toArray(new PackageTypeMembers[0]));
-        manifest.setVersion("58.0");
-        return manifest;
-    }
-
-    private RetrieveResult waitForRetrieveCompletion(MetadataConnection conn, String asyncId) throws Exception {
-        int maxRetries = 60;
-        for(int i = 0; i < maxRetries; i++) {
-            RetrieveResult result = conn.checkRetrieveStatus(asyncId, true);
-            if(result.isDone()) return result;
-            Thread.sleep(2000);
-        }
-        throw new RuntimeException("源环境提取代码超时");
-    }
-
-    private void handleDeploymentError(Long id, String errorMsg) {
-        SfDeployment update = new SfDeployment();
-        update.setId(id);
-        update.setStatus("Failed");
-        if(errorMsg != null && errorMsg.length() > 500) {
-            errorMsg = errorMsg.substring(0, 500) + "...";
-        }
-        update.setErrorMsg(errorMsg);
-        sfDeploymentMapper.updateById(update);
-    }
+    // ================== 差异比对逻辑 (新增) ==================
 
     @Override
     public void checkDiffStatus(Long deploymentId) {
         SfDeployment deployment = selectSfDeploymentById(deploymentId);
-        if (deployment == null || deployment.getTargetOrgId() == null) {
+        if(deployment == null || deployment.getTargetOrgId() == null) {
             throw new RuntimeException("请先设置目标环境");
         }
 
         List<SfDeploymentItem> items = selectItems(deploymentId);
-        if (items.isEmpty()) return;
+        if(items.isEmpty()) return;
 
-        // 1. 状态置为 Comparing
-        for (SfDeploymentItem item : items) {
+        // 1. 置为 Comparing
+        for(SfDeploymentItem item : items) {
             item.setDiffStatus("Comparing");
             sfDeploymentItemMapper.updateById(item);
         }
@@ -331,9 +332,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         CompletableFuture.runAsync(() -> {
             try {
                 doCalculateDiff(deployment, items);
-            } catch (Exception e) {
+            } catch(Exception e) {
                 log.error("比对失败", e);
-                for (SfDeploymentItem item : items) {
+                for(SfDeploymentItem item : items) {
                     item.setDiffStatus("Unknown");
                     sfDeploymentItemMapper.updateById(item);
                 }
@@ -357,21 +358,16 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         Map<String, String> sourceHashMap = sourceFuture.get();
         Map<String, String> targetHashMap = targetFuture.get();
 
-        for (SfDeploymentItem item : items) {
-            // 【关键修复】使用更智能的查找逻辑，不仅仅靠文件名匹配
+        for(SfDeploymentItem item : items) {
+            // 智能查找 Hash
             String sourceHash = findHash(sourceHashMap, item.getMemberName());
             String targetHash = findHash(targetHashMap, item.getMemberName());
 
             String status;
-            if (sourceHash == null) {
-                status = "Invalid"; // 源环境未找到文件
-            } else if (targetHash == null) {
-                status = "New"; // 目标环境未找到文件
-            } else if (sourceHash.equals(targetHash)) {
-                status = "Same"; // 哈希一致
-            } else {
-                status = "Changed"; // 哈希不同
-            }
+            if(sourceHash == null) status = "Invalid"; // 源没有
+            else if(targetHash == null) status = "New"; // 目标没有
+            else if(sourceHash.equals(targetHash)) status = "Same";
+            else status = "Changed";
 
             item.setDiffStatus(status);
             item.setLastCheckTime(new Date());
@@ -380,91 +376,93 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     }
 
     /**
-     * 【关键修复】更智能的哈希查找
-     * 解决问题：ZIP里的文件名是 MyClass.cls，但 memberName 是 MyClass，导致找不到。
-     * 同时优先匹配代码文件，忽略 -meta.xml（除非只有 meta.xml）
+     * 智能匹配文件名与元数据名
+     * memberName: MyClass
+     * map keys: classes/MyClass.cls, classes/MyClass.cls-meta.xml
      */
     private String findHash(Map<String, String> map, String memberName) {
-        String bestMatchHash = null;
-
-        // 1. 精确匹配 (虽然不太可能，因为zip里都有后缀)
-        if (map.containsKey(memberName)) return map.get(memberName);
-
-        // 2. 前缀匹配
-        // 遍历 map 寻找文件名以 "memberName." 开头的 entry
-        // 例如 memberName="MyClass", 匹配 "MyClass.cls", "MyClass.trigger", "MyClass.cls-meta.xml"
-        for (Map.Entry<String, String> entry : map.entrySet()) {
+        String bestMatch = null;
+        for(Map.Entry<String, String> entry : map.entrySet()) {
             String fileName = entry.getKey();
-
-            // 检查文件名是否匹配 (注意：要确保是全名匹配，防止 MyClass 匹配到 MyClassTest)
-            // 逻辑：文件名必须以 memberName + "." 开头
-            if (fileName.startsWith(memberName + ".")) {
-                // 如果还没有匹配项，先存下来
-                if (bestMatchHash == null) {
-                    bestMatchHash = entry.getValue();
-                }
-
-                // 优化：如果有多个文件 (如 .cls 和 .cls-meta.xml)，优先返回非 meta 文件
-                // 因为通常我们关心代码内容的变更
-                if (!fileName.endsWith("-meta.xml")) {
-                    return entry.getValue(); // 找到代码文件，直接返回
+            // 匹配逻辑：文件名包含 memberName
+            // 更严谨的逻辑：fileName.startsWith(memberName + ".")
+            if(fileName.contains(memberName)) {
+                if(bestMatch == null) bestMatch = entry.getValue();
+                // 优先取非 meta 文件
+                if(!fileName.endsWith("-meta.xml")) {
+                    return entry.getValue();
                 }
             }
         }
-        return bestMatchHash;
+        return bestMatch;
     }
 
     private Map<String, String> retrieveAndHash(Long orgId, com.sforce.soap.metadata.Package manifest) {
         Map<String, String> resultMap = new HashMap<>();
         try {
-            // 复用 MetadataService
             byte[] zipData = sfMetadataService.retrieveZipByManifest(orgId, manifest);
-            if (zipData == null) return resultMap;
+            if(zipData == null) return resultMap;
 
-            try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
+            try(ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
                 ZipEntry entry;
-                while ((entry = zis.getNextEntry()) != null) {
-                    if (entry.isDirectory() || entry.getName().endsWith("package.xml")) continue;
+                while((entry = zis.getNextEntry()) != null) {
+                    if(entry.isDirectory() || entry.getName().endsWith("package.xml")) continue;
 
-                    // 读取内容
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[1024];
                     int len;
-                    while ((len = zis.read(buffer)) > 0) {
-                        bos.write(buffer, 0, len);
-                    }
+                    while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
+
                     String md5 = DigestUtils.md5Hex(bos.toByteArray());
-
-                    // 【关键修复】处理文件名
-                    // ZIP 路径可能是 "unpackaged/classes/MyClass.cls" 或 "classes/MyClass.cls"
-                    String fullPath = entry.getName();
-                    // 只取最后的文件名部分
-                    String simpleName = fullPath.substring(fullPath.lastIndexOf("/") + 1);
-
+                    // 存入 Map, Key 为文件名 (去掉目录前缀)
+                    String name = entry.getName();
+                    String simpleName = name.substring(name.lastIndexOf("/") + 1);
                     resultMap.put(simpleName, md5);
                 }
             }
-        } catch (Exception e) {
-            log.warn("Org {} 拉取比对文件失败 (可能是目标环境不存在这些文件): {}", orgId, e.getMessage());
+        } catch(Exception e) {
+            log.warn("Org {} 拉取比对文件失败: {}", orgId, e.getMessage());
         }
         return resultMap;
     }
 
+    // ================== 辅助方法 ==================
+
+    /**
+     * 【重要】构建 Salesforce Package 对象
+     * 支持混合部署：将不同类型的元数据分类放入 PackageTypeMembers
+     */
     private com.sforce.soap.metadata.Package generateManifestObject(List<SfDeploymentItem> items) {
         com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
         Map<String, List<String>> typesMap = new HashMap<>();
-        for (SfDeploymentItem item : items) {
+
+        // 1. 分组
+        for(SfDeploymentItem item : items) {
             typesMap.computeIfAbsent(item.getMetadataType(), k -> new ArrayList<>()).add(item.getMemberName());
         }
+
+        // 2. 构建数组
         List<PackageTypeMembers> typeMembersList = new ArrayList<>();
-        for (Map.Entry<String, List<String>> entry : typesMap.entrySet()) {
+        for(Map.Entry<String, List<String>> entry : typesMap.entrySet()) {
             PackageTypeMembers typeMembers = new PackageTypeMembers();
             typeMembers.setName(entry.getKey());
             typeMembers.setMembers(entry.getValue().toArray(new String[0]));
             typeMembersList.add(typeMembers);
         }
+
         manifest.setTypes(typeMembersList.toArray(new PackageTypeMembers[0]));
         manifest.setVersion("58.0");
         return manifest;
+    }
+
+    private void handleDeploymentError(Long id, String errorMsg) {
+        SfDeployment update = new SfDeployment();
+        update.setId(id);
+        update.setStatus("Failed");
+        if(errorMsg != null && errorMsg.length() > 500) {
+            errorMsg = errorMsg.substring(0, 500) + "...";
+        }
+        update.setErrorMsg(errorMsg);
+        sfDeploymentMapper.updateById(update);
     }
 }

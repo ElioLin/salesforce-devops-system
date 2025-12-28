@@ -14,9 +14,8 @@
 
       <el-col :span="5">
         <el-select v-model="queryParams.type" placeholder="请选择元数据类型" @change="handleTypeChange" style="width: 100%"
-          filterable>
-          <el-option v-for="dict in dict.type.sys_salesforce_metadata_type" :key="dict.value"
-            :label="dict.label + ' (' + dict.value + ')'" :value="dict.value" />
+          filterable :loading="typesLoading">
+          <el-option v-for="type in metadataTypeOptions" :key="type" :label="type" :value="type" />
         </el-select>
       </el-col>
 
@@ -72,25 +71,28 @@
 
 <script>
 import request from '@/utils/request';
+import { getMetadataTypes } from "@/api/salesforce/deployment"; // 引入获取类型的API
 
 export default {
   name: "MetadataBrowser",
-  dicts: ['sys_salesforce_metadata_type'],
+  dicts: ['sys_salesforce_metadata_type'], // 保留这个字典以防万一，但主要用动态获取的
   data() {
     return {
       visible: false,
       loading: false,
+      typesLoading: false, // 类型加载中
       existMap: new Map(),
       list: [],
       total: 0,
       orgOptions: [],
+      metadataTypeOptions: [], // 动态获取的类型列表
       currentOrgId: null,
       targetOrgId: null,
       queryParams: {
         pageNum: 1,
         pageSize: 10,
         orgId: null,
-        type: 'ApexClass',
+        type: 'ApexClass', // 默认选中
         keyword: ''
       }
     };
@@ -100,7 +102,6 @@ export default {
     open(orgId, targetOrgId, itemList = []) {
       this.currentOrgId = orgId;
       this.queryParams.orgId = orgId;
-      // 接收目标环境ID
       this.targetOrgId = targetOrgId; 
       
       this.visible = true;
@@ -111,6 +112,7 @@ export default {
         });
       }
       this.getOrgList();
+      this.loadMetadataTypes(); // 加载所有类型
       this.handleQuery();
     },
 
@@ -121,6 +123,19 @@ export default {
         params: { pageNum: 1, pageSize: 100 }
       }).then(response => {
         this.orgOptions = response.rows;
+      });
+    },
+
+    /** 加载元数据类型 */
+    loadMetadataTypes() {
+      this.typesLoading = true;
+      getMetadataTypes(this.currentOrgId).then(res => {
+        this.metadataTypeOptions = res.data || [];
+        this.typesLoading = false;
+      }).catch(err => {
+        this.typesLoading = false;
+        // 失败时回退到默认列表
+        this.metadataTypeOptions = ['ApexClass', 'ApexTrigger', 'CustomObject', 'LightningComponentBundle'];
       });
     },
 
@@ -140,22 +155,22 @@ export default {
       if (!this.queryParams.orgId) return;
       this.loading = true;
 
-      // 1. 源环境请求 (带分页)
+      // 1. 源环境请求
       const pSource = request({
         url: '/system/sf/meta/list',
         method: 'get',
         params: this.queryParams
       });
 
-      // 2. 目标环境请求 (拉取全部，用于建立映射)
+      // 2. 目标环境请求
       let pTarget = Promise.resolve({ rows: [] });
       if (this.targetOrgId) {
           const targetParams = { 
               orgId: this.targetOrgId,
               type: this.queryParams.type,
               pageNum: 1,
-              pageSize: 10000, // 【关键修复】拉取足够多的数据，防止分页错位导致误判 New
-              keyword: this.queryParams.keyword // 同样带上关键字过滤，减少数据量
+              pageSize: 10000, 
+              keyword: this.queryParams.keyword 
           };
           pTarget = request({
             url: '/system/sf/meta/list',
@@ -169,24 +184,19 @@ export default {
         const targetList = resTarget.rows || [];
         this.total = resSource.total;
 
-        // 构建目标环境 Map (Name -> LastModifiedDate)
         const targetMap = new Map();
         targetList.forEach(item => {
             targetMap.set(item.fullName, item.lastModifiedDate);
         });
 
-        // 3. 遍历源列表，计算状态
         this.list = sourceList.map(item => {
             let status = '';
             if (this.targetOrgId) {
                 if (!targetMap.has(item.fullName)) {
-                    status = 'New'; // 目标里没有
+                    status = 'New';
                 } else {
                     const sourceDate = new Date(item.lastModifiedDate).getTime();
                     const targetDate = new Date(targetMap.get(item.fullName)).getTime();
-                    
-                    // 只要时间戳不一致，就认为有变化 (Salesforce 部署后时间通常会变)
-                    // 如果需要更宽松，可以判断 Math.abs(diff) > 1000ms
                     if (sourceDate !== targetDate) {
                         status = 'Changed';
                     } else {

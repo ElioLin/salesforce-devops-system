@@ -125,4 +125,17 @@ public class SfMetadataController {
             return AjaxResult.error("比对失败: " + e.getMessage());
         }
     }
+
+    /**
+     * 【新增】获取所有支持的元数据类型
+     */
+    @GetMapping("/types")
+    public AjaxResult getTypes(@RequestParam("orgId") Long orgId) {
+        try {
+            List<String> types = sfMetadataService.getAllMetadataTypes(orgId);
+            return AjaxResult.success(types);
+        } catch (Exception e) {
+            return AjaxResult.error("获取类型失败: " + e.getMessage());
+        }
+    }
 }

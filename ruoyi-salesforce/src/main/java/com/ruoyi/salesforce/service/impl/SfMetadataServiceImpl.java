@@ -13,9 +13,15 @@ import com.sforce.ws.ConnectorConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 import com.alibaba.fastjson2.JSON;
 
@@ -80,45 +86,110 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         return classNames;
     }
 
+    /**
+     * 【核心重构】智能读取元数据内容
+     * 解决 LWC、CustomField 等文件找不到的问题
+     */
     @Override
     public String retrieveMetadata(Long orgId, String type, String memberName) throws Exception {
         MetadataConnection connection = getMetadataConnection(orgId);
 
-        // 1. 构建 Retrieve 请求
+        // 1. 构建请求
         RetrieveRequest retrieveRequest = new RetrieveRequest();
         retrieveRequest.setApiVersion(58.0);
-        retrieveRequest.setSinglePackage(true);
+//        retrieveRequest.setSinglePackage(true); // 单包模式，目录结构更扁平
 
-        // 构建 manifest (package.xml)
         com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
         PackageTypeMembers typeMember = new PackageTypeMembers();
-        typeMember.setName(type); // 例如 ApexClass
-        typeMember.setMembers(new String[]{memberName}); // 例如 MyController
+        typeMember.setName(type);
+        typeMember.setMembers(new String[]{memberName});
         manifest.setTypes(new PackageTypeMembers[]{typeMember});
+        manifest.setVersion("58.0"); // 显式设置版本
 
         retrieveRequest.setUnpackaged(manifest);
 
         // 2. 发起异步调用
         AsyncResult asyncResult = connection.retrieve(retrieveRequest);
-        String processId = asyncResult.getId();
 
-        // 3. 轮询等待结果 (最多等待 30 秒)
-        RetrieveResult result = waitForRetrieve(connection, processId);
+        // 3. 等待结果
+        RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
 
-        if(result.getStatus() == RetrieveStatus.Succeeded) {
-            // 4. 解压并提取代码
-            // 根据类型推断文件后缀 (简单版)
-            String extension = ".cls";
-            if("ApexTrigger".equals(type)) extension = ".trigger";
-            if("ApexPage".equals(type)) extension = ".page";
-            if("CustomObject".equals(type)) extension = ".object";
-            // ... 更多类型可后续补充
-
-            String fileName = memberName + extension;
-            return SfZipUtils.extractFileContent(result.getZipFile(), fileName);
-        } else {
-            throw new Exception("Retrieve failed: " + result.getErrorStatusCode() + " - " + result.getErrorMessage());
+        if (result.getStatus() != RetrieveStatus.Succeeded) {
+            throw new Exception("Retrieve failed: " + result.getErrorMessage());
         }
+
+        // 4. 【智能解析】不再单纯猜后缀，而是遍历 ZIP 包查找匹配文件
+        return smartExtract(result.getZipFile(), type, memberName);
+    }
+
+    /**
+     * 智能解压策略：支持 LWC(多文件)、CustomField(嵌套)、Apex(单文件)
+     */
+    private String smartExtract(byte[] zipData, String type, String memberName) throws Exception {
+        if (zipData == null || zipData.length == 0) return "No content retrieved.";
+
+        StringBuilder contentBuilder = new StringBuilder();
+        boolean found = false;
+
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String entryName = entry.getName();
+
+                // 忽略目录和 package.xml
+                if (entry.isDirectory() || entryName.endsWith("package.xml")) continue;
+
+                boolean isMatch = false;
+
+                // 1. 自定义字段特殊处理: Account.MyField__c -> 位于 objects/Account.object
+                if ("CustomField".equals(type) && memberName.contains(".")) {
+                    String objName = memberName.split("\\.")[0];
+                    if (entryName.endsWith(objName + ".object")) isMatch = true;
+                }
+                // 2. LWC / Aura Bundle: 路径包含组件名 (如 lwc/myComp/myComp.js)
+                else if (isBundleType(type) && entryName.contains(memberName)) {
+                    isMatch = true;
+                }
+                // 3. 通用匹配: 文件名包含元数据名 (如 classes/MyClass.cls)
+                else if (entryName.contains(memberName)) {
+                    isMatch = true;
+                }
+
+                if (isMatch) {
+                    found = true;
+                    // 读取文件内容
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[1024];
+                    int len;
+                    while ((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
+                    String fileContent = new String(bos.toByteArray(), StandardCharsets.UTF_8);
+
+                    // 如果是 Bundle，拼接多个文件展示
+                    if (isBundleType(type)) {
+                        contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n");
+                        contentBuilder.append(fileContent).append("\n\n");
+                    } else {
+                        // 对于单文件，优先返回代码文件，忽略 -meta.xml (除非只有 meta.xml)
+                        if (!entryName.endsWith("-meta.xml")) {
+                            return fileContent;
+                        }
+                        // 如果暂只找到 meta.xml，先缓存，万一没别的代码文件就返回它
+                        if (contentBuilder.length() == 0) {
+                            contentBuilder.append(fileContent);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!found) {
+            return "Error: File not found in retrieved package. (Type: " + type + ", Name: " + memberName + ")";
+        }
+        return contentBuilder.toString();
+    }
+
+    private boolean isBundleType(String type) {
+        return "LightningComponentBundle".equals(type) || "AuraDefinitionBundle".equals(type);
     }
 
     @Override
@@ -191,7 +262,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         RetrieveRequest request = new RetrieveRequest();
         request.setApiVersion(58.0);
         request.setUnpackaged(manifest);
-        request.setSinglePackage(true);
+//        request.setSinglePackage(true);
 
         AsyncResult asyncResult = connection.retrieve(request);
 
@@ -244,5 +315,27 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         MetadataConnection conn = getMetadataConnection(orgId);
         // 调用 Salesforce 原生快速部署接口
         return conn.deployRecentValidation(validationId);
+    }
+
+    /**
+     * 【新增】动态获取 Salesforce 支持的所有元数据类型
+     */
+    @Override
+    public List<String> getAllMetadataTypes(Long orgId) throws Exception {
+        MetadataConnection conn = getMetadataConnection(orgId);
+        // 调用 describeMetadata 获取所有类型
+        DescribeMetadataResult result = conn.describeMetadata(58.0);
+
+        List<String> types = new ArrayList<>();
+        if (result != null && result.getMetadataObjects() != null) {
+            for (DescribeMetadataObject obj : result.getMetadataObjects()) {
+                types.add(obj.getXmlName());
+                // 如果需要支持子类型(如 CustomField)，可以在这里处理 ChildXmlNames
+                // 但通常 listMetadata 传父类型(CustomObject)即可，或者直接传 CustomField
+                // 这里为了列表完整性，我们只加顶级类型。前端如果需要查字段，通常是选 CustomField
+            }
+        }
+        Collections.sort(types);
+        return types;
     }
 }
