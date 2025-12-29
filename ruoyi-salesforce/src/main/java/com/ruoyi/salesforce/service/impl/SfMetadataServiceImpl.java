@@ -1,15 +1,19 @@
 package com.ruoyi.salesforce.service.impl;
 
+import cn.hutool.http.HttpResponse;
+import cn.hutool.http.HttpRequest;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 import com.ruoyi.salesforce.service.ISfMetadataService;
 import com.ruoyi.salesforce.service.ISfOrgService;
 import com.ruoyi.salesforce.utils.SfZipUtils;
 import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.domain.vo.SfDiffVo;
 
-
 import com.sforce.soap.metadata.*;
 import com.sforce.ws.ConnectionException;
 import com.sforce.ws.ConnectorConfig;
+import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -33,27 +37,104 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     // 【新增】简单的内存缓存: Key = orgId_metadataType, Value = List<FileProperties>
     // 注意：在集群环境下建议使用 Redis，这里为了简化架构直接用内存 Map
     private static final Map<String, List<FileProperties>> METADATA_CACHE = new ConcurrentHashMap<>();
+    private static final Logger log = LoggerFactory.getLogger(SfMetadataServiceImpl.class);
 
     /**
-     * 获取 Metadata API 连接
+     * 获取 Metadata API 连接 (带自动重连/刷新Token功能)
      */
     @Override
     public MetadataConnection getMetadataConnection(Long orgId) throws ConnectionException {
+        // 1. 从数据库查 Token
         SfOrg org = sfOrgService.selectSfOrgById(orgId);
         if(org == null || org.getAccessToken() == null) {
             throw new ConnectionException("环境未配置或未授权，请先去绑定Org！");
         }
+
+        // 【核心优化】: 检查并刷新 Token
+        try {
+            ensureSessionValid(org);
+        } catch(Exception e) {
+            log.error("自动刷新Token失败", e);
+            throw new ConnectionException("连接Salesforce失败，请尝试重新授权: " + e.getMessage());
+        }
+
+        // 2. 配置连接信息
         ConnectorConfig config = new ConnectorConfig();
         config.setSessionId(org.getAccessToken());
-        String metadataEndpoint = org.getInstanceUrl() + "/services/Soap/m/58.0";
-        config.setServiceEndpoint(metadataEndpoint);
-
-        // 【核心优化】设置更长的超时时间 (单位：毫秒)
-        // 连接超时 30秒，读取超时 2分钟 (应对 CustomField 这种大量数据)
+        // 增加超时设置，防止大数据量拉取断开
         config.setConnectionTimeout(30000);
         config.setReadTimeout(120000);
 
+        String metadataEndpoint = org.getInstanceUrl() + "/services/Soap/m/58.0";
+        config.setServiceEndpoint(metadataEndpoint);
+
         return new MetadataConnection(config);
+    }
+
+    /**
+     * 【核心方法】保证会话有效
+     * 如果当前Token失效，尝试使用RefreshToken刷新，并更新数据库
+     */
+    private void ensureSessionValid(SfOrg org) {
+        // 1. 简单验证：尝试访问 UserInfo 端点
+        String userInfoUrl = org.getInstanceUrl() + "/services/oauth2/userinfo";
+        try(HttpResponse response = HttpRequest.get(userInfoUrl)
+                .header("Authorization", "Bearer " + org.getAccessToken())
+                .timeout(5000) // 5秒超时
+                .execute()) {
+
+            // 2. 如果返回 401 (Unauthorized)，说明 AccessToken 过期
+            if(response.getStatus() == 401) {
+                log.info("Org [{}] Token已过期，正在尝试自动刷新...", org.getName());
+                refreshAccessToken(org);
+            }
+        } catch(Exception e) {
+            // 网络错误或其他异常，尝试刷新一次试试
+            log.warn("验证Token异常，尝试刷新Token: {}", e.getMessage());
+            refreshAccessToken(org);
+        }
+    }
+
+    /**
+     * 执行 Refresh Token 流程
+     */
+    private void refreshAccessToken(SfOrg org) {
+        if(org.getRefreshToken() == null) {
+            throw new RuntimeException("缺少Refresh Token，无法自动续期，请手动重新授权。");
+        }
+
+        String instance = "Production".equalsIgnoreCase(org.getOrgType()) ?
+                "https://login.salesforce.com" : "https://test.salesforce.com";
+        String tokenUrl = instance + "/services/oauth2/token";
+
+        // 发送刷新请求
+        String result = HttpRequest.post(tokenUrl)
+                .form("grant_type", "refresh_token")
+                .form("client_id", org.getClientId())
+                .form("client_secret", org.getClientSecret())
+                .form("refresh_token", org.getRefreshToken())
+                .execute()
+                .body();
+
+        JSONObject json = JSONUtil.parseObj(result);
+
+        if(json.getStr("access_token") != null) {
+            // 刷新成功，更新内存对象
+            String newAccessToken = json.getStr("access_token");
+            String newInstanceUrl = json.getStr("instance_url");
+
+            org.setAccessToken(newAccessToken);
+            if(newInstanceUrl != null) {
+                org.setInstanceUrl(newInstanceUrl);
+            }
+
+            // 更新数据库
+            sfOrgService.updateSfOrg(org);
+            log.info("Org [{}] Token 自动刷新成功！", org.getName());
+        } else {
+            String error = json.getStr("error_description");
+            throw new RuntimeException("自动刷新Token失败: " + error);
+        }
     }
 
     @Override
@@ -115,7 +196,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         // 3. 等待结果
         RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
 
-        if (result.getStatus() != RetrieveStatus.Succeeded) {
+        if(result.getStatus() != RetrieveStatus.Succeeded) {
             throw new Exception("Retrieve failed: " + result.getErrorMessage());
         }
 
@@ -127,55 +208,55 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
      * 智能解压策略：支持 LWC(多文件)、CustomField(嵌套)、Apex(单文件)
      */
     private String smartExtract(byte[] zipData, String type, String memberName) throws Exception {
-        if (zipData == null || zipData.length == 0) return "No content retrieved.";
+        if(zipData == null || zipData.length == 0) return "No content retrieved.";
 
         StringBuilder contentBuilder = new StringBuilder();
         boolean found = false;
 
-        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
+        try(ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
             ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
+            while((entry = zis.getNextEntry()) != null) {
                 String entryName = entry.getName();
 
                 // 忽略目录和 package.xml
-                if (entry.isDirectory() || entryName.endsWith("package.xml")) continue;
+                if(entry.isDirectory() || entryName.endsWith("package.xml")) continue;
 
                 boolean isMatch = false;
 
                 // 1. 自定义字段特殊处理: Account.MyField__c -> 位于 objects/Account.object
-                if ("CustomField".equals(type) && memberName.contains(".")) {
+                if("CustomField".equals(type) && memberName.contains(".")) {
                     String objName = memberName.split("\\.")[0];
-                    if (entryName.endsWith(objName + ".object")) isMatch = true;
+                    if(entryName.endsWith(objName + ".object")) isMatch = true;
                 }
                 // 2. LWC / Aura Bundle: 路径包含组件名 (如 lwc/myComp/myComp.js)
-                else if (isBundleType(type) && entryName.contains(memberName)) {
+                else if(isBundleType(type) && entryName.contains(memberName)) {
                     isMatch = true;
                 }
                 // 3. 通用匹配: 文件名包含元数据名 (如 classes/MyClass.cls)
-                else if (entryName.contains(memberName)) {
+                else if(entryName.contains(memberName)) {
                     isMatch = true;
                 }
 
-                if (isMatch) {
+                if(isMatch) {
                     found = true;
                     // 读取文件内容
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[1024];
                     int len;
-                    while ((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
+                    while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
                     String fileContent = new String(bos.toByteArray(), StandardCharsets.UTF_8);
 
                     // 如果是 Bundle，拼接多个文件展示
-                    if (isBundleType(type)) {
+                    if(isBundleType(type)) {
                         contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n");
                         contentBuilder.append(fileContent).append("\n\n");
                     } else {
                         // 对于单文件，优先返回代码文件，忽略 -meta.xml (除非只有 meta.xml)
-                        if (!entryName.endsWith("-meta.xml")) {
+                        if(!entryName.endsWith("-meta.xml")) {
                             return fileContent;
                         }
                         // 如果暂只找到 meta.xml，先缓存，万一没别的代码文件就返回它
-                        if (contentBuilder.length() == 0) {
+                        if(contentBuilder.length() == 0) {
                             contentBuilder.append(fileContent);
                         }
                     }
@@ -183,7 +264,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             }
         }
 
-        if (!found) {
+        if(!found) {
             return "Error: File not found in retrieved package. (Type: " + type + ", Name: " + memberName + ")";
         }
         return contentBuilder.toString();
@@ -201,13 +282,14 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         String cacheKey = orgId + "_" + type;
 
         // 1. 如果缓存中有，直接返回（毫秒级响应）
-        if (METADATA_CACHE.containsKey(cacheKey)) {
+        if(METADATA_CACHE.containsKey(cacheKey)) {
             return METADATA_CACHE.get(cacheKey);
         }
 
         // 2. 如果缓存没有，执行同步
         return refreshMetadataCache(orgId, type);
     }
+
     /**
      * 【新增】强制从 Salesforce 同步元数据并更新缓存
      */
@@ -246,7 +328,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         CompletableFuture<String> sourceFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return retrieveMetadata(sourceOrgId, type, memberName);
-            } catch (Exception e) {
+            } catch(Exception e) {
                 throw new RuntimeException("源环境读取失败: " + e.getMessage());
             }
         });
@@ -255,7 +337,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         CompletableFuture<String> targetFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return retrieveMetadata(targetOrgId, type, memberName);
-            } catch (Exception e) {
+            } catch(Exception e) {
                 // 目标环境如果没有这个文件，不应该报错，而是返回空字符串（表示新增）
                 return "";
             }
@@ -283,7 +365,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         // 复用之前的 waitForRetrieve 方法
         RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
 
-        if (result.getStatus() == RetrieveStatus.Succeeded) {
+        if(result.getStatus() == RetrieveStatus.Succeeded) {
             return result.getZipFile();
         } else {
             throw new Exception("Retrieve failed: " + result.getErrorMessage());
@@ -340,13 +422,13 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         DescribeMetadataResult result = conn.describeMetadata(58.0);
 
         Set<String> typeSet = new HashSet<>(); // 使用 Set 去重
-        if (result != null && result.getMetadataObjects() != null) {
-            for (DescribeMetadataObject obj : result.getMetadataObjects()) {
+        if(result != null && result.getMetadataObjects() != null) {
+            for(DescribeMetadataObject obj : result.getMetadataObjects()) {
                 typeSet.add(obj.getXmlName());
 
                 // 【新增】添加子类型 (如 CustomField, ValidationRule, RecordType 等)
-                if (obj.getChildXmlNames() != null) {
-                    for (String childName : obj.getChildXmlNames()) {
+                if(obj.getChildXmlNames() != null) {
+                    for(String childName : obj.getChildXmlNames()) {
                         typeSet.add(childName);
                     }
                 }
