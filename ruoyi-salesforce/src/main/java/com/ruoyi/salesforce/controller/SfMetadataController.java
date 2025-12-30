@@ -140,4 +140,20 @@ public class SfMetadataController {
             return AjaxResult.error("同步失败: " + e.getMessage());
         }
     }
+
+    /**
+     * 【新增】同步元数据类型到系统字典
+     * 字典类型 Key: sys_salesforce_metadata_type
+     */
+    @GetMapping("/syncDict")
+    public AjaxResult syncDict(@RequestParam("orgId") Long orgId) {
+        try {
+            sfMetadataService.syncMetadataToDict(orgId);
+            // 清除字典缓存，确保前端能立即拉取到最新数据
+            // DictUtils.clearDictCache(); // 如果你的项目封装了 DictUtils 可以调用这个
+            return AjaxResult.success("同步成功！请前往[系统管理-字典管理]查看 sys_salesforce_metadata_type");
+        } catch (Exception e) {
+            return AjaxResult.error("同步失败: " + e.getMessage());
+        }
+    }
 }

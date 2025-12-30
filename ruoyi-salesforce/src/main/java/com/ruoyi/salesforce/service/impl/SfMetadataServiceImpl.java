@@ -4,12 +4,17 @@ import cn.hutool.http.HttpResponse;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.ruoyi.common.core.domain.entity.SysDictData;
+import com.ruoyi.common.core.domain.entity.SysDictType;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.salesforce.service.ISfMetadataService;
 import com.ruoyi.salesforce.service.ISfOrgService;
 import com.ruoyi.salesforce.utils.SfZipUtils;
 import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.domain.vo.SfDiffVo;
 
+import com.ruoyi.system.service.ISysDictDataService;
+import com.ruoyi.system.service.ISysDictTypeService;
 import com.sforce.soap.metadata.*;
 import com.sforce.ws.ConnectionException;
 import com.sforce.ws.ConnectorConfig;
@@ -28,6 +33,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 import com.alibaba.fastjson2.JSON;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class SfMetadataServiceImpl implements ISfMetadataService {
@@ -38,6 +44,15 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     // 注意：在集群环境下建议使用 Redis，这里为了简化架构直接用内存 Map
     private static final Map<String, List<FileProperties>> METADATA_CACHE = new ConcurrentHashMap<>();
     private static final Logger log = LoggerFactory.getLogger(SfMetadataServiceImpl.class);
+
+    // 【新增】注入若依的字典服务
+    @Autowired
+    private ISysDictTypeService dictTypeService;
+
+    @Autowired
+    private ISysDictDataService dictDataService;
+    // 定义字典类型 Key
+    private static final String DICT_TYPE_KEY = "sys_salesforce_metadata_type";
 
     /**
      * 获取 Metadata API 连接 (带自动重连/刷新Token功能)
@@ -413,30 +428,178 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     }
 
     /**
-     * 【核心修复】动态获取 Salesforce 支持的所有元数据类型
-     * 修改点：遍历 ChildXmlNames，将 CustomField, ValidationRule 等加入列表
+     * 【核心优化】动态获取 Salesforce 支持的所有元数据类型
+     * 优化点：
+     * 1. 遍历 ChildXmlNames，将 CustomField, ValidationRule 等加入列表
+     * 2. 增加“兜底补全”逻辑，确保 Aura, WebLink, LWC 等关键类型绝对存在
      */
     @Override
     public List<String> getAllMetadataTypes(Long orgId) throws Exception {
         MetadataConnection conn = getMetadataConnection(orgId);
-        DescribeMetadataResult result = conn.describeMetadata(58.0);
 
-        Set<String> typeSet = new HashSet<>(); // 使用 Set 去重
-        if(result != null && result.getMetadataObjects() != null) {
-            for(DescribeMetadataObject obj : result.getMetadataObjects()) {
-                typeSet.add(obj.getXmlName());
+        // 1. 尝试从 Salesforce API 获取动态元数据描述
+        Set<String> typeSet = new HashSet<>();
+        try {
+            DescribeMetadataResult result = conn.describeMetadata(58.0);
+            if(result != null && result.getMetadataObjects() != null) {
+                for(DescribeMetadataObject obj : result.getMetadataObjects()) {
+                    // 添加顶层类型 (如 CustomObject, ApexClass)
+                    typeSet.add(obj.getXmlName());
 
-                // 【新增】添加子类型 (如 CustomField, ValidationRule, RecordType 等)
-                if(obj.getChildXmlNames() != null) {
-                    for(String childName : obj.getChildXmlNames()) {
-                        typeSet.add(childName);
+                    // 添加子类型 (如 CustomField, WebLink, ValidationRule)
+                    if(obj.getChildXmlNames() != null) {
+                        for(String childName : obj.getChildXmlNames()) {
+                            typeSet.add(childName);
+                        }
                     }
                 }
             }
+        } catch(Exception e) {
+            // 即使 describe 失败，也不应该阻断，继续使用兜底列表
+            System.err.println("Warning: describeMetadata failed, using fallback list. " + e.getMessage());
         }
 
+        // 2. 【核心优化】手动补全常用/关键元数据类型 (兜底策略)
+        // 解决因 API 版本或权限问题导致 Aura, WebLink 等类型未返回的问题
+        List<String> mustHaveTypes = Arrays.asList(
+                // --- 代码开发类 ---
+                "AuraDefinitionBundle",       // Aura 组件 (Lightning Component)
+                "LightningComponentBundle",   // LWC 组件
+                "ApexClass",
+                "ApexTrigger",
+                "ApexPage",
+                "ApexComponent",
+                "StaticResource",
+
+                // --- 对象与字段类 ---
+                "CustomObject",
+                "CustomField",
+                "WebLink",                    // 按钮或链接 (Buttons or Links)
+                "ValidationRule",             // 验证规则
+                "RecordType",                 // 记录类型
+                "ListView",                   // 列表视图
+                "FieldSet",                   // 字段集
+                "CompactLayout",              // 紧凑布局
+                "BusinessProcess",            // 业务流程
+                "Index",                      // 索引
+
+                // --- 权限与配置类 ---
+                "PermissionSet",
+                "Profile",
+                "Role",
+                "Group",
+                "Queue",
+                "CustomTab",
+                "CustomApplication",
+                "CustomLabel",                // 自定义标签 (注意: 父级是 CustomLabels)
+                "CustomMetadata",             // 自定义元数据
+                "RemoteSiteSetting",
+                "CspTrustedSite",
+                "NamedCredential",
+
+                // --- 流程自动化类 ---
+                "Flow",                       // Flow (新版)
+                "FlowDefinition",             // Flow (旧版定义)
+                "Workflow",                   // 工作流容器
+                "WorkflowRule",               // 工作流规则
+                "WorkflowAlert",              // 工作流警告
+                "WorkflowFieldUpdate",        // 字段更新
+                "WorkflowOutboundMessage",    // 出站消息
+                "ApprovalProcess",            // 审批流程
+
+                // --- 报表与面板 ---
+                "Report",
+                "Dashboard",
+                "EmailTemplate"
+        );
+
+        typeSet.addAll(mustHaveTypes);
+
+        // 3. 排序并返回
         List<String> types = new ArrayList<>(typeSet);
         Collections.sort(types);
         return types;
+    }
+
+    /**
+     * 【新增】同步元数据类型到若依字典
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void syncMetadataToDict(Long orgId) throws Exception {
+        // 1. 获取所有元数据类型 (复用之前的逻辑)
+        List<String> allTypes = getAllMetadataTypes(orgId);
+
+        // 2. 检查字典类型是否存在，不存在则创建
+        checkAndCreateDictType();
+
+        // 3. 定义预设的友好名称映射 (初始化时使用)
+        Map<String, String> friendlyNameMap = new HashMap<>();
+        friendlyNameMap.put("LightningComponentBundle", "Lightning Web Components (LWC)");
+        friendlyNameMap.put("AuraDefinitionBundle", "Lightning Component Bundle");
+        friendlyNameMap.put("Layout", "Page Layout");
+        friendlyNameMap.put("FlexiPage", "Lightning Page");
+        friendlyNameMap.put("ApexPage", "Visualforce Page (VFP)");
+        friendlyNameMap.put("ApexComponent", "Visualforce Component");
+        friendlyNameMap.put("CustomObject", "Custom Object");
+        friendlyNameMap.put("CustomField", "Custom Field");
+        friendlyNameMap.put("WebLink", "Buttons or Links");
+        friendlyNameMap.put("ApexClass", "Apex Class");
+        friendlyNameMap.put("ApexTrigger", "Apex Trigger");
+        friendlyNameMap.put("Flow", "Flows");
+        friendlyNameMap.put("PermissionSet", "Permission Set");
+        friendlyNameMap.put("Profile", "Profile");
+        friendlyNameMap.put("StaticResource", "Static Resource");
+
+        // 4. 获取当前字典已有的数据 (防止覆盖用户已修改的名称)
+        SysDictData query = new SysDictData();
+        query.setDictType(DICT_TYPE_KEY);
+        List<SysDictData> existingList = dictDataService.selectDictDataList(query);
+
+        // 转为 Map 方便比对: Value -> Data
+        Map<String, SysDictData> existMap = new HashMap<>();
+        for(SysDictData data : existingList) {
+            existMap.put(data.getDictValue(), data);
+        }
+
+        // 5. 遍历并插入新数据
+        long sortOrder = existingList.size() + 10; // 排序号从现有数量后续开始
+
+        for(String apiName : allTypes) {
+            // 如果字典里已经有了，就跳过 (保留用户可能手动改过的 Label)
+            if(existMap.containsKey(apiName)) {
+                continue;
+            }
+
+            // 构建新字典项
+            SysDictData newData = new SysDictData();
+            newData.setDictSort(sortOrder++);
+            newData.setDictLabel(friendlyNameMap.getOrDefault(apiName, apiName)); // 有预设用预设，没有用API名
+            newData.setDictValue(apiName);
+            newData.setDictType(DICT_TYPE_KEY);
+            newData.setStatus("0"); // 正常状态
+            newData.setIsDefault("N");
+            newData.setCreateBy(SecurityUtils.getUsername()); // 获取当前操作人
+            newData.setRemark("Auto synced from Salesforce");
+
+            // 插入数据库
+            dictDataService.insertDictData(newData);
+        }
+    }
+
+    /**
+     * 辅助方法：检查并创建字典类型
+     */
+    private void checkAndCreateDictType() {
+        SysDictType dictType = dictTypeService.selectDictTypeByType(DICT_TYPE_KEY);
+        if(dictType == null) {
+            SysDictType newType = new SysDictType();
+            newType.setDictName("Salesforce元数据类型");
+            newType.setDictType(DICT_TYPE_KEY);
+            newType.setStatus("0");
+            newType.setCreateBy(SecurityUtils.getUsername());
+            newType.setRemark("用于Salesforce部署模块的元数据类型选择");
+            dictTypeService.insertDictType(newType);
+        }
     }
 }

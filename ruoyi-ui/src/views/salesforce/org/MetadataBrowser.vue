@@ -15,7 +15,8 @@
       <el-col :span="5">
         <el-select v-model="queryParams.type" placeholder="请选择元数据类型" @change="handleTypeChange" style="width: 100%"
           filterable :loading="typesLoading">
-          <el-option v-for="type in metadataTypeOptions" :key="type" :label="type" :value="type" />
+          <el-option v-for="dict in dict.type.sys_salesforce_metadata_type" :key="dict.value" :label="dict.label"
+            :value="dict.value" />
         </el-select>
       </el-col>
 
@@ -79,7 +80,7 @@ export default {
     return {
       visible: false,
       loading: false,
-      syncLoading: false, // 【新增】同步按钮Loading
+      syncLoading: false,
       typesLoading: false,
       existMap: new Map(),
       list: [],
@@ -94,11 +95,10 @@ export default {
         orgId: null,
         type: 'ApexClass',
         keyword: ''
-      }
+      },
     };
   },
   methods: {
-    // ... getParentName, open, getOrgList, loadMetadataTypes 保持不变 ...
     getParentName(name) {
       if (name && name.includes('.')) return name.split('.')[0];
       return '-';
@@ -143,7 +143,7 @@ export default {
       this.fetchList();
     },
 
-    /** 【新增】强制同步 */
+    /** 强制同步 */
     handleSync() {
       if (!this.queryParams.type) {
         this.$modal.msgWarning("请先选择元数据类型");
@@ -156,8 +156,8 @@ export default {
         params: { orgId: this.currentOrgId, type: this.queryParams.type }
       }).then(res => {
         this.syncLoading = false;
-        this.$modal.msgSuccess(res.msg); // "同步成功，共获取 xxx 条"
-        this.fetchList(); // 重新拉取列表(此时读缓存，很快)
+        this.$modal.msgSuccess(res.msg);
+        this.fetchList();
       }).catch(() => {
         this.syncLoading = false;
       });
@@ -168,14 +168,12 @@ export default {
       if (!this.queryParams.orgId) return;
       this.loading = true;
 
-      // 1. 获取源环境列表 (优先读后端缓存)
       const pSource = request({
         url: '/system/sf/meta/list',
         method: 'get',
         params: this.queryParams
       });
 
-      // 2. 获取目标环境列表 (用于比对)
       let pTarget = Promise.resolve({ rows: [] });
       if (this.targetOrgId) {
         const targetParams = {
@@ -226,7 +224,6 @@ export default {
       });
     },
 
-    // ... 其他方法保持不变 (getDiffTagType, handleSelect, etc.) ...
     getDiffTagType(status) {
       if (status === 'New') return 'success';
       if (status === 'Changed') return 'warning';

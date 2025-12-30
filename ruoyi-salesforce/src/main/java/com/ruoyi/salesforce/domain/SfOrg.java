@@ -11,152 +11,165 @@ import com.ruoyi.common.core.domain.BaseEntity;
  * @author ruoyi
  * @date 2025-12-25
  */
-public class SfOrg extends BaseEntity
-{
+public class SfOrg extends BaseEntity {
     private static final long serialVersionUID = 1L;
 
-    /** 主键 */
+    /**
+     * 主键
+     */
     private Long id;
 
-    /** 环境别名(如: 开发环境) */
+    /**
+     * 环境别名(如: 开发环境)
+     */
     @Excel(name = "环境别名(如: 开发环境)")
     private String name;
 
-    /** 环境类型(Production/Sandbox) */
+    /**
+     * 环境类型(Production/Sandbox)
+     */
     @Excel(name = "环境类型(Production/Sandbox)")
     private String orgType;
 
-    /** Salesforce Org ID */
+    /**
+     * Salesforce Org ID
+     */
     @Excel(name = "Salesforce Org ID")
     private String orgId;
 
-    /** 登录用户名 */
+    /**
+     * 登录用户名
+     */
     @Excel(name = "登录用户名")
     private String username;
 
-    /** 实例地址(https://xxx.my.salesforce.com) */
+    /**
+     * 实例地址(https://xxx.my.salesforce.com)
+     */
     @Excel(name = "实例地址(https://xxx.my.salesforce.com)")
     private String instanceUrl;
 
-    /** 短期访问令牌 */
+    /**
+     * 短期访问令牌
+     */
     @Excel(name = "短期访问令牌")
     private String accessToken;
 
-    /** 长期刷新令牌(关键) */
+    /**
+     * 长期刷新令牌(关键)
+     */
     @Excel(name = "长期刷新令牌(关键)")
     private String refreshToken;
 
-    /** App Key */
+    /**
+     * App Key
+     */
     @Excel(name = "App Key")
     private String clientId;
 
-    /** App Secret */
+    /**
+     * App Secret
+     */
     @Excel(name = "App Secret")
     private String clientSecret;
 
-    public void setId(Long id)
-    {
+    /**
+     * 自定义域名
+     */
+    @Excel(name = "自定义域名")
+    private String customDomain;
+
+    public void setCustomDomain(String customDomain) {
+        this.customDomain = customDomain;
+    }
+
+    public String getCustomDomain() {
+        return customDomain;
+    }
+
+    public void setId(Long id) {
         this.id = id;
     }
 
-    public Long getId()
-    {
+    public Long getId() {
         return id;
     }
 
-    public void setName(String name)
-    {
+    public void setName(String name) {
         this.name = name;
     }
 
-    public String getName()
-    {
+    public String getName() {
         return name;
     }
 
-    public void setOrgType(String orgType)
-    {
+    public void setOrgType(String orgType) {
         this.orgType = orgType;
     }
 
-    public String getOrgType()
-    {
+    public String getOrgType() {
         return orgType;
     }
 
-    public void setOrgId(String orgId)
-    {
+    public void setOrgId(String orgId) {
         this.orgId = orgId;
     }
 
-    public String getOrgId()
-    {
+    public String getOrgId() {
         return orgId;
     }
 
-    public void setUsername(String username)
-    {
+    public void setUsername(String username) {
         this.username = username;
     }
 
-    public String getUsername()
-    {
+    public String getUsername() {
         return username;
     }
 
-    public void setInstanceUrl(String instanceUrl)
-    {
+    public void setInstanceUrl(String instanceUrl) {
         this.instanceUrl = instanceUrl;
     }
 
-    public String getInstanceUrl()
-    {
+    public String getInstanceUrl() {
         return instanceUrl;
     }
 
-    public void setAccessToken(String accessToken)
-    {
+    public void setAccessToken(String accessToken) {
         this.accessToken = accessToken;
     }
 
-    public String getAccessToken()
-    {
+    public String getAccessToken() {
         return accessToken;
     }
 
-    public void setRefreshToken(String refreshToken)
-    {
+    public void setRefreshToken(String refreshToken) {
         this.refreshToken = refreshToken;
     }
 
-    public String getRefreshToken()
-    {
+    public String getRefreshToken() {
         return refreshToken;
     }
 
-    public void setClientId(String clientId)
-    {
+    public void setClientId(String clientId) {
         this.clientId = clientId;
     }
 
-    public String getClientId()
-    {
+    public String getClientId() {
         return clientId;
     }
 
-    public void setClientSecret(String clientSecret)
-    {
+    public void setClientSecret(String clientSecret) {
         this.clientSecret = clientSecret;
     }
 
-    public String getClientSecret()
-    {
+    public String getClientSecret() {
         return clientSecret;
     }
 
     @Override
     public String toString() {
-        return new ToStringBuilder(this,ToStringStyle.MULTI_LINE_STYLE)
+        return new ToStringBuilder(this, ToStringStyle.MULTI_LINE_STYLE)
                 .append("id", getId())
                 .append("name", getName())
                 .append("orgType", getOrgType())

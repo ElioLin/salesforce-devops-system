@@ -5,36 +5,51 @@
 <mapper namespace="com.ruoyi.salesforce.mapper.SfOrgMapper">
 
     <resultMap type="SfOrg" id="SfOrgResult">
-        <result property="id"    column="id"    />
-        <result property="name"    column="name"    />
-        <result property="orgType"    column="org_type"    />
-        <result property="orgId"    column="org_id"    />
-        <result property="username"    column="username"    />
-        <result property="instanceUrl"    column="instance_url"    />
-        <result property="accessToken"    column="access_token"    />
-        <result property="refreshToken"    column="refresh_token"    />
-        <result property="clientId"    column="client_id"    />
-        <result property="clientSecret"    column="client_secret"    />
-        <result property="createTime"    column="create_time"    />
-        <result property="updateTime"    column="update_time"    />
+        <result property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="orgType" column="org_type"/>
+        <result property="orgId" column="org_id"/>
+        <result property="username" column="username"/>
+        <result property="instanceUrl" column="instance_url"/>
+        <result property="accessToken" column="access_token"/>
+        <result property="refreshToken" column="refresh_token"/>
+        <result property="clientId" column="client_id"/>
+        <result property="clientSecret" column="client_secret"/>
+        <result property="createTime" column="create_time"/>
+        <result property="updateTime" column="update_time"/>
+        <result property="customDomain" column="custom_domain"/>
     </resultMap>
 
     <sql id="selectSfOrgVo">
-        select id, name, org_type, org_id, username, instance_url, access_token, refresh_token, client_id, client_secret, create_time, update_time from sf_org
+        select id,
+               name,
+               org_type,
+               org_id,
+               username,
+               instance_url,
+               access_token,
+               refresh_token,
+               client_id,
+               client_secret,
+               create_time,
+               update_time,
+               custom_domain
+        from sf_org
     </sql>
 
     <select id="selectSfOrgList" parameterType="SfOrg" resultMap="SfOrgResult">
         <include refid="selectSfOrgVo"/>
         <where>
-            <if test="name != null  and name != ''"> and name like concat('%', #{name}, '%')</if>
-            <if test="orgType != null  and orgType != ''"> and org_type = #{orgType}</if>
-            <if test="orgId != null  and orgId != ''"> and org_id = #{orgId}</if>
-            <if test="username != null  and username != ''"> and username like concat('%', #{username}, '%')</if>
-            <if test="instanceUrl != null  and instanceUrl != ''"> and instance_url = #{instanceUrl}</if>
-            <if test="accessToken != null  and accessToken != ''"> and access_token = #{accessToken}</if>
-            <if test="refreshToken != null  and refreshToken != ''"> and refresh_token = #{refreshToken}</if>
-            <if test="clientId != null  and clientId != ''"> and client_id = #{clientId}</if>
-            <if test="clientSecret != null  and clientSecret != ''"> and client_secret = #{clientSecret}</if>
+            <if test="name != null  and name != ''">and name like concat('%', #{name}, '%')</if>
+            <if test="orgType != null  and orgType != ''">and org_type = #{orgType}</if>
+            <if test="orgId != null  and orgId != ''">and org_id = #{orgId}</if>
+            <if test="username != null  and username != ''">and username like concat('%', #{username}, '%')</if>
+            <if test="instanceUrl != null  and instanceUrl != ''">and instance_url = #{instanceUrl}</if>
+            <if test="accessToken != null  and accessToken != ''">and access_token = #{accessToken}</if>
+            <if test="refreshToken != null  and refreshToken != ''">and refresh_token = #{refreshToken}</if>
+            <if test="clientId != null  and clientId != ''">and client_id = #{clientId}</if>
+            <if test="clientSecret != null  and clientSecret != ''">and client_secret = #{clientSecret}</if>
+            <if test="customDomain != null  and customDomain != ''">and custom_domain = #{customDomain}</if>
         </where>
     </select>
 
@@ -62,6 +77,7 @@
             <if test="clientSecret != null">client_secret,</if>
             <if test="createTime != null">create_time,</if>
             <if test="updateTime != null">update_time,</if>
+            <if test="customDomain != null">custom_domain,</if>
         </trim>
         <trim prefix="values (" suffix=")" suffixOverrides=",">
             <if test="name != null">#{name},</if>
@@ -75,6 +91,7 @@
             <if test="clientSecret != null">#{clientSecret},</if>
             <if test="createTime != null">#{createTime},</if>
             <if test="updateTime != null">#{updateTime},</if>
+            <if test="customDomain != null">#{customDomain},</if>
         </trim>
     </insert>
 
@@ -92,12 +109,15 @@
             <if test="clientSecret != null">client_secret = #{clientSecret},</if>
             <if test="createTime != null">create_time = #{createTime},</if>
             <if test="updateTime != null">update_time = #{updateTime},</if>
+            <if test="customDomain != null">custom_domain = #{customDomain},</if>
         </trim>
         where id = #{id}
     </update>
 
     <delete id="deleteSfOrgById" parameterType="Long">
-        delete from sf_org where id = #{id}
+        delete
+        from sf_org
+        where id = #{id}
     </delete>
 
     <delete id="deleteSfOrgByIds" parameterType="String">

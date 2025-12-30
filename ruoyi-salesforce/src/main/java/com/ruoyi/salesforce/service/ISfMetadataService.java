@@ -63,4 +63,9 @@ public interface ISfMetadataService {
      * 【新增】强制从 Salesforce 刷新元数据缓存
      */
     List<FileProperties> refreshMetadataCache(Long orgId, String type) throws Exception;
+
+    /**
+     * 【新增】将 Salesforce 元数据类型同步到若依数据字典
+     */
+    void syncMetadataToDict(Long orgId) throws Exception;
 }

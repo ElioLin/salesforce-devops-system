@@ -21,7 +21,7 @@
                     <div class="label">目标环境:</div> {{ targetOrgName }}
                 </el-col>
                 <el-col :span="12" style="text-align: right">
-                    <el-button type="primary" plain icon="el-icon-view" :disabled="isProcessing" 
+                    <el-button type="primary" plain icon="el-icon-view" :disabled="isProcessing"
                         @click="handlePreviewPackage">
                         预览部署包
                     </el-button>
@@ -43,25 +43,26 @@
 
             <div style="margin-top: 20px; border-top: 1px solid #ebeef5; padding-top: 20px;">
                 <el-form label-width="100px" size="small">
-                  <el-row>
-                    <el-col :span="8">
-                      <el-form-item label="测试级别">
-                        <el-select v-model="deployment.testLevel" placeholder="请选择测试级别" style="width: 100%">
-                          <el-option label="默认 (NoTestRun / Default)" value="NoTestRun" />
-                          <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
-                          <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
-                        </el-select>
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="12" v-if="deployment.testLevel === 'RunSpecifiedTests'">
-                      <el-form-item label="指定测试类">
-                        <el-input v-model="deployment.specifiedTests" placeholder="请输入测试类名，多个用逗号分隔" />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="4" style="padding-left: 10px;">
-                      <el-button type="primary" icon="el-icon-check" plain @click="handleSaveConfig">保存配置</el-button>
-                    </el-col>
-                  </el-row>
+                    <el-row>
+                        <el-col :span="8">
+                            <el-form-item label="测试级别">
+                                <el-select v-model="deployment.testLevel" placeholder="请选择测试级别" style="width: 100%">
+                                    <el-option label="默认 (NoTestRun / Default)" value="NoTestRun" />
+                                    <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
+                                    <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
+                                </el-select>
+                            </el-form-item>
+                        </el-col>
+                        <el-col :span="12" v-if="deployment.testLevel === 'RunSpecifiedTests'">
+                            <el-form-item label="指定测试类">
+                                <el-input v-model="deployment.specifiedTests" placeholder="请输入测试类名，多个用逗号分隔" />
+                            </el-form-item>
+                        </el-col>
+                        <el-col :span="4" style="padding-left: 10px;">
+                            <el-button type="primary" icon="el-icon-check" plain
+                                @click="handleSaveConfig">保存配置</el-button>
+                        </el-col>
+                    </el-row>
                 </el-form>
             </div>
 
@@ -75,7 +76,11 @@
             </div>
 
             <el-alert v-if="deployment.status === 'Failed' && deployment.errorMsg" title="部署/验证失败原因" type="error"
-                :description="deployment.errorMsg" show-icon style="margin-top: 15px;">
+                show-icon style="margin-top: 15px;">
+                <template slot="default">
+                    <div style="white-space: pre-wrap; line-height: 1.5; font-family: Consolas, monospace;">{{
+                        deployment.errorMsg }}</div>
+                </template>
             </el-alert>
         </el-card>
 
@@ -94,7 +99,11 @@
             </div>
 
             <el-table v-loading="loadingItems" :data="itemList" border style="width: 100%">
-                <el-table-column label="类型" prop="metadataType" width="200" sortable />
+                <el-table-column label="类型" prop="metadataType" width="250" sortable>
+                    <template slot-scope="scope">
+                        {{ getDictLabel(scope.row.metadataType) }}
+                    </template>
+                </el-table-column>
                 <el-table-column label="名称" prop="memberName" sortable />
                 <el-table-column label="所属对象" width="150">
                     <template slot-scope="scope">{{ getParentName(scope.row.memberName) }}</template>
@@ -134,7 +143,7 @@
             <div v-loading="previewDialog.loading" style="min-height: 300px;">
                 <el-row :gutter="20">
                     <el-col :span="10">
-                        <div class="file-list-header">ZIP 包内文件清单 ({{previewDialog.files.length}}个)</div>
+                        <div class="file-list-header">ZIP 包内文件清单 ({{ previewDialog.files.length }}个)</div>
                         <div class="file-list-container">
                             <ul class="file-ul">
                                 <li v-for="(file, index) in previewDialog.files" :key="index" class="file-li">
@@ -146,14 +155,8 @@
                     </el-col>
                     <el-col :span="14">
                         <div class="file-list-header">package.xml 内容</div>
-                        <monaco-editor 
-                            v-if="previewDialog.open"
-                            :value="previewDialog.packageXml" 
-                            :readOnly="true"
-                            language="xml" 
-                            height="600px" 
-                            theme="vs-dark" 
-                        />
+                        <monaco-editor v-if="previewDialog.open" :value="previewDialog.packageXml" :readOnly="true"
+                            language="xml" height="600px" theme="vs-dark" />
                     </el-col>
                 </el-row>
             </div>
@@ -176,7 +179,7 @@ import {
     quickDeploy,
     checkDiffStatus,
     updateDeployment,
-    previewDeploymentPackage // 【新增】
+    previewDeploymentPackage
 } from "@/api/salesforce/deployment";
 import { listOrg } from "@/api/salesforce/org";
 import MetadataBrowser from "@/views/salesforce/org/MetadataBrowser";
@@ -185,6 +188,7 @@ import request from '@/utils/request';
 
 export default {
     name: "DeploymentDetail",
+    dicts: ['sys_salesforce_metadata_type'],
     components: { MetadataBrowser, MonacoEditor },
     data() {
         return {
@@ -216,7 +220,6 @@ export default {
             isDiffMode: false,
             previewTitle: "",
 
-            // 【新增】预览相关数据
             previewDialog: {
                 open: false,
                 loading: false,
@@ -289,7 +292,17 @@ export default {
                 this.loading = false;
             });
         },
-
+        getDictLabel(value) {
+            if (!value) return '';
+            const datas = this.dict.type.sys_salesforce_metadata_type;
+            if (datas) {
+                const found = datas.find(item => item.value === value);
+                if (found) {
+                    return found.label;
+                }
+            }
+            return value;
+        },
         getDetail() {
             return getDeployment(this.deploymentId).then(res => {
                 this.deployment = res.data || {};
@@ -387,25 +400,39 @@ export default {
             return '#409EFF';
         },
 
+        /** 通用比对方法 (已优化：兼容两种数据格式) */
         handleDiff(row) {
             if (!this.deployment.targetOrgId) {
                 this.$modal.msgWarning("请先设置部署包的目标环境，才能进行比对！");
                 return;
             }
+
+            // 【核心修复】兼容处理：
+            // 1. row.metadataType / row.memberName 来自数据库列表 (SfDeploymentItem)
+            // 2. row.type / row.name 来自元数据浏览器 (MetadataBrowser event)
+            const type = row.metadataType || row.type;
+            const name = row.memberName || row.name || row.fullName;
+
+            if (!type || !name) {
+                this.$modal.msgError("缺少必要的元数据参数 (Type/Name)，无法比对");
+                return;
+            }
+
             const loading = this.$loading({
                 lock: true,
                 text: '正在从源环境和目标环境同时拉取代码，请稍候...',
                 spinner: 'el-icon-loading',
                 background: 'rgba(0, 0, 0, 0.7)'
             });
+
             request({
                 url: '/system/sf/meta/compare',
                 method: 'get',
                 params: {
                     sourceOrgId: this.deployment.sourceOrgId,
                     targetOrgId: this.deployment.targetOrgId,
-                    type: row.metadataType,
-                    name: row.memberName
+                    type: type, // 使用兼容后的变量
+                    name: name  // 使用兼容后的变量
                 }
             }).then(response => {
                 loading.close();
@@ -413,7 +440,7 @@ export default {
                 this.codeContent = diffData.sourceContent;
                 this.oldCodeContent = diffData.targetContent;
                 this.isDiffMode = true;
-                this.previewTitle = `比对: ${row.memberName} (${row.metadataType}) [左:目标环境 vs 右:源环境]`;
+                this.previewTitle = `比对: ${name} (${type}) [左:目标环境 vs 右:源环境]`;
                 this.openCode = true;
             }).catch(() => {
                 loading.close();
@@ -671,19 +698,22 @@ export default {
     padding-bottom: 5px;
     border-bottom: 1px solid #eee;
 }
+
 .file-list-container {
-    height: 600px;
+    height: 400px;
     overflow-y: auto;
     border: 1px solid #dcdfe6;
     border-radius: 4px;
     padding: 5px;
     background-color: #f9fafc;
 }
+
 .file-ul {
     list-style: none;
     padding: 0;
     margin: 0;
 }
+
 .file-li {
     padding: 5px 10px;
     font-size: 13px;

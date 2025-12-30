@@ -16,6 +16,10 @@ ruoyi:
   salesforce:
     # 你的回调地址，本地开发用 localhost，线上改成你的域名
     callbackUrl: http://localhost:8080/system/sf/callback
+    # 【新增】前端访问地址 (授权成功后跳转回这里，例如 Vue 项目的访问地址)
+    frontendUrl: http://localhost:80
+    clientId: 3MVG9pRzvMkjMb6kgFzuHUiyE9anfivt3g1oKlhtcKPeOlHNA2G22Rp5Dg78RUAFpP5ZYNAvNcFll5oINlJNE
+    clientSecret: F4D238AD0FAF6547094FABAF2BB1E9284E875F8D6E2256BB6E214D81EF24824B
 
 # 开发环境配置
 server:

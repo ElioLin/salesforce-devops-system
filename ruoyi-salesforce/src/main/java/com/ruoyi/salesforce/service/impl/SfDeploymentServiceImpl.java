@@ -252,52 +252,95 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         } else if("Failed".equals(status) || "Canceled".equals(status)) {
             finalStatus = "Failed";
 
-            // --- 提取错误信息逻辑 ---
-            // 优先看顶层 errorMessage
+            // ================= 错误信息提取优化 (开始) =================
+            // 1. 优先获取顶层错误信息
             errorMessage = result.getString("errorMessage");
 
-            // 如果没顶层错误，深入 details 查找
+            // 2. 如果没有顶层错误，深入 details 查找具体的元数据或测试错误
             if(errorMessage == null) {
                 JSONObject details = result.getJSONObject("details");
                 if(details != null) {
-                    // 1. 查找组件部署错误 (componentFailures)
+                    StringBuilder sb = new StringBuilder();
+                    boolean hasErrors = false;
+
+                    // --- A. 处理组件/元数据部署失败 (componentFailures) ---
                     JSONArray failures = details.getJSONArray("componentFailures");
                     if(failures != null && !failures.isEmpty()) {
-                        StringBuilder sb = new StringBuilder();
-                        // 最多只取前 5 条错误，防止数据库字段溢出
-                        int count = Math.min(failures.size(), 5);
+                        sb.append("【元数据校验失败】:\n");
+
+                        // 【优化】数量限制提升至 50 条
+                        int count = Math.min(failures.size(), 50);
                         for(int i = 0; i < count; i++) {
                             JSONObject fail = failures.getJSONObject(i);
                             String fileName = fail.getString("fileName");
                             String problem = fail.getString("problem");
-                            sb.append("[").append(fileName).append("] ").append(problem).append("\n");
+                            String lineNumber = fail.getString("lineNumber");
+
+                            // 格式: 1. [classes/MyClass.cls] (Line:10): 变量未定义...
+                            sb.append(i + 1).append(". [").append(fileName).append("]");
+                            if(lineNumber != null) {
+                                sb.append(" (Line:").append(lineNumber).append(")");
+                            }
+                            sb.append(": ").append(problem).append("\n");
                         }
-                        if(failures.size() > 5) sb.append("... 以及更多错误");
-                        errorMessage = sb.toString();
+                        if(failures.size() > 50) {
+                            sb.append("... (还有 ").append(failures.size() - 50).append(" 个元数据错误未显示)\n");
+                        }
+                        sb.append("\n"); // 分类之间空一行
+                        hasErrors = true;
                     }
 
-                    // 2. 如果没有组件错误，查找测试运行错误 (runTestResult)
-                    if(errorMessage == null && details.containsKey("runTestResult")) {
+                    // --- B. 处理单元测试运行失败 (runTestResult) ---
+                    if(details.containsKey("runTestResult")) {
                         JSONObject testResult = details.getJSONObject("runTestResult");
+
+                        // B1. 测试断言失败
                         JSONArray testFailures = testResult.getJSONArray("failures");
                         if(testFailures != null && !testFailures.isEmpty()) {
-                            StringBuilder sb = new StringBuilder("测试运行失败:\n");
-                            int count = Math.min(testFailures.size(), 5);
+                            sb.append("【单元测试失败】:\n");
+
+                            // 【优化】数量限制提升至 50 条
+                            int count = Math.min(testFailures.size(), 50);
                             for(int i = 0; i < count; i++) {
                                 JSONObject fail = testFailures.getJSONObject(i);
-                                String method = fail.getString("name") + "." + fail.getString("methodName");
-                                String msg = fail.getString("message");
-                                sb.append("[").append(method).append("] ").append(msg).append("\n");
+                                String className = fail.getString("name");
+                                String methodName = fail.getString("methodName");
+                                String message = fail.getString("message");
+
+                                // 格式: 1. [MyTestClass.testMethod]: Expected: 10, Actual: 0
+                                sb.append(i + 1).append(". [").append(className).append(".").append(methodName).append("]: ")
+                                        .append(message).append("\n");
                             }
-                            errorMessage = sb.toString();
+                            if(testFailures.size() > 50) {
+                                sb.append("... (还有 ").append(testFailures.size() - 50).append(" 个测试失败未显示)\n");
+                            }
+                            sb.append("\n");
+                            hasErrors = true;
                         }
+
+                        // B2. 代码覆盖率警告
+                        JSONArray codeWarnings = testResult.getJSONArray("codeCoverageWarnings");
+                        if(codeWarnings != null && !codeWarnings.isEmpty()) {
+                            sb.append("【代码覆盖率警告】:\n");
+                            // 【优化】数量限制提升至 20 条
+                            for(int i = 0; i < Math.min(codeWarnings.size(), 20); i++) {
+                                JSONObject warn = codeWarnings.getJSONObject(i);
+                                sb.append(i + 1).append(". ").append(warn.getString("message")).append("\n");
+                            }
+                            hasErrors = true;
+                        }
+                    }
+
+                    if(hasErrors) {
+                        errorMessage = sb.toString();
                     }
                 }
             }
-            // 如果还是空的，给个默认提示
+
             if(errorMessage == null) {
-                errorMessage = "Salesforce 部署失败，请前往 Salesforce 部署状态页面查看详情。";
+                errorMessage = "部署失败 (状态: Failed)，但未返回具体的错误详情。请前往 Salesforce 部署状态页面查看。";
             }
+            // ================= 错误信息提取优化 (结束) =================
         }
 
         // 3. 更新数据库
@@ -306,13 +349,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     new LambdaQueryWrapper<SfDeployment>().eq(SfDeployment::getLastAsyncId, processId)
             );
             if(deploy != null) {
-                // 只有状态变化，或者这是最后一次确认，才更新
+                // 只有状态变化，或者有错误信息需要更新时才执行 update
                 if(!finalStatus.equals(deploy.getStatus()) || errorMessage != null) {
                     deploy.setStatus(finalStatus);
                     if(errorMessage != null) {
-                        // 截断防止溢出数据库字段 (假设 varchar(2000))
-                        if(errorMessage.length() > 1900) {
-                            errorMessage = errorMessage.substring(0, 1900) + "...(错误信息过长)";
+                        // 【优化】数据库字段已扩容到 10000，这里截断阈值设为 9900 (预留缓冲)
+                        if(errorMessage.length() > 9900) {
+                            errorMessage = errorMessage.substring(0, 9900) + "\n...(错误信息过长已截断)";
                         }
                         deploy.setErrorMsg(errorMessage);
                     }
@@ -484,10 +527,10 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     @Override
     public Map<String, Object> previewPackage(Long deploymentId) {
         SfDeployment deployment = selectSfDeploymentById(deploymentId);
-        if (deployment == null) throw new ServiceException("部署包不存在");
+        if(deployment == null) throw new ServiceException("部署包不存在");
 
         List<SfDeploymentItem> items = selectItems(deploymentId);
-        if (items.isEmpty()) throw new ServiceException("部署包为空，请先添加元数据");
+        if(items.isEmpty()) throw new ServiceException("部署包为空，请先添加元数据");
 
         // 1. 构建清单
         com.sforce.soap.metadata.Package manifest = PackageXmlBuilder.build(items);
@@ -497,11 +540,11 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         try {
             log.info("正在生成预览包，源环境: {}", deployment.getSourceOrgId());
             zipBytes = sfMetadataService.retrieveZipByManifest(deployment.getSourceOrgId(), manifest);
-        } catch (Exception e) {
+        } catch(Exception e) {
             throw new ServiceException("生成预览包失败: " + e.getMessage());
         }
 
-        if (zipBytes == null || zipBytes.length == 0) {
+        if(zipBytes == null || zipBytes.length == 0) {
             throw new ServiceException("源环境返回的部署包为空");
         }
 
@@ -515,33 +558,33 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         // 标记是否已找到主清单，防止被覆盖
         boolean foundMainManifest = false;
 
-        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
+        try(ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
             ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
+            while((entry = zis.getNextEntry()) != null) {
                 String name = entry.getName();
 
                 // 过滤文件夹
-                if (!entry.isDirectory()) {
+                if(!entry.isDirectory()) {
                     fileList.add(name);
 
                     // 【核心修复】精准匹配 package.xml
                     // 1. 优先匹配 unpackaged/package.xml (标准结构)
                     // 2. 其次匹配 package.xml (单包结构)
                     // 3. 只有当还没找到主清单时才读取，防止被后续同名文件覆盖
-                    if (!foundMainManifest) {
-                        if ("unpackaged/package.xml".equals(name) || "package.xml".equals(name)) {
+                    if(!foundMainManifest) {
+                        if("unpackaged/package.xml".equals(name) || "package.xml".equals(name)) {
                             packageXmlContent = new String(readStream(zis), StandardCharsets.UTF_8);
                             foundMainManifest = true;
                         }
                     }
                 }
             }
-        } catch (Exception e) {
+        } catch(Exception e) {
             throw new ServiceException("解析部署包内容失败: " + e.getMessage());
         }
 
         // 如果 ZIP 里实在没找到（极少情况），为了不显示空，我们可以手动根据 items 生成一个预览
-        if (packageXmlContent.isEmpty()) {
+        if(packageXmlContent.isEmpty()) {
             packageXmlContent = "\n" +
                     generateXmlStringFromManifest(items);
         }
@@ -566,13 +609,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         sb.append("<Package xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n");
 
         Map<String, List<String>> typesMap = new HashMap<>();
-        for (SfDeploymentItem item : items) {
+        for(SfDeploymentItem item : items) {
             typesMap.computeIfAbsent(item.getMetadataType(), k -> new ArrayList<>()).add(item.getMemberName());
         }
 
-        for (Map.Entry<String, List<String>> entry : typesMap.entrySet()) {
+        for(Map.Entry<String, List<String>> entry : typesMap.entrySet()) {
             sb.append("    <types>\n");
-            for (String member : entry.getValue()) {
+            for(String member : entry.getValue()) {
                 sb.append("        <members>").append(member).append("</members>\n");
             }
             sb.append("        <name>").append(entry.getKey()).append("</name>\n");
@@ -589,7 +632,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[1024];
         int len;
-        while ((len = in.read(buffer)) > 0) out.write(buffer, 0, len);
+        while((len = in.read(buffer)) > 0) out.write(buffer, 0, len);
         return out.toByteArray();
     }
 }
