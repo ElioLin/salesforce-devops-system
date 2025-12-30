@@ -5,14 +5,14 @@
         <el-tag type="success" v-if="currentOrgId">当前源环境 ID: {{ currentOrgId }}</el-tag>
       </el-col>
 
-      <el-col :span="5">
+      <el-col :span="6">
         <el-select v-model="targetOrgId" placeholder="选择目标环境(比对基准)" clearable style="width: 100%" @change="fetchList">
           <el-option v-for="item in orgOptions" :key="item.id" :label="item.name" :value="item.id"
             :disabled="item.id === currentOrgId" />
         </el-select>
       </el-col>
 
-      <el-col :span="5">
+      <el-col :span="6">
         <el-select v-model="queryParams.type" placeholder="请选择元数据类型" @change="handleTypeChange" style="width: 100%"
           filterable :loading="typesLoading">
           <el-option v-for="dict in dict.type.sys_salesforce_metadata_type" :key="dict.value" :label="dict.label"
@@ -20,15 +20,9 @@
         </el-select>
       </el-col>
 
-      <el-col :span="4">
-        <el-input v-model="queryParams.keyword" placeholder="搜索文件名..." prefix-icon="el-icon-search" clearable
-          @keyup.enter.native="handleQuery" />
-      </el-col>
-
-      <el-col :span="6">
+      <el-col :span="8" style="text-align: right;">
         <el-button-group>
-          <el-button type="primary" icon="el-icon-search" @click="handleQuery">搜索</el-button>
-
+          <el-button type="primary" icon="el-icon-search" @click="handleQuery">刷新/搜索</el-button>
           <el-button type="warning" icon="el-icon-download" @click="handleSync" :loading="syncLoading">同步</el-button>
         </el-button-group>
       </el-col>
@@ -37,10 +31,40 @@
     <el-table ref="metaTable" v-loading="loading" :data="list" height="600" style="width: 100%" border
       row-key="fullName" @select="handleSelect" @select-all="handleSelectAll">
       <el-table-column type="selection" width="55" align="center" />
-      <el-table-column prop="fullName" label="名称" show-overflow-tooltip sortable />
-      <el-table-column label="所属对象" width="150">
+      
+      <el-table-column prop="fullName">
+        <template slot="header" slot-scope="scope">
+            <div class="custom-header">
+                <span>名称</span>
+                <el-input 
+                    v-model="nameFilter" 
+                    size="mini" 
+                    placeholder="输入自动搜索..." 
+                    clearable 
+                    @input="handleInputSearch" 
+                    @click.native.stop 
+                />
+            </div>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="所属对象" width="180">
+        <template slot="header" slot-scope="scope">
+            <div class="custom-header">
+                <span>所属对象</span>
+                <el-input 
+                    v-model="parentFilter" 
+                    size="mini" 
+                    placeholder="输入自动搜索..." 
+                    clearable 
+                    @input="handleInputSearch" 
+                    @click.native.stop 
+                />
+            </div>
+        </template>
         <template slot-scope="scope">{{ getParentName(scope.row.fullName) }}</template>
       </el-table-column>
+
       <el-table-column label="差异状态" align="center" width="100">
         <template slot-scope="scope">
           <el-tag size="mini" v-if="scope.row.diffStatus" :type="getDiffTagType(scope.row.diffStatus)">{{
@@ -96,19 +120,40 @@ export default {
         type: 'ApexClass',
         keyword: ''
       },
+      // 【新增】用于绑定两个搜索框的变量
+      nameFilter: '',
+      parentFilter: '',
+      // 防抖定时器
+      debounceTimer: null
     };
   },
   methods: {
+    // ... 原有辅助方法 ...
+    getDictLabel(value) {
+        if (!value) return '';
+        const datas = this.dict.type.sys_salesforce_metadata_type;
+        if (datas) {
+            const found = datas.find(item => item.value === value);
+            if (found) { return found.label; }
+        }
+        return value;
+    },
     getParentName(name) {
       if (name && name.includes('.')) return name.split('.')[0];
       return '-';
     },
+
     open(orgId, targetOrgId, itemList = []) {
       this.currentOrgId = orgId;
       this.queryParams.orgId = orgId;
       this.targetOrgId = targetOrgId;
       this.visible = true;
       this.existMap.clear();
+      // 重置搜索框
+      this.nameFilter = '';
+      this.parentFilter = '';
+      this.queryParams.keyword = '';
+      
       if (itemList && itemList.length > 0) {
         itemList.forEach(item => {
           this.existMap.set(item.metadataType + ':' + item.memberName, item.id);
@@ -118,6 +163,7 @@ export default {
       this.loadMetadataTypes();
       this.handleQuery();
     },
+
     getOrgList() {
       request({ url: '/salesforce/org/list', method: 'get', params: { pageNum: 1, pageSize: 100 } }).then(res => { this.orgOptions = res.rows; });
     },
@@ -138,12 +184,40 @@ export default {
     },
 
     handleTypeChange() {
+      // 切换类型时，通常也需要清空搜索框
+      this.nameFilter = '';
+      this.parentFilter = '';
+      this.queryParams.keyword = '';
       this.queryParams.pageNum = 1;
       this.list = [];
       this.fetchList();
     },
 
-    /** 强制同步 */
+    /** 【新增】处理输入搜索（含防抖逻辑） */
+    handleInputSearch() {
+      // 清除上一次的定时器
+      if (this.debounceTimer) {
+        clearTimeout(this.debounceTimer);
+      }
+      
+      // 设置新的定时器 (500ms 后执行)
+      this.debounceTimer = setTimeout(() => {
+        // 策略：优先使用名称过滤，如果名称为空，则使用对象过滤
+        // 由于后端只支持一个 keyword，我们无法同时精准匹配两个字段，
+        // 但对于 Salesforce，搜索对象名其实就是搜索 fullName 的前缀，所以这样映射是合理的。
+        if (this.nameFilter) {
+            this.queryParams.keyword = this.nameFilter;
+        } else if (this.parentFilter) {
+            this.queryParams.keyword = this.parentFilter;
+        } else {
+            this.queryParams.keyword = '';
+        }
+        
+        this.queryParams.pageNum = 1;
+        this.fetchList();
+      }, 500);
+    },
+
     handleSync() {
       if (!this.queryParams.type) {
         this.$modal.msgWarning("请先选择元数据类型");
@@ -163,7 +237,6 @@ export default {
       });
     },
 
-    /** 拉取列表 */
     fetchList() {
       if (!this.queryParams.orgId) return;
       this.loading = true;
@@ -282,5 +355,21 @@ export default {
 <style scoped>
 .mb8 {
   margin-bottom: 20px;
+}
+
+/* 复用自定义表头样式 */
+.custom-header {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    line-height: 1.2;
+    padding-bottom: 5px;
+}
+.custom-header span {
+    margin-bottom: 5px;
+}
+.custom-header .el-input {
+    width: 100%;
+    font-weight: normal;
 }
 </style>

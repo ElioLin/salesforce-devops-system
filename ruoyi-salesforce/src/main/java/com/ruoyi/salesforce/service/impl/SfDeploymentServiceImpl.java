@@ -247,9 +247,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         String finalStatus = null;
         String errorMessage = null;
 
-        if("Succeeded".equals(status)) {
+        if ("Succeeded".equals(status)) {
             finalStatus = "Succeeded";
-        } else if("Failed".equals(status) || "Canceled".equals(status)) {
+        } else if ("Failed".equals(status) || "Canceled".equals(status)) {
             finalStatus = "Failed";
 
             // ================= 错误信息提取优化 (开始) =================
@@ -257,20 +257,20 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             errorMessage = result.getString("errorMessage");
 
             // 2. 如果没有顶层错误，深入 details 查找具体的元数据或测试错误
-            if(errorMessage == null) {
+            if (errorMessage == null) {
                 JSONObject details = result.getJSONObject("details");
-                if(details != null) {
+                if (details != null) {
                     StringBuilder sb = new StringBuilder();
                     boolean hasErrors = false;
 
                     // --- A. 处理组件/元数据部署失败 (componentFailures) ---
                     JSONArray failures = details.getJSONArray("componentFailures");
-                    if(failures != null && !failures.isEmpty()) {
+                    if (failures != null && !failures.isEmpty()) {
                         sb.append("【元数据校验失败】:\n");
 
                         // 【优化】数量限制提升至 50 条
                         int count = Math.min(failures.size(), 50);
-                        for(int i = 0; i < count; i++) {
+                        for (int i = 0; i < count; i++) {
                             JSONObject fail = failures.getJSONObject(i);
                             String fileName = fail.getString("fileName");
                             String problem = fail.getString("problem");
@@ -278,12 +278,12 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
                             // 格式: 1. [classes/MyClass.cls] (Line:10): 变量未定义...
                             sb.append(i + 1).append(". [").append(fileName).append("]");
-                            if(lineNumber != null) {
+                            if (lineNumber != null) {
                                 sb.append(" (Line:").append(lineNumber).append(")");
                             }
                             sb.append(": ").append(problem).append("\n");
                         }
-                        if(failures.size() > 50) {
+                        if (failures.size() > 50) {
                             sb.append("... (还有 ").append(failures.size() - 50).append(" 个元数据错误未显示)\n");
                         }
                         sb.append("\n"); // 分类之间空一行
@@ -291,17 +291,17 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     }
 
                     // --- B. 处理单元测试运行失败 (runTestResult) ---
-                    if(details.containsKey("runTestResult")) {
+                    if (details.containsKey("runTestResult")) {
                         JSONObject testResult = details.getJSONObject("runTestResult");
 
-                        // B1. 测试断言失败
+                        // B1. 测试断言失败 (failures)
                         JSONArray testFailures = testResult.getJSONArray("failures");
-                        if(testFailures != null && !testFailures.isEmpty()) {
+                        if (testFailures != null && !testFailures.isEmpty()) {
                             sb.append("【单元测试失败】:\n");
 
                             // 【优化】数量限制提升至 50 条
                             int count = Math.min(testFailures.size(), 50);
-                            for(int i = 0; i < count; i++) {
+                            for (int i = 0; i < count; i++) {
                                 JSONObject fail = testFailures.getJSONObject(i);
                                 String className = fail.getString("name");
                                 String methodName = fail.getString("methodName");
@@ -311,50 +311,62 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                                 sb.append(i + 1).append(". [").append(className).append(".").append(methodName).append("]: ")
                                         .append(message).append("\n");
                             }
-                            if(testFailures.size() > 50) {
+                            if (testFailures.size() > 50) {
                                 sb.append("... (还有 ").append(testFailures.size() - 50).append(" 个测试失败未显示)\n");
                             }
                             sb.append("\n");
                             hasErrors = true;
                         }
 
-                        // B2. 代码覆盖率警告
+                        // B2. 代码覆盖率警告 (重点优化部分)
                         JSONArray codeWarnings = testResult.getJSONArray("codeCoverageWarnings");
-                        if(codeWarnings != null && !codeWarnings.isEmpty()) {
+                        if (codeWarnings != null && !codeWarnings.isEmpty()) {
                             sb.append("【代码覆盖率警告】:\n");
-                            // 【优化】数量限制提升至 20 条
-                            for(int i = 0; i < Math.min(codeWarnings.size(), 20); i++) {
+                            // 覆盖率警告通常比较重要，建议多显示一些
+                            int count = Math.min(codeWarnings.size(), 50);
+                            for (int i = 0; i < count; i++) {
                                 JSONObject warn = codeWarnings.getJSONObject(i);
-                                sb.append(i + 1).append(". ").append(warn.getString("message")).append("\n");
+                                String name = warn.getString("name"); // 获取具体的类名
+                                String msg = warn.getString("message"); // 获取具体信息
+
+                                sb.append(i + 1).append(". ");
+                                // 【新增】如果有具体的类名，将其拼接到错误信息前
+                                if (name != null && !name.isEmpty() && !"null".equals(name)) {
+                                    sb.append("Class [").append(name).append("]: ");
+                                }
+                                sb.append(msg).append("\n");
+                            }
+                            if (codeWarnings.size() > 50) {
+                                sb.append("... (还有 ").append(codeWarnings.size() - 50).append(" 个覆盖率警告未显示)\n");
                             }
                             hasErrors = true;
                         }
                     }
 
-                    if(hasErrors) {
+                    if (hasErrors) {
                         errorMessage = sb.toString();
                     }
                 }
             }
 
-            if(errorMessage == null) {
+            if (errorMessage == null) {
                 errorMessage = "部署失败 (状态: Failed)，但未返回具体的错误详情。请前往 Salesforce 部署状态页面查看。";
             }
             // ================= 错误信息提取优化 (结束) =================
         }
 
         // 3. 更新数据库
-        if(finalStatus != null) {
+        if (finalStatus != null) {
             SfDeployment deploy = sfDeploymentMapper.selectOne(
                     new LambdaQueryWrapper<SfDeployment>().eq(SfDeployment::getLastAsyncId, processId)
             );
-            if(deploy != null) {
+            if (deploy != null) {
                 // 只有状态变化，或者有错误信息需要更新时才执行 update
-                if(!finalStatus.equals(deploy.getStatus()) || errorMessage != null) {
+                if (!finalStatus.equals(deploy.getStatus()) || errorMessage != null) {
                     deploy.setStatus(finalStatus);
-                    if(errorMessage != null) {
+                    if (errorMessage != null) {
                         // 【优化】数据库字段已扩容到 10000，这里截断阈值设为 9900 (预留缓冲)
-                        if(errorMessage.length() > 9900) {
+                        if (errorMessage.length() > 9900) {
                             errorMessage = errorMessage.substring(0, 9900) + "\n...(错误信息过长已截断)";
                         }
                         deploy.setErrorMsg(errorMessage);

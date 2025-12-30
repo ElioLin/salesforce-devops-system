@@ -98,17 +98,57 @@
                 </div>
             </div>
 
-            <el-table v-loading="loadingItems" :data="itemList" border style="width: 100%">
-                <el-table-column label="类型" prop="metadataType" width="250" sortable>
+            <el-table v-loading="loadingItems" :data="filteredItemList" border style="width: 100%">
+
+                <el-table-column prop="metadataType" width="250" sortable>
+                    <template slot="header" slot-scope="scope">
+                        <div class="custom-header">
+                            <span>类型</span>
+                            <el-select v-model="columnFilters.type" size="mini" placeholder="全部" clearable 
+                                @click.native.stop filterable>
+                                <el-option 
+                                    v-for="type in existingTypeOptions" 
+                                    :key="type" 
+                                    :label="getDictLabel(type)" 
+                                    :value="type" 
+                                />
+                            </el-select>
+                        </div>
+                    </template>
                     <template slot-scope="scope">
                         {{ getDictLabel(scope.row.metadataType) }}
                     </template>
                 </el-table-column>
-                <el-table-column label="名称" prop="memberName" sortable />
-                <el-table-column label="所属对象" width="150">
+
+                <el-table-column prop="memberName" sortable>
+                    <template slot="header" slot-scope="scope">
+                        <div class="custom-header">
+                            <span>名称</span>
+                            <el-input v-model="columnFilters.name" size="mini" placeholder="筛选名称..." clearable
+                                @click.native.stop />
+                        </div>
+                    </template>
+                </el-table-column>
+
+                <el-table-column width="150" sortable>
+                    <template slot="header" slot-scope="scope">
+                        <div class="custom-header">
+                            <span>所属对象</span>
+                            <el-input v-model="columnFilters.parent" size="mini" placeholder="筛选..." clearable
+                                @click.native.stop />
+                        </div>
+                    </template>
                     <template slot-scope="scope">{{ getParentName(scope.row.memberName) }}</template>
                 </el-table-column>
-                <el-table-column label="差异状态" align="center" width="120">
+
+                <el-table-column align="center" width="120" sortable prop="diffStatus">
+                    <template slot="header" slot-scope="scope">
+                        <div class="custom-header">
+                            <span>差异</span>
+                            <el-input v-model="columnFilters.status" size="mini" placeholder="筛选..." clearable
+                                @click.native.stop />
+                        </div>
+                    </template>
                     <template slot-scope="scope">
                         <el-tooltip :content="scope.row.diffStatus || 'Unknown'" placement="top">
                             <i :class="getDiffIcon(scope.row.diffStatus)"
@@ -117,6 +157,7 @@
                         <span style="margin-left:5px">{{ scope.row.diffStatus }}</span>
                     </template>
                 </el-table-column>
+
                 <el-table-column label="管理" width="180" align="center">
                     <template slot-scope="scope">
                         <el-button size="mini" type="text" icon="el-icon-connection" :disabled="!deployment.targetOrgId"
@@ -225,10 +266,19 @@ export default {
                 loading: false,
                 files: [],
                 packageXml: ''
+            },
+
+            // 【新增】列过滤器对象
+            columnFilters: {
+                type: '',
+                name: '',
+                parent: '',
+                status: ''
             }
         };
     },
     computed: {
+        // ... 原有 computed 保持不变 ...
         sourceOrgName() {
             if (!this.deployment || !this.deployment.sourceOrgId) return '-';
             return this.orgMap[this.deployment.sourceOrgId] || this.deployment.sourceOrgId;
@@ -253,6 +303,38 @@ export default {
             if (this.progressStatus === 'success') return 'el-icon-circle-check';
             if (this.progressStatus === 'exception') return 'el-icon-circle-close';
             return 'el-icon-loading';
+        },
+        //动态计算当前列表中所有的元数据类型，供下拉框使用
+        existingTypeOptions() {
+            if (!this.itemList || this.itemList.length === 0) return [];
+            // 提取所有类型并去重
+            const types = new Set(this.itemList.map(item => item.metadataType));
+            return Array.from(types).sort();
+        },
+
+        // 【新增】前端过滤逻辑
+        filteredItemList() {
+            return this.itemList.filter(item => {
+                // 1. 类型过滤 (精准匹配 API Name，因为下拉框给的是 Value)
+                if (this.columnFilters.type) {
+                    if (item.metadataType !== this.columnFilters.type) return false;
+                }
+                // 2. 名称过滤
+                if (this.columnFilters.name) {
+                    if (!item.memberName.toLowerCase().includes(this.columnFilters.name.toLowerCase())) return false;
+                }
+                // 3. Parent过滤
+                if (this.columnFilters.parent) {
+                    const parent = this.getParentName(item.memberName);
+                    if (!parent.toLowerCase().includes(this.columnFilters.parent.toLowerCase())) return false;
+                }
+                // 4. 状态过滤
+                if (this.columnFilters.status) {
+                    const status = item.diffStatus || '';
+                    if (!status.toLowerCase().includes(this.columnFilters.status.toLowerCase())) return false;
+                }
+                return true;
+            });
         }
     },
     created() {
@@ -268,6 +350,7 @@ export default {
         if (this.statusTimer) clearInterval(this.statusTimer);
     },
     methods: {
+        // ... 原有方法保持不变 ...
         initData() {
             this.loading = true;
             const p1 = listOrg({ pageNum: 1, pageSize: 100 }).then(res => {
@@ -317,7 +400,6 @@ export default {
             });
         },
 
-        /** 解析 Parent Name */
         getParentName(name) {
             if (name && name.includes('.')) {
                 return name.split('.')[0];
@@ -336,7 +418,6 @@ export default {
             });
         },
 
-        /** 【新增】点击预览部署包 */
         handlePreviewPackage() {
             this.previewDialog.open = true;
             this.previewDialog.loading = true;
@@ -344,7 +425,7 @@ export default {
             this.previewDialog.packageXml = '';
 
             previewDeploymentPackage(this.deploymentId).then(res => {
-                const data = res.data; // { files: [], packageXml: "..." }
+                const data = res.data;
                 this.previewDialog.files = data.files || [];
                 this.previewDialog.packageXml = data.packageXml || '无内容';
                 this.previewDialog.loading = false;
@@ -400,16 +481,12 @@ export default {
             return '#409EFF';
         },
 
-        /** 通用比对方法 (已优化：兼容两种数据格式) */
         handleDiff(row) {
             if (!this.deployment.targetOrgId) {
                 this.$modal.msgWarning("请先设置部署包的目标环境，才能进行比对！");
                 return;
             }
 
-            // 【核心修复】兼容处理：
-            // 1. row.metadataType / row.memberName 来自数据库列表 (SfDeploymentItem)
-            // 2. row.type / row.name 来自元数据浏览器 (MetadataBrowser event)
             const type = row.metadataType || row.type;
             const name = row.memberName || row.name || row.fullName;
 
@@ -431,8 +508,8 @@ export default {
                 params: {
                     sourceOrgId: this.deployment.sourceOrgId,
                     targetOrgId: this.deployment.targetOrgId,
-                    type: type, // 使用兼容后的变量
-                    name: name  // 使用兼容后的变量
+                    type: type,
+                    name: name
                 }
             }).then(response => {
                 loading.close();
@@ -700,7 +777,7 @@ export default {
 }
 
 .file-list-container {
-    height: 400px;
+    height: 600px;
     overflow-y: auto;
     border: 1px solid #dcdfe6;
     border-radius: 4px;
@@ -719,5 +796,23 @@ export default {
     font-size: 13px;
     border-bottom: 1px dashed #eee;
     color: #333;
+}
+
+/* 【新增】自定义表头样式 */
+.custom-header {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    line-height: 1.2;
+    padding-bottom: 5px;
+}
+
+.custom-header span {
+    margin-bottom: 5px;
+}
+
+.custom-header .el-input {
+    width: 100%;
+    font-weight: normal;
 }
 </style>
