@@ -702,3 +702,58 @@ create table gen_table_column (
   update_time       datetime                                   comment '更新时间',
   primary key (column_id)
 ) engine=innodb auto_increment=1 comment = '代码生成业务表字段';
+
+-- sf_devops.sf_org definition
+drop table if exists sf_org;
+CREATE TABLE `sf_org` (
+                          `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键',
+                          `name` varchar(50) DEFAULT NULL COMMENT '环境别名(如: 开发环境)',
+                          `org_type` varchar(20) DEFAULT 'Sandbox' COMMENT '环境类型(Production/Sandbox)',
+                          `org_id` varchar(18) DEFAULT NULL COMMENT 'Salesforce Org ID',
+                          `username` varchar(100) DEFAULT NULL COMMENT '登录用户名',
+                          `instance_url` varchar(200) DEFAULT NULL COMMENT '实例地址(https://xxx.my.salesforce.com)',
+                          `access_token` text COMMENT '短期访问令牌',
+                          `refresh_token` varchar(500) DEFAULT NULL COMMENT '长期刷新令牌(关键)',
+                          `client_id` varchar(200) DEFAULT NULL COMMENT 'App Key',
+                          `client_secret` varchar(200) DEFAULT NULL COMMENT 'App Secret',
+                          `create_time` datetime DEFAULT NULL,
+                          `update_time` datetime DEFAULT NULL,
+                          `custom_domain` varchar(100) DEFAULT NULL COMMENT '自定义域名',
+                          PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Salesforce环境管理';
+
+-- sf_devops.sf_deployment definition
+drop table if exists sf_deployment;
+CREATE TABLE `sf_deployment` (
+                                 `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键',
+                                 `title` varchar(200) DEFAULT '' COMMENT '部署包标题',
+                                 `source_org_id` bigint DEFAULT NULL COMMENT '源环境ID',
+                                 `target_org_id` bigint DEFAULT NULL COMMENT '目标环境ID',
+                                 `status` varchar(50) DEFAULT 'Draft' COMMENT '状态(Draft/Validated/Deploying/Succeeded/Failed)',
+                                 `test_level` varchar(50) DEFAULT 'NoTestRun' COMMENT '测试级别(NoTestRun/RunLocalTests/RunSpecifiedTests)',
+                                 `specified_tests` text COMMENT '指定测试类(逗号分隔)',
+                                 `description` varchar(500) DEFAULT '' COMMENT '备注描述',
+                                 `del_flag` char(1) DEFAULT '0' COMMENT '删除标志（0代表存在 2代表删除）',
+                                 `create_by` varchar(64) DEFAULT '' COMMENT '创建者',
+                                 `create_time` datetime DEFAULT NULL COMMENT '创建时间',
+                                 `update_by` varchar(64) DEFAULT '' COMMENT '更新者',
+                                 `update_time` datetime DEFAULT NULL COMMENT '更新时间',
+                                 `last_async_id` varchar(50) DEFAULT NULL COMMENT 'Salesforce异步处理ID',
+                                 `error_msg` varchar(10000) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT NULL COMMENT '最后一次部署错误信息',
+                                 PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=2005899145773850627 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Salesforce部署包主表';
+
+
+-- sf_devops.sf_deployment_item definition
+drop table if exists sf_deployment_item;
+CREATE TABLE `sf_deployment_item` (
+                                      `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键',
+                                      `deployment_id` bigint NOT NULL COMMENT '部署主表ID',
+                                      `metadata_type` varchar(100) DEFAULT '' COMMENT '元数据类型(ApexClass等)',
+                                      `member_name` varchar(200) DEFAULT '' COMMENT '元数据名称',
+                                      `action` varchar(20) DEFAULT 'Add' COMMENT '动作(Add/Delete)',
+                                      `create_time` datetime DEFAULT NULL COMMENT '创建时间',
+                                      `diff_status` varchar(20) DEFAULT '' COMMENT '比对状态: New/Changed/Same/Invalid',
+                                      `last_check_time` datetime DEFAULT NULL COMMENT '最后比对时间',
+                                      PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=2005906218158927874 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Salesforce部署包明细表';

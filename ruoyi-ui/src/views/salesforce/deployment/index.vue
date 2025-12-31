@@ -28,14 +28,25 @@
     <el-table v-loading="loading" :data="deploymentList" @selection-change="handleSelectionChange" border>
       <el-table-column type="selection" width="55" align="center" />
       <el-table-column label="标题" prop="title" show-overflow-tooltip />
-      <el-table-column label="源环境ID" prop="sourceOrgId" width="100" align="center" />
-      <el-table-column label="目标环境ID" prop="targetOrgId" width="100" align="center" />
+
+      <el-table-column label="源环境" prop="sourceOrgId" width="150" align="center">
+        <template slot-scope="scope">
+          {{ formatOrgName(scope.row.sourceOrgId) }}
+        </template>
+      </el-table-column>
+
+      <el-table-column label="目标环境" prop="targetOrgId" width="150" align="center">
+        <template slot-scope="scope">
+          {{ formatOrgName(scope.row.targetOrgId) }}
+        </template>
+      </el-table-column>
+
       <el-table-column label="状态" prop="status" width="120" align="center">
         <template slot-scope="scope">
           <el-tag :type="statusType(scope.row.status)">{{ scope.row.status }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="测试级别" prop="testLevel" width="120" align="center" />
+
       <el-table-column label="创建者" prop="createBy" width="100" align="center" />
       <el-table-column label="创建时间" prop="createTime" width="160" align="center" />
       <el-table-column label="操作" align="center" class-name="small-padding fixed-width">
@@ -101,7 +112,7 @@
 
 <script>
 import { listDeployment, addDeployment, updateDeployment, delDeployment, getDeployment } from "@/api/salesforce/deployment";
-import { listOrg } from "@/api/salesforce/org"; // 假设你有这个API获取Org列表
+import { listOrg } from "@/api/salesforce/org";
 import request from '@/utils/request';
 
 export default {
@@ -161,8 +172,16 @@ export default {
     },
     /** 获取Org列表 */
     getOrgList() {
-      // 假设API是 listOrg
+      // 注意：这里默认取前100个环境，如果你的环境数量非常多，建议后端提供不分页的全部列表接口
       listOrg({ pageNum: 1, pageSize: 100 }).then(res => this.orgOptions = res.rows);
+    },
+    /** 【修改点 3】新增格式化环境名称的方法 */
+    formatOrgName(orgId) {
+      if (!orgId) return '';
+      // 在 orgOptions 数组里查找 ID 匹配的项
+      const org = this.orgOptions.find(item => item.id === orgId);
+      // 找到了返回名字，没找到（可能还没加载完）返回 ID
+      return org ? org.name : orgId;
     },
     /** 状态显示样式 */
     statusType(status) {
@@ -207,7 +226,6 @@ export default {
     /** 修改按钮操作 */
     handleUpdate(row) {
       this.form = {}; // 先重置表单
-      // 优先使用行内 ID，如果没传 row (比如点的顶部修改按钮)，就用选中的 ids
       const id = row.id || this.ids;
 
       if (!id) {
@@ -217,10 +235,6 @@ export default {
 
       getDeployment(id).then(response => {
         this.form = response.data;
-
-        // 【重要】有些下拉框可能因为数据类型问题回显失败（比如数字 vs 字符串）
-        // 如果你的 OrgId 是数字，下拉框 value 也是数字，那就没问题。
-
         this.open = true;
         this.title = "修改部署包";
       });
@@ -235,7 +249,6 @@ export default {
               this.open = false;
               this.getList();
             }).catch(() => {
-              // 防止点击没反应：如果报错了，至少控制台会有输出
             });
           } else {
             addDeployment(this.form).then(response => {
@@ -247,8 +260,8 @@ export default {
         }
       });
     },
-     // 取消按钮
-     cancel() {
+    // 取消按钮
+    cancel() {
       this.open = false
       this.reset()
     },
@@ -264,9 +277,8 @@ export default {
     },
     /** 进入详情页 */
     handleEnterDetail(row) {
-      // 路由跳转，注意需要在 router/index.js 配置路由
       this.$router.push({
-        path: "/salesforce/deploymentDetail", 
+        path: "/salesforce/deploymentDetail",
         query: { id: row.id }
       });
     }

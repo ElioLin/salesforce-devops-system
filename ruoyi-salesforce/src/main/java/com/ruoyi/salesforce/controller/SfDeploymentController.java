@@ -12,6 +12,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
@@ -176,5 +178,11 @@ public class SfDeploymentController extends BaseController {
         } catch (Exception e) {
             return AjaxResult.error(e.getMessage());
         }
+    }
+
+    @PreAuthorize("@ss.hasPermi('salesforce:deployment:query')")
+    @PostMapping("/download/{deploymentId}")
+    public void download(@PathVariable("deploymentId") Long deploymentId, HttpServletResponse response) throws IOException {
+        sfDeploymentService.downloadPackage(deploymentId, response);
     }
 }

@@ -220,7 +220,8 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     }
 
     /**
-     * 智能解压策略：支持 LWC(多文件)、CustomField(嵌套)、Apex(单文件)
+     * 【核心修复】智能解压策略
+     * 自动处理嵌套在 .object 或 .workflow 文件中的子元数据
      */
     private String smartExtract(byte[] zipData, String type, String memberName) throws Exception {
         if(zipData == null || zipData.length == 0) return "No content retrieved.";
@@ -232,45 +233,53 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             ZipEntry entry;
             while((entry = zis.getNextEntry()) != null) {
                 String entryName = entry.getName();
-
-                // 忽略目录和 package.xml
                 if(entry.isDirectory() || entryName.endsWith("package.xml")) continue;
 
                 boolean isMatch = false;
 
-                // 1. 自定义字段特殊处理: Account.MyField__c -> 位于 objects/Account.object
-                if("CustomField".equals(type) && memberName.contains(".")) {
+                // 1. 【修复】对象子类型 (CustomField, ValidationRule, RecordType 等)
+                // 它们都存在于 objects/ObjectName.object 文件中
+                // memberName 格式通常为: ObjectName.FieldName
+                if (isObjectChild(type) && memberName.contains(".")) {
                     String objName = memberName.split("\\.")[0];
-                    if(entryName.endsWith(objName + ".object")) isMatch = true;
+                    // 匹配文件名是否以 "objects/ObjectName.object" 结尾
+                    if (entryName.endsWith("objects/" + objName + ".object")) {
+                        isMatch = true;
+                    }
                 }
-                // 2. LWC / Aura Bundle: 路径包含组件名 (如 lwc/myComp/myComp.js)
+                // 2. 【修复】工作流子类型 (WorkflowRule, WorkflowAlert 等)
+                // 存在于 workflows/ObjectName.workflow 文件中
+                else if (isWorkflowChild(type) && memberName.contains(".")) {
+                    String objName = memberName.split("\\.")[0];
+                    if (entryName.endsWith("workflows/" + objName + ".workflow")) {
+                        isMatch = true;
+                    }
+                }
+                // 3. Bundle 类型 (LWC, Aura)
                 else if(isBundleType(type) && entryName.contains(memberName)) {
                     isMatch = true;
                 }
-                // 3. 通用匹配: 文件名包含元数据名 (如 classes/MyClass.cls)
+                // 4. 标准匹配 (ApexClass, Page 等)
                 else if(entryName.contains(memberName)) {
                     isMatch = true;
                 }
 
                 if(isMatch) {
                     found = true;
-                    // 读取文件内容
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[1024];
                     int len;
                     while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
                     String fileContent = new String(bos.toByteArray(), StandardCharsets.UTF_8);
 
-                    // 如果是 Bundle，拼接多个文件展示
                     if(isBundleType(type)) {
                         contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n");
                         contentBuilder.append(fileContent).append("\n\n");
                     } else {
-                        // 对于单文件，优先返回代码文件，忽略 -meta.xml (除非只有 meta.xml)
-                        if(!entryName.endsWith("-meta.xml")) {
+                        // 优先返回非 meta 文件，但如果是 .object 或 .workflow 这种单文件，直接返回
+                        if(!entryName.endsWith("-meta.xml") || entryName.endsWith(".object") || entryName.endsWith(".workflow")) {
                             return fileContent;
                         }
-                        // 如果暂只找到 meta.xml，先缓存，万一没别的代码文件就返回它
                         if(contentBuilder.length() == 0) {
                             contentBuilder.append(fileContent);
                         }
@@ -283,6 +292,21 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             return "Error: File not found in retrieved package. (Type: " + type + ", Name: " + memberName + ")";
         }
         return contentBuilder.toString();
+    }
+
+    // 辅助判断：是否为对象子类型
+    private boolean isObjectChild(String type) {
+        return Arrays.asList(
+                "CustomField", "ValidationRule", "RecordType", "WebLink", "ListView", "FieldSet",
+                "CompactLayout", "BusinessProcess", "Index", "SharingReason"
+        ).contains(type);
+    }
+
+    // 辅助判断：是否为工作流子类型
+    private boolean isWorkflowChild(String type) {
+        return Arrays.asList(
+                "WorkflowRule", "WorkflowAlert", "WorkflowFieldUpdate", "WorkflowOutboundMessage", "WorkflowTask"
+        ).contains(type);
     }
 
     private boolean isBundleType(String type) {

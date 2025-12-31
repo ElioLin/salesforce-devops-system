@@ -39,10 +39,10 @@
 
          <!-- Mysql驱动包 -->
         <dependency>
-            <groupId>mysql</groupId>
-            <artifactId>mysql-connector-java</artifactId>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>8.0.33</version>
         </dependency>
-
         <!-- 核心模块-->
         <dependency>
             <groupId>com.ruoyi</groupId>
