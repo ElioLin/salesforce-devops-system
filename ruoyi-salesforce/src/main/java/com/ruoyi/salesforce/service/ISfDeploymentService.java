@@ -3,6 +3,8 @@ package com.ruoyi.salesforce.service;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.ruoyi.salesforce.domain.SfDeployment;
 import com.ruoyi.salesforce.domain.SfDeploymentItem;
+
+import javax.servlet.http.HttpServletResponse;
 import java.util.List;
 import java.util.Map;
 
@@ -56,4 +58,6 @@ public interface ISfDeploymentService extends IService<SfDeployment> {
 
     // 【新增】预览部署包
     Map<String, Object> previewPackage(Long deploymentId);
+
+    void downloadPackage(Long deploymentId, HttpServletResponse response);
 }

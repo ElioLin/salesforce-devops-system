@@ -68,6 +68,11 @@
                 <artifactId>force-partner-api</artifactId>
                 <version>58.0.0</version>
             </dependency>
+            <dependency>
+                <groupId>com.force.api</groupId>
+                <artifactId>force-enterprise-api</artifactId>
+                <version>58.0.0</version>
+            </dependency>
             <!-- 覆盖SpringFramework的依赖配置-->
             <dependency>
                 <groupId>org.springframework</groupId>

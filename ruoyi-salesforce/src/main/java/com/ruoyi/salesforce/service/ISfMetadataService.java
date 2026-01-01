@@ -68,4 +68,9 @@ public interface ISfMetadataService {
      * 【新增】将 Salesforce 元数据类型同步到若依数据字典
      */
     void syncMetadataToDict(Long orgId) throws Exception;
+
+    /**
+     * 清除指定 Org 的所有元数据缓存
+     */
+    void clearCacheForOrg(Long orgId);
 }
