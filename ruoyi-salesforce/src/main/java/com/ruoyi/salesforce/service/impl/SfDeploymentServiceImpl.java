@@ -13,6 +13,8 @@ import com.ruoyi.salesforce.service.ISfDeploymentService;
 import com.ruoyi.salesforce.service.ISfMetadataService;
 import com.ruoyi.salesforce.utils.MetadataCleaner;
 import com.ruoyi.salesforce.utils.PackageXmlBuilder;
+import com.ruoyi.salesforce.utils.SfMetadataDiffUtils;
+import com.ruoyi.salesforce.websocket.DeployWebSocketServer;
 import com.sforce.soap.metadata.*;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
@@ -29,6 +31,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -144,6 +147,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
     private void processAsyncDeployment(SfDeployment deployment, List<SfDeploymentItem> items, boolean checkOnly) {
         try {
+            // 推送 WS 消息：开始准备
+            DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在提取代码..."));
+
             com.sforce.soap.metadata.Package manifest = generateManifestObject(items);
 
             log.info("开始提取代码，Org: {}", deployment.getSourceOrgId());
@@ -155,11 +161,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
             // 清洗元数据
             log.info("开始清洗元数据...");
+            DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在清洗元数据..."));
             zipBytes = MetadataCleaner.clean(zipBytes, items);
             log.info("元数据清洗完成，ZIP大小: {} bytes", zipBytes.length);
 
             // 部署
             log.info("开始部署，Org: {}", deployment.getTargetOrgId());
+            DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在上传至目标环境..."));
             MetadataConnection targetConn = sfMetadataService.getMetadataConnection(deployment.getTargetOrgId());
 
             DeployOptions deployOptions = new DeployOptions();
@@ -188,9 +196,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
             log.info("部署请求已提交，AsyncId: {}", deployAsync.getId());
 
+            // 【关键】启动后台监控线程，轮询 SF 状态并推送 WS
+            startMonitoring(deployment.getId(), deployment.getTargetOrgId(), deployAsync.getId());
+
         } catch(Exception e) {
             log.error("部署流程处理失败", e);
             handleDeploymentError(deployment.getId(), "流程异常: " + e.getMessage());
+            DeployWebSocketServer.sendMessage(deployment.getId(), buildErrorJson(e.getMessage()));
         }
     }
 
@@ -199,7 +211,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         SfDeployment deployment = selectSfDeploymentById(deploymentId);
         if(deployment == null) throw new ServiceException("部署包不存在");
 
-        if(!"Succeeded".equals(deployment.getStatus()) || deployment.getLastAsyncId() == null) {
+        if(!"Validated".equals(deployment.getStatus()) || deployment.getLastAsyncId() == null) {
             throw new ServiceException("只有【验证成功】的部署包才能使用快速部署");
         }
 
@@ -209,6 +221,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
         CompletableFuture.runAsync(() -> {
             try {
+                DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在启动快速部署..."));
                 log.info("开始快速部署, Org: {}, ValidationId: {}", deployment.getTargetOrgId(), deployment.getLastAsyncId());
                 String newProcessId = sfMetadataService.deployRecentValidation(
                         deployment.getTargetOrgId(),
@@ -218,48 +231,110 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 update.setId(deployment.getId());
                 update.setLastAsyncId(newProcessId);
                 sfDeploymentMapper.updateById(update);
+
+                // 【关键】启动监控
+                startMonitoring(deployment.getId(), deployment.getTargetOrgId(), newProcessId);
+
             } catch(Exception e) {
                 log.error("快速部署失败", e);
                 handleDeploymentError(deployment.getId(), "快速部署异常: " + e.getMessage());
+                DeployWebSocketServer.sendMessage(deployment.getId(), buildErrorJson(e.getMessage()));
             }
         });
     }
 
     /**
-     * 【核心修改】检查部署状态并在成功后清理缓存
+     * 【新增】后台监控线程
+     * 轮询 Salesforce 状态并推送 WebSocket，直到完成
      */
+    private void startMonitoring(Long deploymentId, Long targetOrgId, String processId) {
+        CompletableFuture.runAsync(() -> {
+            boolean done = false;
+            long startTime = System.currentTimeMillis();
+
+            while (!done) {
+                try {
+                    // 超时保护 (1小时)
+                    if (System.currentTimeMillis() - startTime > 3600 * 1000) {
+                        log.error("部署监控超时，停止轮询: {}", processId);
+                        break;
+                    }
+
+                    // 1. 调用 sfMetadataService 获取状态 (返回的是安全 JSON 字符串)
+                    String statusJson = checkDeployStatus(targetOrgId, processId);
+
+                    // 2. 推送消息给前端
+                    DeployWebSocketServer.sendMessage(deploymentId, statusJson);
+
+                    // 3. 判断是否结束
+                    JSONObject json = JSONObject.parseObject(statusJson);
+                    boolean isDone = json.getBooleanValue("done");
+
+                    if (isDone) {
+                        done = true;
+                        log.info("部署任务结束: {}", processId);
+                    } else {
+                        // 未结束，等待 2 秒
+                        TimeUnit.SECONDS.sleep(2);
+                    }
+
+                } catch (Exception e) {
+                    log.error("监控线程异常", e);
+                    try { TimeUnit.SECONDS.sleep(5); } catch (InterruptedException ignored) {}
+                }
+            }
+        });
+    }
+
+    private String buildProgressJson(String status, String detail) {
+        JSONObject json = new JSONObject();
+        json.put("status", status);
+        json.put("stateDetail", detail);
+        json.put("numberComponentsTotal", 0);
+        json.put("numberComponentsDeployed", 0);
+        json.put("done", false);
+        return json.toJSONString();
+    }
+
+    private String buildErrorJson(String msg) {
+        JSONObject json = new JSONObject();
+        json.put("status", "Failed");
+        json.put("errorMsg", msg);
+        json.put("done", true);
+        return json.toJSONString();
+    }
+
     @Override
     public String checkDeployStatus(Long targetOrgId, String processId) throws Exception {
+        // 调用 Metadata Service 获取安全 JSON
         String statusJson = sfMetadataService.checkDeployStatus(targetOrgId, processId);
         JSONObject result = JSONObject.parseObject(statusJson);
         String status = result.getString("status");
-        // 【关键】获取本次请求是否为 CheckOnly (验证模式)
         boolean isCheckOnly = result.getBooleanValue("checkOnly");
 
         String finalStatus = null;
         String errorMessage = null;
 
         if("Succeeded".equals(status)) {
-            finalStatus = "Succeeded";
-
-            // ================= 【新增】 自动清理 Redis 缓存 =================
-            // 只有当部署真正成功（非验证模式，或验证模式也可选清理）时，才需要清理
-            // 这里我们简单处理：只要 Salesforce 返回 Succeeded，就清理目标环境缓存
-            if(!isCheckOnly) {
+            // 【关键修改】区分验证成功和部署成功
+            if(isCheckOnly) {
+                finalStatus = "Validated"; // 验证成功 -> Validated
+            } else {
+                finalStatus = "Succeeded"; // 部署成功 -> Succeeded
                 try {
-                    log.info("检测到部署成功 (非验证)，正在清理 Org [{}] 的元数据缓存...", targetOrgId);
                     sfMetadataService.clearCacheForOrg(targetOrgId);
                 } catch(Exception e) {
                     log.warn("自动清理缓存失败: {}", e.getMessage());
                 }
-            } else {
-                log.info("验证成功 (CheckOnly=true)，无需清理元数据缓存。");
             }
-            // ==============================================================
-
         } else if("Failed".equals(status) || "Canceled".equals(status)) {
             finalStatus = "Failed";
-            errorMessage = extractErrorMessage(result);
+            // 错误信息已包含在 statusJson 中，无需重新提取，但为了存库需要解析出来
+            errorMessage = result.getString("errorMessage");
+            // 如果 JSON 里没提取到顶层 errorMsg，尝试构建简要信息
+            if (errorMessage == null && "Failed".equals(status)) {
+                errorMessage = "部署验证失败，请查看详情。";
+            }
         }
 
         // 更新数据库
@@ -274,12 +349,14 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     needUpdate = true;
                 }
                 if(errorMessage != null) {
-                    // 截断过长日志
                     if(errorMessage.length() > 9900) {
                         errorMessage = errorMessage.substring(0, 9900) + "\n...(错误信息过长已截断)";
                     }
-                    deploy.setErrorMsg(errorMessage);
-                    needUpdate = true;
+                    // 仅当错误信息不同时更新
+                    if (!errorMessage.equals(deploy.getErrorMsg())) {
+                        deploy.setErrorMsg(errorMessage);
+                        needUpdate = true;
+                    }
                 }
                 if(needUpdate) {
                     sfDeploymentMapper.updateById(deploy);
@@ -470,13 +547,19 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             try(ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
                 ZipEntry entry;
                 while((entry = zis.getNextEntry()) != null) {
+                    // 忽略文件夹和 package.xml
                     if(entry.isDirectory() || entry.getName().endsWith("package.xml")) continue;
+
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[1024];
                     int len;
                     while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
-                    String md5 = DigestUtils.md5Hex(bos.toByteArray());
-                    resultMap.put(entry.getName(), md5);
+
+                    // 【核心修改】使用语义化哈希计算
+                    // 传入文件名，工具类会自动判断是走 XML 排序还是 文本标准化
+                    String smartHash = SfMetadataDiffUtils.computeSemanticHash(entry.getName(), bos.toByteArray());
+
+                    resultMap.put(entry.getName(), smartHash);
                 }
             }
         } catch(Exception e) {
@@ -484,7 +567,6 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         }
         return resultMap;
     }
-
     private com.sforce.soap.metadata.Package generateManifestObject(List<SfDeploymentItem> items) {
         com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
         Map<String, List<String>> typesMap = new HashMap<>();

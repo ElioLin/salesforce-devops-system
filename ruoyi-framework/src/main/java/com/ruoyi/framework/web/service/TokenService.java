@@ -83,6 +83,31 @@ public class TokenService
     }
 
     /**
+     * 【新增】获取用户身份信息 (通过 String Token)
+     * 专门为 WebSocket 或内部调用准备
+     */
+    public LoginUser getLoginUser(String token)
+    {
+        if (StringUtils.isNotEmpty(token))
+        {
+            try
+            {
+                Claims claims = parseToken(token);
+                // 解析对应的权限以及用户信息
+                String uuid = (String) claims.get(Constants.LOGIN_USER_KEY);
+                String userKey = getTokenKey(uuid);
+                LoginUser user = redisCache.getCacheObject(userKey);
+                return user;
+            }
+            catch (Exception e)
+            {
+                // token过期或无效
+            }
+        }
+        return null;
+    }
+
+    /**
      * 设置用户身份信息
      */
     public void setLoginUser(LoginUser loginUser)

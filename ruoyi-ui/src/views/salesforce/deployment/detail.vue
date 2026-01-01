@@ -3,12 +3,21 @@
         <el-card shadow="never" class="mb-20" v-loading="loading">
             <div slot="header" class="clearfix">
                 <span class="card-title">{{ deployment.title || '部署包详情' }}</span>
-                <el-tag size="medium" :type="statusType(deployment.status)" effect="dark" style="margin-left: 10px">{{
-                    deployment.status
-                    }}</el-tag>
+
+                <el-tag size="medium" :type="statusType(deployment.status)" effect="dark" style="margin-left: 10px">
+                    {{ calculatedStatusLabel }}
+                </el-tag>
+
+                <el-tag v-if="isSocketConnected" type="success" size="mini" effect="plain" style="margin-left: 10px">
+                    <i class="el-icon-loading"></i> 实时连接正常
+                </el-tag>
+                <el-tag v-else-if="isProcessing" type="warning" size="mini" effect="plain" style="margin-left: 10px">
+                    <i class="el-icon-loading"></i> 连接断开 (尝试重连...)
+                </el-tag>
+
                 <div style="float: right;">
                     <el-button type="info" icon="el-icon-refresh" size="mini" @click="refreshData"
-                        :disabled="isPolling">刷新状态</el-button>
+                        :disabled="isProcessing">手动刷新</el-button>
                     <el-button type="primary" plain icon="el-icon-arrow-left" size="mini"
                         @click="handleBack">返回列表</el-button>
                 </div>
@@ -34,7 +43,7 @@
                             :loading="validating" @click="handleDeploy(true)">仅验证</el-button>
                         <el-button type="success" icon="el-icon-upload" size="small" :disabled="isProcessing"
                             :loading="deploying" @click="handleDeploy(false)">完整部署</el-button>
-                        <el-button v-if="deployment.status === 'Succeeded'" type="primary" icon="el-icon-lightning"
+                        <el-button v-if="deployment.status === 'Validated'" type="primary" icon="el-icon-lightning"
                             size="small" :disabled="isProcessing" @click="handleQuickDeploy">快速部署</el-button>
                     </el-button-group>
                 </el-col>
@@ -58,7 +67,7 @@
                 </el-form>
             </div>
 
-            <div v-if="isProcessing || progressStatus" class="progress-container">
+            <div v-if="isProcessing || compTotal > 0 || progressStatus" class="progress-container">
                 <div class="progress-block">
                     <div class="progress-header">
                         <span class="title">
@@ -265,6 +274,7 @@ import MetadataBrowser from "@/views/salesforce/org/MetadataBrowser";
 import MonacoEditor from '@/components/MonacoEditor';
 import request from '@/utils/request';
 import { download } from "@/utils/request";
+import { getToken } from "@/utils/auth";
 
 export default {
     name: "DeploymentDetail",
@@ -275,8 +285,13 @@ export default {
             deploymentId: null,
             deployment: {
                 testLevel: 'NoTestRun',
-                specifiedTests: ''
+                specifiedTests: '',
+                checkOnly: false
             },
+            // 【新增】本地持久化变量，记住用户刚才点击的操作（验证/部署）
+            // 解决刷新或 getDetail 覆盖后 checkOnly 丢失的问题
+            localCheckOnly: false,
+
             itemList: [],
             orgMap: {},
 
@@ -286,8 +301,11 @@ export default {
             deploying: false,
             isCheckingStatus: false,
 
-            dbTimer: null,
-            sfTimer: null,
+            // WebSocket 相关
+            websocket: null,
+            isSocketConnected: false,
+            socketRetryCount: 0,
+
             statusTimer: null,
 
             progressStatus: null,
@@ -300,6 +318,9 @@ export default {
             testPercent: 0,
             testFailures: 0,
             currentTestName: '',
+
+            // 【新增】防止重复弹窗的标志位，严格控制
+            hasShownSuccess: false,
 
             customColors: [
                 { color: '#f56c6c', percentage: 20 },
@@ -344,10 +365,35 @@ export default {
         },
         isProcessing() {
             const s = this.deployment.status;
-            return s === 'Processing' || s === 'Deploying' || s === 'Validating' || this.validating || this.deploying;
+            // 扩展状态判断，包含 Salesforce 的原生状态
+            const activeStatuses = [
+                'Processing', 'Deploying', 'Validating',
+                'Pending', 'InProgress', 'Queued', 'Canceling'
+            ];
+            return activeStatuses.includes(s) || this.validating || this.deploying;
+        },
+        // 计算属性：动态获取正确的状态文本
+        calculatedStatusLabel() {
+            const status = this.deployment.status;
+            // 优先使用 localCheckOnly，因为它是我们本地确认过的操作
+            const isCheck = this.localCheckOnly;
+
+            if (status === 'Succeeded') return isCheck ? '验证成功' : '部署成功';
+            if (status === 'Failed') return isCheck ? '验证失败' : '部署失败';
+            if (status === 'Canceled') return '已取消';
+
+            // 处理 Salesforce 状态
+            if (status === 'Pending' || status === 'Queued') return '排队中...';
+            if (status === 'InProgress') return isCheck ? '正在验证...' : '正在部署...';
+
+            if (this.validating || status === 'Validating') return '正在验证...';
+            if (this.deploying || status === 'Deploying') return '正在部署...';
+            if (status === 'Processing') return '准备中...';
+
+            return status || '未知';
         },
         isPolling() {
-            return this.dbTimer !== null || this.sfTimer !== null;
+            return this.isSocketConnected;
         },
         existingTypeOptions() {
             if (!this.itemList || this.itemList.length === 0) return [];
@@ -396,10 +442,17 @@ export default {
         }
     },
     beforeDestroy() {
-        this.stopAllPolling();
+        this.disconnectSocket();
         if (this.statusTimer) clearInterval(this.statusTimer);
     },
     methods: {
+        statusType(status) {
+            if (status === 'Succeeded') return 'success';
+            if (status === 'Failed') return 'danger';
+            if (['Processing', 'Deploying', 'Validating', 'Pending', 'InProgress', 'Queued'].includes(status)) return 'warning';
+            return 'info';
+        },
+
         initData() {
             this.loading = true;
             const p1 = listOrg({ pageNum: 1, pageSize: 100 }).then(res => {
@@ -412,8 +465,9 @@ export default {
 
             Promise.all([p1, p2, p3]).finally(() => {
                 this.loading = false;
+                // 如果当前状态是进行中，自动连接 WebSocket
                 if (this.isProcessing) {
-                    this.recoverPollingStatus();
+                    this.initWebSocket();
                 }
             });
         },
@@ -421,20 +475,231 @@ export default {
             this.loading = true;
             Promise.all([this.getDetail(), this.getItems()]).finally(() => {
                 this.loading = false;
+                if (this.isProcessing && !this.isSocketConnected) {
+                    this.initWebSocket();
+                }
             });
         },
-        getDictLabel(value) {
-            if (!value) return '';
-            const datas = this.dict.type.sys_salesforce_metadata_type;
-            if (datas) {
-                const found = datas.find(item => item.value === value);
-                if (found) return found.label;
+
+        initWebSocket() {
+            if (this.websocket) return;
+
+            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const host = window.location.host;
+            const token = getToken();
+            const baseUrl = process.env.VUE_APP_BASE_API;
+
+            const url = `${protocol}://${host}${baseUrl}/websocket/deploy/${this.deploymentId}?token=${token}`;
+
+            this.websocket = new WebSocket(url);
+            this.websocket.onopen = this.websocketOnOpen;
+            this.websocket.onmessage = this.websocketOnMessage;
+            this.websocket.onerror = this.websocketOnError;
+            this.websocket.onclose = this.websocketOnClose;
+        },
+
+        websocketOnOpen() {
+            this.isSocketConnected = true;
+            this.socketRetryCount = 0;
+        },
+
+        websocketOnMessage(event) {
+            try {
+                const res = JSON.parse(event.data);
+
+                if (res.status) {
+                    this.deployment.status = res.status;
+                }
+
+                // 优先使用后端返回的 checkOnly，并同步给本地变量
+                if (res.hasOwnProperty('checkOnly')) {
+                    this.$set(this.deployment, 'checkOnly', res.checkOnly);
+                    this.localCheckOnly = res.checkOnly;
+                }
+
+                this.updateProgress(res);
+
+                // 如果已经显示过成功提示，就不再进入下面的逻辑（防止重复弹窗）
+                if (this.hasShownSuccess && (res.status === 'Succeeded' || res.status === 'Failed')) {
+                    return;
+                }
+
+                if (res.status === 'Succeeded' || res.status === 'Failed' || res.status === 'Canceled') {
+                    if (res.errorMsg) {
+                        this.deployment.errorMsg = res.errorMsg;
+                    }
+
+                    // 使用 localCheckOnly 确保提示词准确
+                    const isVerify = this.localCheckOnly;
+
+                    if (!this.hasShownSuccess) {
+                        if (res.status === 'Succeeded') {
+                            this.$modal.msgSuccess(isVerify ? "验证成功！" : "部署成功！");
+                            this.progressStatus = 'success';
+                            this.compStateText = isVerify ? "验证完成" : "部署完成";
+                        } else {
+                            this.$modal.msgError((isVerify ? "验证" : "部署") + "失败/取消");
+                            this.progressStatus = 'exception';
+                            this.compStateText = "失败";
+                        }
+                        // 标记已显示，防止重复
+                        this.hasShownSuccess = true;
+                    }
+
+                    this.resetButtonState();
+                    // 延迟断开连接
+                    setTimeout(() => {
+                        this.disconnectSocket();
+                        this.getDetail(); // 刷新详情，这会重新覆盖 deployment
+                    }, 1500);
+                }
+
+            } catch (e) {
+                console.error("WS Message Error", e);
             }
-            return value;
+        },
+
+        websocketOnError(e) {
+            this.isSocketConnected = false;
+            this.compStateText = "连接异常，等待重试...";
+        },
+
+        websocketOnClose(e) {
+            this.isSocketConnected = false;
+            this.websocket = null;
+
+            // 简单重连
+            if (this.isProcessing && this.socketRetryCount < 3) {
+                this.socketRetryCount++;
+                setTimeout(() => {
+                    this.initWebSocket();
+                }, 3000);
+            }
+        },
+
+        disconnectSocket() {
+            if (this.websocket) {
+                this.websocket.close();
+                this.websocket = null;
+            }
+            this.isSocketConnected = false;
+        },
+
+        updateProgress(statusObj) {
+            this.compTotal = statusObj.numberComponentsTotal || 0;
+            this.compDone = statusObj.numberComponentsDeployed || 0;
+
+            if (this.compTotal > 0) {
+                const cPercent = Math.floor((this.compDone / this.compTotal) * 100);
+                this.compPercent = Math.max(this.compPercent, cPercent);
+            }
+
+            // 使用 localCheckOnly 保证文字正确
+            const actionText = this.localCheckOnly ? "验证" : "部署";
+
+            if (statusObj.stateDetail) {
+                this.compStateText = statusObj.stateDetail;
+            } else if (this.compDone < this.compTotal) {
+                this.compStateText = `${actionText}元数据中...`;
+            } else if (this.compPercent === 100) {
+                this.compStateText = `元数据${actionText}完成`;
+            }
+
+            this.testTotal = statusObj.numberTestsTotal || 0;
+            this.testDone = statusObj.numberTestsCompleted || 0;
+            this.testFailures = statusObj.numberTestErrors || 0;
+
+            if (statusObj.currentTest) {
+                this.currentTestName = statusObj.currentTest;
+            } else {
+                this.currentTestName = '';
+            }
+
+            if (this.testTotal > 0) {
+                const tPercent = Math.floor((this.testDone / this.testTotal) * 100);
+                this.testPercent = tPercent;
+            }
+        },
+
+        handleDeploy(checkOnly) {
+            const actionName = checkOnly ? "验证" : "部署";
+            this.$confirm(`确认要执行【${actionName}】操作吗？`, "警告", {
+                confirmButtonText: "确定",
+                cancelButtonText: "取消",
+                type: "warning"
+            }).then(() => {
+                // 设置本地状态
+                this.localCheckOnly = checkOnly;
+                this.$set(this.deployment, 'checkOnly', checkOnly);
+
+                if (checkOnly) this.validating = true;
+                else this.deploying = true;
+
+                this.resetProgress();
+                // 重置弹窗标志
+                this.hasShownSuccess = false;
+
+                deployPackage(this.deploymentId, checkOnly).then(res => {
+                    // 移除这里的 msgSuccess，避免和最终完成的重复
+                    this.compStateText = "正在连接服务器...";
+                    this.initWebSocket();
+                }).catch(() => {
+                    this.validating = false;
+                    this.deploying = false;
+                });
+            });
+        },
+
+        handleQuickDeploy() {
+            this.$confirm('将使用上次验证成功的 ID 进行快速部署（免上传），确认吗？', "快速部署", {
+                confirmButtonText: "立即部署",
+                cancelButtonText: "取消",
+                type: "success"
+            }).then(() => {
+                this.deploying = true;
+                this.localCheckOnly = false;
+                this.$set(this.deployment, 'checkOnly', false);
+
+                this.resetProgress();
+                this.hasShownSuccess = false;
+                this.compStateText = "正在启动快速部署...";
+
+                quickDeploy(this.deploymentId).then(res => {
+                    this.initWebSocket();
+                }).catch(() => {
+                    this.deploying = false;
+                });
+            });
+        },
+
+        resetProgress() {
+            this.progressStatus = null;
+            this.compTotal = 0;
+            this.compDone = 0;
+            this.compPercent = 0;
+            this.compStateText = "准备中...";
+            this.testTotal = 0;
+            this.testDone = 0;
+            this.testPercent = 0;
+            this.testFailures = 0;
+            this.currentTestName = '';
+        },
+        resetButtonState() {
+            this.validating = false;
+            this.deploying = false;
         },
         getDetail() {
             return getDeployment(this.deploymentId).then(res => {
-                this.deployment = res.data || {};
+                // 获取最新数据
+                const newData = res.data || {};
+
+                // 【关键修复】合并 localCheckOnly 到新数据中，防止刷新后丢失状态导致文字变回"部署成功"
+                // 只有当状态是 Succeeded 且我们有本地记录时才覆盖，避免逻辑污染
+                if (newData.status === 'Succeeded' && this.localCheckOnly) {
+                    newData.checkOnly = true;
+                }
+
+                this.deployment = newData;
             });
         },
         getItems() {
@@ -502,6 +767,56 @@ export default {
             if (status === 'Invalid') return '#F56C6C';
             return '#409EFF';
         },
+
+        openMetadataBrowser() {
+            if (!this.deployment.sourceOrgId) {
+                this.$modal.msgError("部署包缺少源环境信息，无法添加元数据");
+                return;
+            }
+            this.$refs.metaBrowser.open(
+                this.deployment.sourceOrgId, 
+                this.deployment.targetOrgId, 
+                this.itemList
+            );
+        },
+        
+        handleRemoveItem(row) {
+            this.$confirm('确认移除该元数据吗？', "警告", { type: "warning" }).then(() => {
+                removeDeploymentItems(row.id).then(() => {
+                    this.$modal.msgSuccess("移除成功");
+                    this.getItems();
+                });
+            });
+        },
+        handleBack() {
+            this.$router.push('/salesforce/deployment');
+        },
+        handleBrowserViewCode(data) {
+            this.previewCode(this.$refs.metaBrowser.currentOrgId, data.type, data.name);
+        },
+        handleBrowserDiffCode(data) {
+            this.handleDiff(data);
+        },
+        previewCode(orgId, type, name) {
+            const loading = this.$loading({
+                lock: true,
+                text: '加载代码中...',
+                spinner: 'el-icon-loading',
+                background: 'rgba(0, 0, 0, 0.7)'
+            });
+            request({
+                url: '/system/sf/meta/retrieve',
+                method: 'get',
+                params: { orgId, type, name }
+            }).then(response => {
+                loading.close();
+                this.codeContent = response.data;
+                this.oldCodeContent = "";
+                this.isDiffMode = false;
+                this.previewTitle = `${type}: ${name}`;
+                this.openCode = true;
+            }).catch(() => loading.close());
+        },
         handleDiff(row) {
             if (!this.deployment.targetOrgId) {
                 this.$modal.msgWarning("请先设置部署包的目标环境，才能进行比对！");
@@ -540,13 +855,46 @@ export default {
                 loading.close();
             });
         },
-
         handleDownloadPackage() {
             const fileName = `deployment_pkg_${this.deploymentId}.zip`;
-            this.$modal.msgSuccess("正在生成并下载部署包，请稍候...");
-            download('/salesforce/deployment/download/' + this.deploymentId, {}, fileName);
+            this.$modal.msgSuccess("正在生成并下载部署包，可能需要几分钟，请耐心等待...");
+            
+            request({
+                url: '/salesforce/deployment/download/' + this.deploymentId,
+                method: 'post',
+                responseType: 'blob',
+                timeout: 600000 // 10分钟超时
+            }).then(async (res) => {
+                const isBlob = res.type !== 'application/json';
+                if (isBlob) {
+                    const blob = new Blob([res]);
+                    if (window.navigator.msSaveOrOpenBlob) {
+                        navigator.msSaveBlob(blob, fileName);
+                    } else {
+                        const link = document.createElement('a');
+                        const href = window.URL.createObjectURL(blob);
+                        link.href = href;
+                        link.download = fileName;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        window.URL.revokeObjectURL(href);
+                    }
+                    this.$modal.msgSuccess("下载已完成！");
+                } else {
+                    const text = await res.text();
+                    const json = JSON.parse(text);
+                    this.$modal.msgError(json.msg || "下载失败");
+                }
+            }).catch(error => {
+                console.error("Download error:", error);
+                let msg = "下载失败，请联系管理员";
+                if (error.message && error.message.includes('timeout')) {
+                    msg = "生成部署包超时，请稍后重试或减小包体积";
+                }
+                this.$modal.msgError(msg);
+            });
         },
-
         handlePreviewPackage() {
             this.previewDialog.open = true;
             this.previewDialog.loading = true;
@@ -576,7 +924,6 @@ export default {
                 this.previewDialog.loading = false;
             });
         },
-
         selectPreviewFile(fileName) {
             this.previewDialog.currentFile = fileName;
             if (fileName === 'package.xml' && this.previewDialog.packageXml && !this.previewDialog.fileContents[fileName]) {
@@ -586,7 +933,6 @@ export default {
             const content = this.previewDialog.fileContents[fileName];
             this.previewDialog.currentContent = content || '(无法预览或文件为空)';
         },
-
         getLanguage(fileName) {
             if (!fileName) return 'xml';
             if (fileName.endsWith('.cls') || fileName.endsWith('.trigger')) return 'java';
@@ -595,198 +941,6 @@ export default {
             if (fileName.endsWith('.json')) return 'json';
             return 'xml';
         },
-
-        resetProgress() {
-            this.progressStatus = null;
-            this.compTotal = 0;
-            this.compDone = 0;
-            this.compPercent = 0;
-            this.compStateText = "准备中...";
-            this.testTotal = 0;
-            this.testDone = 0;
-            this.testPercent = 0;
-            this.testFailures = 0;
-            this.currentTestName = '';
-        },
-        handleDeploy(checkOnly) {
-            const actionName = checkOnly ? "验证" : "部署";
-            this.$confirm(`确认要执行【${actionName}】操作吗？`, "警告", {
-                confirmButtonText: "确定",
-                cancelButtonText: "取消",
-                type: "warning"
-            }).then(() => {
-                if (checkOnly) this.validating = true;
-                else this.deploying = true;
-
-                this.resetProgress();
-
-                deployPackage(this.deploymentId, checkOnly).then(res => {
-                    this.$modal.msgSuccess(`${actionName}请求已提交，正在后台处理...`);
-                    this.compStateText = "正在从源环境提取代码 (Retrieve)...";
-                    this.compPercent = 5;
-                    this.getDetail();
-                    this.startDbPolling(checkOnly);
-                }).catch(() => {
-                    this.validating = false;
-                    this.deploying = false;
-                });
-            });
-        },
-        handleQuickDeploy() {
-            this.$confirm('将使用上次验证成功的 ID 进行快速部署（免上传），确认吗？', "快速部署", {
-                confirmButtonText: "立即部署",
-                cancelButtonText: "取消",
-                type: "success"
-            }).then(() => {
-                this.deploying = true;
-                this.resetProgress();
-                this.compStateText = "正在启动快速部署...";
-
-                quickDeploy(this.deploymentId).then(res => {
-                    this.$modal.msgSuccess("快速部署已启动！");
-                    this.getDetail();
-                    this.startDbPolling(false);
-                }).catch(() => {
-                    this.deploying = false;
-                });
-            });
-        },
-        startDbPolling(checkOnly) {
-            this.stopAllPolling();
-            this.dbTimer = setInterval(() => {
-                getDeployment(this.deploymentId).then(res => {
-                    const data = res.data;
-                    this.deployment = data;
-
-                    if (this.compPercent < 40) {
-                        this.compPercent += 5;
-                    }
-
-                    if (data.status === 'Processing') {
-                        this.compStateText = "提取与上传中 (Uploading)...";
-                    }
-                    else if (data.status === 'Deploying' || data.status === 'Validating') {
-                        clearInterval(this.dbTimer);
-                        this.dbTimer = null;
-                        this.compStateText = "等待 Salesforce 处理...";
-                        if (data.lastAsyncId) {
-                            this.startSfPolling(data.lastAsyncId);
-                        } else {
-                            this.$modal.msgError("状态异常：未获取到 Salesforce Process ID");
-                            this.resetButtonState();
-                        }
-                    }
-                    else if (data.status === 'Failed') {
-                        this.handleDeployFailed(data.errorMsg);
-                    }
-                });
-            }, 2000);
-        },
-        startSfPolling(processId) {
-            this.sfTimer = setInterval(() => {
-                checkDeployStatus(this.deployment.targetOrgId, processId).then(res => {
-                    let result = res.msg;
-                    try {
-                        const statusObj = (typeof result === 'object') ? result : JSON.parse(result);
-                        const status = statusObj.status;
-
-                        this.updateProgress(statusObj);
-
-                        if (status === 'Succeeded') {
-                            this.handleDeploySuccess();
-                        } else if (status === 'Failed') {
-                            let errorDetail = statusObj.errorMessage || "Salesforce 部署验证失败，请查看详情";
-                            this.handleDeployFailed(errorDetail);
-                        }
-                    } catch (e) {
-                        console.error("Parse SF Status Error", e);
-                        if (result === 'Succeeded') this.handleDeploySuccess();
-                        else if (result === 'Failed') this.handleDeployFailed("Unknown Error");
-                    }
-                });
-            }, 3000);
-        },
-        updateProgress(statusObj) {
-            this.compTotal = statusObj.numberComponentsTotal || 0;
-            this.compDone = statusObj.numberComponentsDeployed || 0;
-
-            if (this.compTotal > 0) {
-                const cPercent = Math.floor((this.compDone / this.compTotal) * 100);
-                this.compPercent = Math.max(this.compPercent, cPercent);
-            }
-
-            if (this.compDone < this.compTotal) {
-                this.compStateText = "部署元数据中...";
-            } else {
-                this.compStateText = "元数据部署完成";
-                this.compPercent = 100;
-            }
-
-            this.testTotal = statusObj.numberTestsTotal || 0;
-            this.testDone = statusObj.numberTestsCompleted || 0;
-            this.testFailures = statusObj.numberTestErrors || 0;
-
-            if (statusObj.stateDetail) {
-                this.currentTestName = statusObj.stateDetail;
-            } else {
-                this.currentTestName = '';
-            }
-
-            if (this.testTotal > 0) {
-                const tPercent = Math.floor((this.testDone / this.testTotal) * 100);
-                this.testPercent = tPercent;
-            }
-        },
-        handleDeploySuccess() {
-            this.stopAllPolling();
-            this.compPercent = 100;
-            if (this.testTotal > 0) this.testPercent = 100;
-            this.progressStatus = 'success';
-            this.compStateText = "完成";
-            this.$modal.msgSuccess("操作成功！");
-            this.resetButtonState();
-            this.getDetail();
-        },
-        handleDeployFailed(msg) {
-            this.stopAllPolling();
-            this.progressStatus = 'exception';
-            this.compStateText = "失败";
-            this.$modal.alert(msg, "错误提示", { type: 'error' });
-            this.resetButtonState();
-            this.getDetail();
-        },
-        stopAllPolling() {
-            if (this.dbTimer) { clearInterval(this.dbTimer); this.dbTimer = null; }
-            if (this.sfTimer) { clearInterval(this.sfTimer); this.sfTimer = null; }
-        },
-        resetButtonState() {
-            this.validating = false;
-            this.deploying = false;
-        },
-        recoverPollingStatus() {
-            this.resetProgress();
-            if (this.deployment.status === 'Processing') {
-                this.validating = true;
-                this.compStateText = "恢复任务中...";
-                this.startDbPolling();
-            } else if ((this.deployment.status === 'Deploying' || this.deployment.status === 'Validating') && this.deployment.lastAsyncId) {
-                this.validating = true;
-                this.compStateText = "恢复监控中...";
-                this.startSfPolling(this.deployment.lastAsyncId);
-            }
-        },
-        openMetadataBrowser() {
-            if (this.deployment && this.deployment.sourceOrgId) {
-                this.$refs.metaBrowser.open(
-                    this.deployment.sourceOrgId,
-                    this.deployment.targetOrgId,
-                    this.itemList
-                );
-            } else {
-                this.$modal.msgError("部署包数据未加载完成或源环境为空");
-            }
-        },
-
         handleBrowserAction(event) {
             if (event.action === 'add') {
                 const itemToAdd = [{ metadataType: event.type, memberName: event.name }];
@@ -816,7 +970,6 @@ export default {
                 });
             }
         },
-
         refreshBrowserMap(event, isBatch = false) {
             listDeploymentItems(this.deploymentId).then(listRes => {
                 this.itemList = listRes.data;
@@ -841,51 +994,15 @@ export default {
                 }
             });
         },
-
-        handleRemoveItem(row) {
-            this.$confirm('确认移除该元数据吗？', "警告", { type: "warning" }).then(() => {
-                removeDeploymentItems(row.id).then(() => {
-                    this.$modal.msgSuccess("移除成功");
-                    this.getItems();
-                });
-            });
+        getDictLabel(value) {
+            if (!value) return '';
+            const datas = this.dict.type.sys_salesforce_metadata_type;
+            if (datas) {
+                const found = datas.find(item => item.value === value);
+                if (found) return found.label;
+            }
+            return value;
         },
-        handleBack() {
-            this.$router.push('/salesforce/deployment');
-        },
-        handleBrowserViewCode(data) {
-            this.previewCode(this.$refs.metaBrowser.currentOrgId, data.type, data.name);
-        },
-        handleBrowserDiffCode(data) {
-            this.handleDiff(data);
-        },
-        previewCode(orgId, type, name) {
-            const loading = this.$loading({
-                lock: true,
-                text: '加载代码中...',
-                spinner: 'el-icon-loading',
-                background: 'rgba(0, 0, 0, 0.7)'
-            });
-            request({
-                url: '/system/sf/meta/retrieve',
-                method: 'get',
-                params: { orgId, type, name }
-            }).then(response => {
-                loading.close();
-                this.codeContent = response.data;
-                this.oldCodeContent = "";
-                this.isDiffMode = false;
-                this.previewTitle = `${type}: ${name}`;
-                this.openCode = true;
-            }).catch(() => loading.close());
-        },
-        statusType(status) {
-            if (status === 'Succeeded') return 'success';
-            if (status === 'Failed') return 'danger';
-            if (status === 'Processing' || status === 'Deploying' || status === 'Validating') return 'warning';
-            return 'info';
-        },
-        // 清空列筛选
         clearColumnFilters() {
             this.columnFilters = {
                 type: '',
@@ -900,6 +1017,7 @@ export default {
 </script>
 
 <style scoped>
+/* 保持原有样式 */
 .mb-20 {
     margin-bottom: 20px;
 }
@@ -928,14 +1046,12 @@ export default {
     color: #409EFF;
 }
 
-/* 计数标签样式 */
 .count-tag {
     margin-left: 15px;
     font-size: 13px;
     letter-spacing: 0.5px;
 }
 
-/* 列表头部布局 */
 .list-header {
     display: flex;
     justify-content: space-between;
@@ -948,7 +1064,6 @@ export default {
     align-items: center;
 }
 
-/* 错误信息展示盒 */
 .error-msg-box {
     white-space: pre-wrap;
     line-height: 1.6;
@@ -958,7 +1073,6 @@ export default {
     font-size: 13px;
 }
 
-/* 配置区域样式 */
 .config-section {
     margin-top: 20px;
     border-top: 1px dashed #e4e7ed;
@@ -972,7 +1086,6 @@ export default {
     margin-bottom: 0;
 }
 
-/* 进度条增强 */
 .progress-container {
     margin-top: 20px;
     background-color: #f8fcfb;
@@ -1010,7 +1123,6 @@ export default {
     font-weight: 500;
 }
 
-/* 预览相关 */
 .file-list-header {
     display: flex;
     justify-content: space-between;
@@ -1056,7 +1168,6 @@ export default {
     font-weight: 600;
 }
 
-/* 表头搜索框美化 */
 .custom-header {
     padding: 4px 0;
 }

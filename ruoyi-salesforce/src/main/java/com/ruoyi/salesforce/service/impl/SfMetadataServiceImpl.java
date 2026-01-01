@@ -1,9 +1,9 @@
 package com.ruoyi.salesforce.service.impl;
 
 import cn.hutool.http.HttpRequest;
-import cn.hutool.json.JSONObject;
-import cn.hutool.json.JSONUtil;
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.core.domain.entity.SysDictData;
 import com.ruoyi.common.core.domain.entity.SysDictType;
 import com.ruoyi.common.core.redis.RedisCache;
@@ -25,6 +25,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.annotation.PostConstruct;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -32,7 +33,6 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -51,148 +51,88 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Autowired
     private ISysDictDataService dictDataService;
 
-    // 简单的内存缓存: Key = orgId_metadataType
-    private static final Map<String, List<FileProperties>> METADATA_CACHE = new ConcurrentHashMap<>();
-
-    // 定义字典类型 Key
-    private static final String DICT_TYPE_KEY = "sys_salesforce_metadata_type";
-
-    // 【新增】注入 RedisCache
     @Autowired
     private RedisCache redisCache;
 
-    // 【新增】定义 Redis Key 前缀 (建议加在常量类中，这里为了方便直接写)
     private static final String REDIS_META_KEY_PREFIX = "sf:meta:";
-    // 【新增】缓存过期时间 (分钟)
     private static final long CACHE_TTL_MINUTES = 30;
+    private static final String DICT_TYPE_KEY = "sys_salesforce_metadata_type";
 
-    /**
-     * 获取 Metadata API 连接 (带自动重连/刷新Token功能)
-     */
+    // 【调试】添加启动日志，确保新代码被加载
+    @PostConstruct
+    public void init() {
+        log.info("=================================================================");
+        log.info(">>> SfMetadataServiceImpl (FastJson2 安全版) 已加载 <<<");
+        log.info("=================================================================");
+    }
+
     @Override
     public MetadataConnection getMetadataConnection(Long orgId) throws ConnectionException {
-        // 1. 从数据库查 Org 信息
         SfOrg org = sfOrgService.selectSfOrgById(orgId);
-        if (org == null) {
-            throw new ConnectionException("未找到ID为 " + orgId + " 的Salesforce环境配置！");
-        }
+        if (org == null) throw new ConnectionException("未找到ID为 " + orgId + " 的Salesforce环境配置！");
         if (StringUtils.isEmpty(org.getAccessToken()) || StringUtils.isEmpty(org.getInstanceUrl())) {
             throw new ConnectionException("环境 [" + org.getName() + "] 尚未授权，请先前往环境管理进行授权。");
         }
-
-        // 2. 【核心优化】: 验证会话有效性，失效则自动刷新
         verifyAndRefreshSession(org);
-
-        // 3. 配置连接信息 (使用可能已更新的 Token)
         ConnectorConfig config = new ConnectorConfig();
         config.setSessionId(org.getAccessToken());
-        // 增加超时设置，防止大数据量拉取断开
-        config.setConnectionTimeout(30000);
-        config.setReadTimeout(120000);
-
+        config.setConnectionTimeout(60000);
+        config.setReadTimeout(600000);
         String metadataEndpoint = org.getInstanceUrl() + "/services/Soap/m/58.0";
         config.setServiceEndpoint(metadataEndpoint);
-
         return new MetadataConnection(config);
     }
 
-    /**
-     * 【核心方法】验证 Session 是否有效
-     * 使用 MetadataConnection.describeMetadata 替代 EnterpriseConnection，避免引入新依赖
-     */
     private void verifyAndRefreshSession(SfOrg org) throws ConnectionException {
         try {
-            // 构造一个临时的连接配置用于测试
             ConnectorConfig testConfig = new ConnectorConfig();
             testConfig.setSessionId(org.getAccessToken());
             testConfig.setServiceEndpoint(org.getInstanceUrl() + "/services/Soap/m/58.0");
-
             MetadataConnection testConn = new MetadataConnection(testConfig);
-
-            // 调用一个轻量级 Metadata API 方法来验证 Session
-            // 如果 Session 无效，这里会抛出 ConnectionException
             testConn.describeMetadata(58.0);
-
         } catch (ConnectionException e) {
-            // 判断是否为 Session 过期异常
             if (isSessionExpired(e)) {
                 log.info("检测到 Org [{}] Session 已过期，正在执行自动续期...", org.getName());
                 try {
-                    // 执行刷新逻辑
                     refreshAccessToken(org);
                     log.info("Org [{}] 自动续期成功！", org.getName());
                 } catch (Exception refreshEx) {
                     log.error("自动续期失败", refreshEx);
-                    throw new ConnectionException("Salesforce授权已过期且自动续期失败：" + refreshEx.getMessage() + "，请尝试手动重新授权。");
+                    throw new ConnectionException("Salesforce授权已过期且自动续期失败：" + refreshEx.getMessage());
                 }
             } else {
-                // 如果是其他网络错误，直接抛出
                 log.error("Salesforce 连接验证异常", e);
                 throw e;
             }
         }
     }
 
-    /**
-     * 【修复】判断异常是否由 Session 过期引起
-     * 移除了 getExceptionCode() 调用，仅使用字符串匹配，解决编译红字问题
-     */
     private boolean isSessionExpired(ConnectionException e) {
         String msg = e.getMessage();
-        if (StringUtils.isEmpty(msg)) {
-            return false;
-        }
-        // 匹配 Salesforce 常见的过期提示
-        return msg.contains("INVALID_SESSION_ID") ||
-                msg.contains("Session expired") ||
-                msg.contains("Session not found") ||
-                msg.contains("Full authentication is required");
+        if (StringUtils.isEmpty(msg)) return false;
+        return msg.contains("INVALID_SESSION_ID") || msg.contains("Session expired") ||
+                msg.contains("Session not found") || msg.contains("Full authentication is required");
     }
 
-    /**
-     * 执行 Refresh Token 流程
-     * 使用 Org 中存储的 ClientId 和 ClientSecret
-     */
     private void refreshAccessToken(SfOrg org) {
-        // 1. 校验必要参数
-        if (StringUtils.isEmpty(org.getRefreshToken())) {
-            throw new ServiceException("缺少 Refresh Token，无法自动续期。请先进行一次完整的手动授权。");
+        if (StringUtils.isEmpty(org.getRefreshToken()) || StringUtils.isEmpty(org.getClientId()) || StringUtils.isEmpty(org.getClientSecret())) {
+            throw new ServiceException("无法自动续期：缺少 Refresh Token、Client ID 或 Client Secret。");
         }
-        if (StringUtils.isEmpty(org.getClientId()) || StringUtils.isEmpty(org.getClientSecret())) {
-            throw new ServiceException("自动续期失败：环境配置中缺失 Client ID 或 Client Secret，请在环境管理页面补充这些必填项。");
-        }
-
-        // 2. 确定认证端点
-        String instance = "Sandbox".equalsIgnoreCase(org.getOrgType()) ?
-                "https://test.salesforce.com" : "https://login.salesforce.com";
+        String instance = "Sandbox".equalsIgnoreCase(org.getOrgType()) ? "https://test.salesforce.com" : "https://login.salesforce.com";
         String tokenUrl = instance + "/services/oauth2/token";
-
-        // 3. 发送刷新请求 (使用 Hutool HttpRequest)
         String result = HttpRequest.post(tokenUrl)
                 .form("grant_type", "refresh_token")
-                .form("client_id", org.getClientId())         // 使用 Org 配置的 ID
-                .form("client_secret", org.getClientSecret()) // 使用 Org 配置的 Secret
+                .form("client_id", org.getClientId())
+                .form("client_secret", org.getClientSecret())
                 .form("refresh_token", org.getRefreshToken())
-                .execute()
-                .body();
-
-        JSONObject json = JSONUtil.parseObj(result);
-
-        if (json.getStr("access_token") != null) {
-            // 4. 刷新成功，更新内存对象和数据库
-            String newAccessToken = json.getStr("access_token");
-            String newInstanceUrl = json.getStr("instance_url");
-
-            org.setAccessToken(newAccessToken);
-            if (newInstanceUrl != null) {
-                org.setInstanceUrl(newInstanceUrl);
-            }
-
+                .execute().body();
+        JSONObject json = JSON.parseObject(result); // FastJson2
+        if (json.getString("access_token") != null) {
+            org.setAccessToken(json.getString("access_token"));
+            if (json.getString("instance_url") != null) org.setInstanceUrl(json.getString("instance_url"));
             sfOrgService.updateSfOrg(org);
         } else {
-            String error = json.getStr("error");
-            String errorDesc = json.getStr("error_description");
-            throw new ServiceException("Salesforce 拒绝了刷新请求: " + error + " - " + errorDesc);
+            throw new ServiceException("刷新失败: " + json.getString("error_description"));
         }
     }
 
@@ -202,14 +142,10 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         ListMetadataQuery query = new ListMetadataQuery();
         query.setType("ApexClass");
         FileProperties[] results = connection.listMetadata(new ListMetadataQuery[]{query}, 58.0);
-
         List<String> classNames = new ArrayList<>();
         if (results != null) {
-            for (FileProperties file : results) {
-                if (file.getFullName() != null) {
-                    classNames.add(file.getFullName());
-                }
-            }
+            for (FileProperties file : results)
+                if (file.getFullName() != null) classNames.add(file.getFullName());
         }
         return classNames;
     }
@@ -217,58 +153,40 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Override
     public String retrieveMetadata(Long orgId, String type, String memberName) throws Exception {
         MetadataConnection connection = getMetadataConnection(orgId);
-
         RetrieveRequest retrieveRequest = new RetrieveRequest();
         retrieveRequest.setApiVersion(58.0);
-
         com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
         PackageTypeMembers typeMember = new PackageTypeMembers();
         typeMember.setName(type);
         typeMember.setMembers(new String[]{memberName});
         manifest.setTypes(new PackageTypeMembers[]{typeMember});
         manifest.setVersion("58.0");
-
         retrieveRequest.setUnpackaged(manifest);
-
         AsyncResult asyncResult = connection.retrieve(retrieveRequest);
         RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
-
-        if (result.getStatus() != RetrieveStatus.Succeeded) {
+        if (result.getStatus() != RetrieveStatus.Succeeded)
             throw new Exception("Retrieve failed: " + result.getErrorMessage());
-        }
-
         return smartExtract(result.getZipFile(), type, memberName);
     }
 
     private String smartExtract(byte[] zipData, String type, String memberName) throws Exception {
         if (zipData == null || zipData.length == 0) return "No content retrieved.";
-
         StringBuilder contentBuilder = new StringBuilder();
         boolean found = false;
-
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 String entryName = entry.getName();
                 if (entry.isDirectory() || entryName.endsWith("package.xml")) continue;
-
                 boolean isMatch = false;
-
                 if (isObjectChild(type) && memberName.contains(".")) {
                     String objName = memberName.split("\\.")[0];
-                    if (entryName.endsWith("objects/" + objName + ".object")) {
-                        isMatch = true;
-                    }
+                    if (entryName.endsWith("objects/" + objName + ".object")) isMatch = true;
                 } else if (isWorkflowChild(type) && memberName.contains(".")) {
                     String objName = memberName.split("\\.")[0];
-                    if (entryName.endsWith("workflows/" + objName + ".workflow")) {
-                        isMatch = true;
-                    }
-                } else if (isBundleType(type) && entryName.contains(memberName)) {
-                    isMatch = true;
-                } else if (entryName.contains(memberName)) {
-                    isMatch = true;
-                }
+                    if (entryName.endsWith("workflows/" + objName + ".workflow")) isMatch = true;
+                } else if (isBundleType(type) && entryName.contains(memberName)) isMatch = true;
+                else if (entryName.contains(memberName)) isMatch = true;
 
                 if (isMatch) {
                     found = true;
@@ -277,25 +195,17 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                     int len;
                     while ((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
                     String fileContent = new String(bos.toByteArray(), StandardCharsets.UTF_8);
-
                     if (isBundleType(type)) {
-                        contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n");
-                        contentBuilder.append(fileContent).append("\n\n");
+                        contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n").append(fileContent).append("\n\n");
                     } else {
-                        if (!entryName.endsWith("-meta.xml") || entryName.endsWith(".object") || entryName.endsWith(".workflow")) {
+                        if (!entryName.endsWith("-meta.xml") || entryName.endsWith(".object") || entryName.endsWith(".workflow"))
                             return fileContent;
-                        }
-                        if (contentBuilder.length() == 0) {
-                            contentBuilder.append(fileContent);
-                        }
+                        if (contentBuilder.length() == 0) contentBuilder.append(fileContent);
                     }
                 }
             }
         }
-
-        if (!found) {
-            return "Error: File not found in retrieved package. (Type: " + type + ", Name: " + memberName + ")";
-        }
+        if (!found) return "Error: File not found in retrieved package.";
         return contentBuilder.toString();
     }
 
@@ -311,64 +221,26 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         return "LightningComponentBundle".equals(type) || "AuraDefinitionBundle".equals(type);
     }
 
-    /**
-     * 【重写】获取元数据列表（优先读 Redis 缓存）
-     */
     @Override
     public List<FileProperties> listMetadata(Long orgId, String type) throws Exception {
-        String cacheKey = getCacheKey(orgId, type);
-
-        // 1. 尝试从 Redis 获取
+        String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
         List<FileProperties> cacheList = redisCache.getCacheList(cacheKey);
-
-        if (cacheList != null && !cacheList.isEmpty()) {
-            // log.info("命中Redis缓存: {}", cacheKey); // 调试时可开启
-            return cacheList;
-        }
-
-        // 2. 缓存未命中，执行同步并写入缓存
-        log.info("Redis缓存未命中，正在从 Salesforce 拉取: {}", cacheKey);
+        if (cacheList != null && !cacheList.isEmpty()) return cacheList;
         return refreshMetadataCache(orgId, type);
     }
 
-    // 【新增】生成规范的 Redis Key
-    private String getCacheKey(Long orgId, String type) {
-        return REDIS_META_KEY_PREFIX + orgId + ":" + type;
-    }
-
-    /**
-     * 【重写】强制从 Salesforce 同步元数据并更新 Redis 缓存
-     */
     @Override
     public List<FileProperties> refreshMetadataCache(Long orgId, String type) throws Exception {
         MetadataConnection connection = getMetadataConnection(orgId);
         ListMetadataQuery query = new ListMetadataQuery();
         query.setType(type);
-
-        // 调用 Salesforce API (耗时操作)
         FileProperties[] results = connection.listMetadata(new ListMetadataQuery[]{query}, 58.0);
-
         List<FileProperties> list = new ArrayList<>();
-        if (results != null) {
-            for (FileProperties f : results) {
-                if (f.getFullName() != null) list.add(f);
-            }
-        }
-        // 排序
+        if (results != null) for (FileProperties f : results) if (f.getFullName() != null) list.add(f);
         list.sort((a, b) -> b.getLastModifiedDate().compareTo(a.getLastModifiedDate()));
-
-        // 【新增】存入 Redis，设置过期时间
-        String cacheKey = getCacheKey(orgId, type);
-        if (!list.isEmpty()) {
-            redisCache.setCacheList(cacheKey, list);
-            redisCache.expire(cacheKey, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
-            log.info("已更新Redis缓存: {}, 条数: {}", cacheKey, list.size());
-        } else {
-            // 如果列表为空，也建议缓存一个空列表（时间稍短），防止缓存穿透
-            redisCache.setCacheList(cacheKey, new ArrayList<>());
-            redisCache.expire(cacheKey, 5, TimeUnit.MINUTES);
-        }
-
+        String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
+        redisCache.setCacheList(cacheKey, !list.isEmpty() ? list : new ArrayList<>());
+        redisCache.expire(cacheKey, !list.isEmpty() ? CACHE_TTL_MINUTES : 5, TimeUnit.MINUTES);
         return list;
     }
 
@@ -378,10 +250,9 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             try {
                 return retrieveMetadata(sourceOrgId, type, memberName);
             } catch (Exception e) {
-                throw new RuntimeException("源环境读取失败: " + e.getMessage());
+                throw new RuntimeException(e.getMessage());
             }
         });
-
         CompletableFuture<String> targetFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return retrieveMetadata(targetOrgId, type, memberName);
@@ -389,7 +260,6 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                 return "";
             }
         });
-
         CompletableFuture.allOf(sourceFuture, targetFuture).join();
         return new SfDiffVo(sourceFuture.get(), targetFuture.get());
     }
@@ -400,15 +270,10 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         RetrieveRequest request = new RetrieveRequest();
         request.setApiVersion(58.0);
         request.setUnpackaged(manifest);
-
         AsyncResult asyncResult = connection.retrieve(request);
         RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
-
-        if (result.getStatus() == RetrieveStatus.Succeeded) {
-            return result.getZipFile();
-        } else {
-            throw new Exception("Retrieve failed: " + result.getErrorMessage());
-        }
+        if (result.getStatus() == RetrieveStatus.Succeeded) return result.getZipFile();
+        else throw new Exception("Retrieve failed: " + result.getErrorMessage());
     }
 
     @Override
@@ -417,25 +282,141 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         return connection.deploy(zipData, options);
     }
 
+    /**
+     * 【生产环境优化版 - FastJson2】检查部署状态
+     * 1. 优先使用“轻量级”查询 (includeDetails=false)。
+     * 2. 只有当任务完成时，才尝试获取完整详情。
+     * 3. 严格的手动序列化，杜绝 StackOverflowError。
+     */
     @Override
     public String checkDeployStatus(Long orgId, String processId) throws Exception {
-        MetadataConnection connection = getMetadataConnection(orgId);
-        DeployResult result = connection.checkDeployStatus(processId, true);
-        return JSON.toJSONString(result);
+        try {
+            MetadataConnection connection = getMetadataConnection(orgId);
+
+            // 1. 默认只查询基本状态，不查 Details（避免内存崩溃）
+            DeployResult result = connection.checkDeployStatus(processId, false);
+
+            // 2. 只有当部署结束(Done)时，才尝试拉取一次完整日志
+            if (result.isDone()) {
+                try {
+                    log.info("部署/验证已完成 (ID: {})，正在拉取完整日志...", processId);
+                    result = connection.checkDeployStatus(processId, true);
+                } catch (Exception e) {
+                    log.warn("无法拉取部署详情 (日志可能过大)，自动降级为摘要模式。错误: {}", e.getMessage());
+                }
+            }
+
+            // 3. 手动构建 JSON (使用 FastJson2)，杜绝递归序列化
+            JSONObject json = new JSONObject();
+
+            json.put("id", result.getId());
+            json.put("done", result.isDone());
+            json.put("status", result.getStatus().name());
+            json.put("checkOnly", result.isCheckOnly());
+            json.put("numberComponentsDeployed", result.getNumberComponentsDeployed());
+            json.put("numberComponentsTotal", result.getNumberComponentsTotal());
+            json.put("numberTestsCompleted", result.getNumberTestsCompleted());
+            json.put("numberTestsTotal", result.getNumberTestsTotal());
+            json.put("errorMessage", result.getErrorMessage());
+            json.put("stateDetail", result.getStateDetail());
+
+            if (result.getDetails() != null) {
+                JSONObject details = new JSONObject();
+
+                // --- 手工提取 componentFailures ---
+                // --- 优化 componentFailures 提取 ---
+                if (result.getDetails().getComponentFailures() != null) {
+                    JSONArray failures = new JSONArray();
+                    for (DeployMessage msg : result.getDetails().getComponentFailures()) {
+                        JSONObject f = new JSONObject();
+                        f.put("fileName", msg.getFileName());
+                        f.put("problem", msg.getProblem());
+                        f.put("lineNumber", msg.getLineNumber()); // [新增] 获取行号
+                        f.put("columnNumber", msg.getColumnNumber()); // [新增] 获取列号
+
+                        // [新增] 简单的智能分析
+                        String solution = analyzeSolution(msg.getProblem());
+                        f.put("suggestedSolution", solution);
+
+                        f.put("problemType", msg.getProblemType() != null ? msg.getProblemType().name() : "Error");
+                        failures.add(f);
+                    }
+                    details.put("componentFailures", failures);
+                }
+
+                // --- 手工提取 runTestResult ---
+                if (result.getDetails().getRunTestResult() != null) {
+                    JSONObject testRes = new JSONObject();
+                    RunTestsResult sfRunRes = result.getDetails().getRunTestResult();
+
+                    testRes.put("numFailures", sfRunRes.getNumFailures());
+
+                    if (sfRunRes.getFailures() != null) {
+                        JSONArray testFailures = new JSONArray();
+                        for (RunTestFailure fail : sfRunRes.getFailures()) {
+                            JSONObject t = new JSONObject();
+                            t.put("name", fail.getName());
+                            t.put("methodName", fail.getMethodName());
+                            t.put("message", fail.getMessage());
+                            t.put("time", fail.getTime());
+                            testFailures.add(t);
+                        }
+                        testRes.put("failures", testFailures);
+                    }
+
+                    if (sfRunRes.getCodeCoverageWarnings() != null) {
+                        JSONArray warnings = new JSONArray();
+                        for (CodeCoverageWarning w : sfRunRes.getCodeCoverageWarnings()) {
+                            JSONObject warn = new JSONObject();
+                            warn.put("message", w.getMessage());
+                            warnings.add(warn);
+                        }
+                        testRes.put("codeCoverageWarnings", warnings);
+                    }
+                    details.put("runTestResult", testRes);
+                }
+                json.put("details", details);
+            }
+
+            return json.toString();
+
+        } catch (Throwable t) {
+            // 【终极兜底】捕获所有错误（包括 StackOverflow/OOM），防止 JVM 崩溃
+            log.error("严重错误：检查部署状态时发生异常，已拦截。", t);
+
+            JSONObject errorJson = new JSONObject();
+            errorJson.put("done", true);
+            errorJson.put("status", "Failed");
+            String msg = t.getMessage() != null ? t.getMessage() : t.toString();
+            errorJson.put("errorMessage", "系统内部错误: " + (msg.length() > 200 ? msg.substring(0, 200) : msg));
+            return errorJson.toString();
+        }
+    }
+
+    // [新增] 辅助分析方法
+    private String analyzeSolution(String errorMsg) {
+        if (errorMsg == null) return "";
+        if (errorMsg.contains("Code coverage")) {
+            return "代码覆盖率不足，请编写更多单元测试或检查 @isTest 类。";
+        }
+        if (errorMsg.contains("Dependent class is invalid")) {
+            return "依赖类缺失或由编译错误，请检查相关联的类是否已包含在部署包中。";
+        }
+        if (errorMsg.contains("FIELD_CUSTOM_VALIDATION_EXCEPTION")) {
+            return "触发了自定义验证规则，请检查数据或暂时停用该规则。";
+        }
+        return "请根据报错信息检查元数据定义。";
     }
 
     private RetrieveResult waitForRetrieve(MetadataConnection connection, String id) throws Exception {
-        int maxPolls = 60;
-        int sleepMillis = 500;
-
+        int maxPolls = 600;
+        int sleepMillis = 1000;
         for (int i = 0; i < maxPolls; i++) {
             RetrieveResult result = connection.checkRetrieveStatus(id, true);
-            if (result.isDone()) {
-                return result;
-            }
+            if (result.isDone()) return result;
             Thread.sleep(sleepMillis);
         }
-        throw new Exception("Retrieve request timed out.");
+        throw new Exception("Salesforce Retrieve request timed out (waited 10 mins).");
     }
 
     @Override
@@ -450,29 +431,17 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         Set<String> typeSet = new HashSet<>();
         try {
             DescribeMetadataResult result = conn.describeMetadata(58.0);
-            if (result != null && result.getMetadataObjects() != null) {
+            if (result != null) {
                 for (DescribeMetadataObject obj : result.getMetadataObjects()) {
                     typeSet.add(obj.getXmlName());
-                    if (obj.getChildXmlNames() != null) {
-                        Collections.addAll(typeSet, obj.getChildXmlNames());
-                    }
+                    if (obj.getChildXmlNames() != null) Collections.addAll(typeSet, obj.getChildXmlNames());
                 }
             }
         } catch (Exception e) {
-            System.err.println("Warning: describeMetadata failed, using fallback list. " + e.getMessage());
+            // fallback
         }
-
-        List<String> mustHaveTypes = Arrays.asList(
-                "AuraDefinitionBundle", "LightningComponentBundle", "ApexClass", "ApexTrigger", "ApexPage",
-                "ApexComponent", "StaticResource", "CustomObject", "CustomField", "WebLink", "ValidationRule",
-                "RecordType", "ListView", "FieldSet", "CompactLayout", "BusinessProcess", "Index",
-                "PermissionSet", "Profile", "Role", "Group", "Queue", "CustomTab", "CustomApplication",
-                "CustomLabel", "CustomMetadata", "RemoteSiteSetting", "CspTrustedSite", "NamedCredential",
-                "Flow", "FlowDefinition", "Workflow", "WorkflowRule", "WorkflowAlert", "WorkflowFieldUpdate",
-                "WorkflowOutboundMessage", "ApprovalProcess", "Report", "Dashboard", "EmailTemplate"
-        );
+        List<String> mustHaveTypes = Arrays.asList("ApexClass", "ApexTrigger", "CustomObject", "CustomField");
         typeSet.addAll(mustHaveTypes);
-
         List<String> types = new ArrayList<>(typeSet);
         Collections.sort(types);
         return types;
@@ -483,76 +452,38 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     public void syncMetadataToDict(Long orgId) throws Exception {
         List<String> allTypes = getAllMetadataTypes(orgId);
         checkAndCreateDictType();
-
-        Map<String, String> friendlyNameMap = new HashMap<>();
-        friendlyNameMap.put("LightningComponentBundle", "Lightning Web Components (LWC)");
-        friendlyNameMap.put("AuraDefinitionBundle", "Lightning Component Bundle");
-        friendlyNameMap.put("ApexClass", "Apex Class");
-        friendlyNameMap.put("ApexTrigger", "Apex Trigger");
-        friendlyNameMap.put("CustomObject", "Custom Object");
-        friendlyNameMap.put("CustomField", "Custom Field");
-        friendlyNameMap.put("Flow", "Flows");
-        friendlyNameMap.put("PermissionSet", "Permission Set");
-        friendlyNameMap.put("Profile", "Profile");
-
         SysDictData query = new SysDictData();
         query.setDictType(DICT_TYPE_KEY);
         List<SysDictData> existingList = dictDataService.selectDictDataList(query);
-
         Map<String, SysDictData> existMap = new HashMap<>();
-        for (SysDictData data : existingList) {
-            existMap.put(data.getDictValue(), data);
-        }
-
+        for (SysDictData data : existingList) existMap.put(data.getDictValue(), data);
         long sortOrder = existingList.size() + 10;
-
         for (String apiName : allTypes) {
-            if (existMap.containsKey(apiName)) {
-                continue;
-            }
+            if (existMap.containsKey(apiName)) continue;
             SysDictData newData = new SysDictData();
             newData.setDictSort(sortOrder++);
-            newData.setDictLabel(friendlyNameMap.getOrDefault(apiName, apiName));
+            newData.setDictLabel(apiName);
             newData.setDictValue(apiName);
             newData.setDictType(DICT_TYPE_KEY);
             newData.setStatus("0");
-            newData.setIsDefault("N");
-            newData.setCreateBy(SecurityUtils.getUsername());
-            newData.setRemark("Auto synced from Salesforce");
             dictDataService.insertDictData(newData);
         }
     }
 
     private void checkAndCreateDictType() {
-        SysDictType dictType = dictTypeService.selectDictTypeByType(DICT_TYPE_KEY);
-        if (dictType == null) {
+        if (dictTypeService.selectDictTypeByType(DICT_TYPE_KEY) == null) {
             SysDictType newType = new SysDictType();
             newType.setDictName("Salesforce元数据类型");
             newType.setDictType(DICT_TYPE_KEY);
-            newType.setStatus("0");
-            newType.setCreateBy(SecurityUtils.getUsername());
-            newType.setRemark("用于Salesforce部署模块的元数据类型选择");
             dictTypeService.insertDictType(newType);
         }
     }
 
-    /**
-     * 【新增】清除指定 Org 的所有元数据缓存
-     * 模式：sf:meta:{orgId}:*
-     */
     @Override
     public void clearCacheForOrg(Long orgId) {
         if (orgId == null) return;
-
-        // 构造匹配模式，例如 sf:meta:1001:*
         String pattern = REDIS_META_KEY_PREFIX + orgId + ":*";
-
-        // 获取所有匹配的 Key
         Collection<String> keys = redisCache.keys(pattern);
-
-        if (keys != null && !keys.isEmpty()) {
-            redisCache.deleteObject(keys);
-            log.info("已清理 Org [{}] 的元数据缓存，共 {} 个 Key", orgId, keys.size());
-        }
+        if (keys != null && !keys.isEmpty()) redisCache.deleteObject(keys);
     }
 }
