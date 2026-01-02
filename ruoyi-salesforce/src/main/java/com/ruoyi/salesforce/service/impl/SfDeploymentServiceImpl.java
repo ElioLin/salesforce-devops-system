@@ -78,6 +78,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     @Override
     @Transactional
     public void addItems(Long deploymentId, List<SfDeploymentItem> items) {
+        // 【优化】校验当前状态是否允许修改
+        checkIfLocked(deploymentId);
+
         for(SfDeploymentItem item : items) {
             item.setDeploymentId(deploymentId);
             item.setCreateTime(new Date());
@@ -85,8 +88,10 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             item.setDiffStatus("Comparing");
             sfDeploymentItemMapper.insert(item);
         }
+        // 添加后触发一次比对
         checkDiffStatus(deploymentId);
     }
+
 
     @Override
     public int updateSfDeployment(SfDeployment sfDeployment) {
@@ -107,7 +112,30 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
     @Override
     public void removeItems(List<Long> itemIds) {
+        if(itemIds == null || itemIds.isEmpty()) return;
+
+        // 【优化】校验状态。因为传入的是itemId，先查出 deploymentId
+        SfDeploymentItem item = sfDeploymentItemMapper.selectById(itemIds.get(0));
+        if(item != null) {
+            checkIfLocked(item.getDeploymentId());
+        }
+
         sfDeploymentItemMapper.deleteBatchIds(itemIds);
+    }
+
+    /**
+     * 【新增】检查部署包是否被锁定（正在处理中）
+     */
+    private void checkIfLocked(Long deploymentId) {
+        SfDeployment deployment = sfDeploymentMapper.selectById(deploymentId);
+        if(deployment == null) return;
+
+        String s = deployment.getStatus();
+        // 如果处于中间状态，禁止修改
+        if("Processing".equals(s) || "Validating".equals(s) || "Deploying".equals(s) ||
+                "Pending".equals(s) || "InProgress".equals(s) || "Queued".equals(s)) {
+            throw new ServiceException("当前部署包正在执行验证或部署任务，禁止修改元数据！");
+        }
     }
 
     @Override

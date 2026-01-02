@@ -1,6 +1,6 @@
 <template>
     <div class="app-container">
-        <el-card shadow="never" class="mb-20" v-loading="loading">
+        <el-card shadow="never" class="mb-20 sticky-card" v-loading="loading">
             <div slot="header" class="clearfix">
                 <span class="card-title">{{ deployment.title || '部署包详情' }}</span>
 
@@ -16,6 +16,12 @@
                 </el-tag>
 
                 <div style="float: right;">
+                    <el-button type="text" icon="el-icon-refresh-left" :loading="isCheckingStatus"
+                        style="margin-right: 15px;" @click="handleGlobalRecalculate"
+                        :disabled="!deployment.targetOrgId || isProcessing">
+                        重新计算差异
+                    </el-button>
+
                     <el-button type="info" icon="el-icon-refresh" size="mini" @click="refreshData"
                         :disabled="isProcessing">手动刷新</el-button>
                     <el-button type="primary" plain icon="el-icon-arrow-left" size="mini"
@@ -50,37 +56,20 @@
             </el-row>
 
             <div class="config-section">
-                <el-form label-width="100px" size="small" class="config-form">
-                    <el-row :gutter="20" type="flex" align="middle">
-                        <el-col :span="12" :xs="24">
-                            <el-form-item label="测试级别" style="margin-bottom: 0;">
-                                <el-select v-model="deployment.testLevel" placeholder="请选择" style="width: 100%; max-width: 300px;">
-                                    <el-option label="默认 (NoTestRun / Default)" value="NoTestRun" />
-                                    <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
-                                    <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
-                                </el-select>
-                                <el-button type="primary" icon="el-icon-check" plain style="margin-left: 10px;"
-                                    @click="handleSaveConfig">保存配置</el-button>
-                            </el-form-item>
-                        </el-col>
-                    </el-row>
-
-                    <transition name="el-zoom-in-top">
-                        <div v-if="deployment.testLevel === 'RunSpecifiedTests'" style="margin-top: 15px;">
-                            <el-form-item label="指定类名">
-                                <el-input 
-                                    type="textarea" 
-                                    v-model="deployment.specifiedTests" 
-                                    :autosize="{ minRows: 3, maxRows: 10 }"
-                                    placeholder="请输入测试类名，多个类名请用英文逗号 (,) 分隔。&#10;例如: AccountTriggerTest, OpportunityServiceTest"
-                                    style="width: 100%; max-width: 800px;" 
-                                />
-                                <div class="form-tip">
-                                    <i class="el-icon-info"></i> 提示：请确保类名准确无误，通常用于 Quick Deploy 或生产环境部署。
-                                </div>
-                            </el-form-item>
-                        </div>
-                    </transition>
+                <el-form label-width="80px" size="small" :inline="true" class="config-form">
+                    <el-form-item label="测试级别">
+                        <el-select v-model="deployment.testLevel" placeholder="请选择" style="width: 220px">
+                            <el-option label="默认 (NoTestRun / Default)" value="NoTestRun" />
+                            <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
+                            <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
+                        </el-select>
+                    </el-form-item>
+                    <el-form-item label="指定类名" v-if="deployment.testLevel === 'RunSpecifiedTests'">
+                        <el-input v-model="deployment.specifiedTests" placeholder="多个类名用逗号分隔" style="width: 300px" />
+                    </el-form-item>
+                    <el-form-item>
+                        <el-button type="text" icon="el-icon-check" @click="handleSaveConfig">保存配置</el-button>
+                    </el-form-item>
                 </el-form>
             </div>
 
@@ -90,7 +79,7 @@
                         <span class="title">
                             <i class="el-icon-collection"></i> 元数据处理
                             <el-tag size="mini" effect="plain" class="ml-10" v-if="compStateText">{{ compStateText
-                                }}</el-tag>
+                            }}</el-tag>
                         </span>
                         <span class="count" v-if="compTotal > 0">{{ compDone }} / {{ compTotal }}</span>
                     </div>
@@ -100,22 +89,28 @@
                 </div>
 
                 <div class="progress-block" v-if="shouldShowTestProgress" style="margin-top: 15px;">
-                    <div class="progress-header">
-                        <span class="title">
-                            <i class="el-icon-cpu"></i> 单元测试
-                            <span v-if="currentTestName" class="running-test">
-                                <i class="el-icon-loading"></i> 正在执行: {{ currentTestName }}
+                    <div v-if="isQuickDeploy" class="quick-deploy-tip">
+                        <i class="el-icon-lightning" style="font-size: 16px;"></i>
+                        <span style="font-weight: 600; margin-left: 5px;">快速部署模式：直接使用上次验证结果，无需再次执行测试。</span>
+                    </div>
+                    <template v-else>
+                        <div class="progress-header">
+                            <span class="title">
+                                <i class="el-icon-cpu"></i> 单元测试
+                                <span v-if="currentTestName" class="running-test">
+                                    <i class="el-icon-loading"></i> 正在执行: {{ currentTestName }}
+                                </span>
                             </span>
-                        </span>
-                        <span class="count" v-if="testTotal > 0">{{ testDone }} / {{ testTotal }}</span>
-                        <span class="count" v-else>等待开始...</span>
-                    </div>
-                    <el-progress :percentage="testPercent" :status="testStatus" :stroke-width="14" text-inside
-                        :color="customColors">
-                    </el-progress>
-                    <div v-if="testFailures > 0" class="error-text">
-                        <i class="el-icon-warning"></i> 发现 {{ testFailures }} 个测试失败
-                    </div>
+                            <span class="count" v-if="testTotal > 0">{{ testDone }} / {{ testTotal }}</span>
+                            <span class="count" v-else>等待开始...</span>
+                        </div>
+                        <el-progress :percentage="testPercent" :status="testStatus" :stroke-width="14" text-inside
+                            :color="customColors">
+                        </el-progress>
+                        <div v-if="testFailures > 0" class="error-text">
+                            <i class="el-icon-warning"></i> 发现 {{ testFailures }} 个测试失败
+                        </div>
+                    </template>
                 </div>
             </div>
 
@@ -127,102 +122,116 @@
             </el-alert>
         </el-card>
 
-        <el-card shadow="never">
-            <div slot="header" class="clearfix list-header">
-                <div class="left-panel">
-                    <span class="card-title">包含的元数据</span>
-                    <el-tag size="small" type="info" effect="plain" class="count-tag">
-                        当前显示: <b class="text-primary">{{ filteredItemList.length }}</b> / 总共: {{ itemList.length }}
-                    </el-tag>
-                </div>
+        <el-card shadow="never" class="tabs-card">
+            <el-tabs v-model="activeTab" type="card">
+                <el-tab-pane name="selected">
+                    <span slot="label">
+                        <i class="el-icon-folder-checked"></i> 已添加元数据
+                        <el-badge :value="itemList.length" class="item-badge" type="primary"
+                            v-if="itemList.length > 0" />
+                    </span>
 
-                <div class="right-panel">
-                    <el-button type="text" icon="el-icon-refresh-left" :loading="isCheckingStatus"
-                        @click="handleCheckStatus" :disabled="!deployment.targetOrgId">重新计算差异</el-button>
-
-                    <el-divider direction="vertical"></el-divider>
-
-                    <el-button type="text" icon="el-icon-remove-outline" @click="clearColumnFilters">重置筛选</el-button>
-
-                    <el-button type="primary" size="mini" icon="el-icon-plus" :disabled="isProcessing"
-                        @click="openMetadataBrowser" style="margin-left: 10px">
-                        添加元数据
-                    </el-button>
-                </div>
-            </div>
-
-            <el-table v-loading="loadingItems" :data="filteredItemList" border stripe highlight-current-row
-                style="width: 100%">
-                <el-table-column prop="metadataType" width="220" sortable>
-                    <template slot="header" slot-scope="scope">
-                        <div class="custom-header">
-                            <span>类型</span>
-                            <el-select v-model="columnFilters.type" size="mini" placeholder="全部" clearable
-                                @click.native.stop filterable>
-                                <el-option v-for="type in existingTypeOptions" :key="type" :label="getDictLabel(type)"
-                                    :value="type" />
-                            </el-select>
+                    <div class="list-header clearfix mb-10">
+                        <div class="left-panel">
+                            <el-tag size="small" type="info" effect="plain" class="count-tag">
+                                当前显示: <b class="text-primary">{{ filteredItemList.length }}</b> / 总共: {{ itemList.length
+                                }}
+                            </el-tag>
                         </div>
-                    </template>
-                    <template slot-scope="scope">
-                        {{ getDictLabel(scope.row.metadataType) }}
-                    </template>
-                </el-table-column>
-
-                <el-table-column prop="memberName" sortable>
-                    <template slot="header" slot-scope="scope">
-                        <div class="custom-header">
-                            <span>名称</span>
-                            <el-input v-model="columnFilters.name" size="mini" placeholder="筛选名称..." clearable
-                                @click.native.stop prefix-icon="el-icon-search" />
+                        <div class="right-panel text-right">
+                            <el-button type="text" icon="el-icon-remove-outline"
+                                @click="clearColumnFilters">重置筛选</el-button>
                         </div>
-                    </template>
-                </el-table-column>
+                    </div>
 
-                <el-table-column width="180" sortable>
-                    <template slot="header" slot-scope="scope">
-                        <div class="custom-header">
-                            <span>所属对象</span>
-                            <el-input v-model="columnFilters.parent" size="mini" placeholder="筛选..." clearable
-                                @click.native.stop prefix-icon="el-icon-search" />
-                        </div>
-                    </template>
-                    <template slot-scope="scope">{{ getParentName(scope.row.memberName) }}</template>
-                </el-table-column>
+                    <el-table v-loading="loadingItems" :data="filteredItemList" border stripe highlight-current-row
+                        style="width: 100%">
 
-                <el-table-column align="center" width="120" sortable prop="diffStatus">
-                    <template slot="header" slot-scope="scope">
-                        <div class="custom-header">
-                            <span>差异</span>
-                            <el-select v-model="columnFilters.status" size="mini" placeholder="全部" clearable
-                                @click.native.stop>
-                                <el-option v-for="status in existingDiffOptions" :key="status" :label="status"
-                                    :value="status" />
-                            </el-select>
-                        </div>
-                    </template>
-                    <template slot-scope="scope">
-                        <el-tooltip :content="scope.row.diffStatus || 'Unknown'" placement="top">
-                            <i :class="getDiffIcon(scope.row.diffStatus)"
-                                :style="{ color: getDiffColor(scope.row.diffStatus), fontSize: '18px', fontWeight: 'bold' }"></i>
-                        </el-tooltip>
-                        <span style="margin-left:5px">{{ scope.row.diffStatus }}</span>
-                    </template>
-                </el-table-column>
+                        <el-table-column prop="metadataType" label="类型" width="220" sortable>
+                            <template slot="header" slot-scope="scope">
+                                <div class="custom-header">
+                                    <span>类型</span>
+                                    <el-select v-model="columnFilters.type" size="mini" placeholder="全部" clearable
+                                        @click.native.stop filterable>
+                                        <el-option v-for="type in existingTypeOptions" :key="type"
+                                            :label="getDictLabel(type)" :value="type" />
+                                    </el-select>
+                                </div>
+                            </template>
+                            <template slot-scope="scope">
+                                {{ getDictLabel(scope.row.metadataType) }}
+                            </template>
+                        </el-table-column>
 
-                <el-table-column label="管理" width="150" align="center" fixed="right">
-                    <template slot-scope="scope">
-                        <el-button size="mini" type="text" icon="el-icon-connection" :disabled="!deployment.targetOrgId"
-                            @click="handleDiff(scope.row)">比对</el-button>
-                        <el-button size="mini" type="text" icon="el-icon-delete" class="text-danger"
-                            :disabled="isProcessing" @click="handleRemoveItem(scope.row)">移除</el-button>
-                    </template>
-                </el-table-column>
-            </el-table>
+                        <el-table-column prop="memberName" label="名称" sortable>
+                            <template slot="header" slot-scope="scope">
+                                <div class="custom-header">
+                                    <span>名称</span>
+                                    <el-input v-model="columnFilters.name" size="mini" placeholder="筛选名称..." clearable
+                                        @click.native.stop prefix-icon="el-icon-search" />
+                                </div>
+                            </template>
+                        </el-table-column>
+
+                        <el-table-column label="所属对象" width="180" sortable>
+                            <template slot="header" slot-scope="scope">
+                                <div class="custom-header">
+                                    <span>所属对象</span>
+                                    <el-input v-model="columnFilters.parent" size="mini" placeholder="筛选..." clearable
+                                        @click.native.stop prefix-icon="el-icon-search" />
+                                </div>
+                            </template>
+                            <template slot-scope="scope">{{ getParentName(scope.row.memberName) }}</template>
+                        </el-table-column>
+
+                        <el-table-column prop="lastModifiedByName" label="修改人" width="140" show-overflow-tooltip
+                            align="center" />
+
+                        <el-table-column prop="lastModifiedDate" label="修改时间" width="160" sortable align="center">
+                            <template slot-scope="scope">{{ parseTime(scope.row.lastModifiedDate) }}</template>
+                        </el-table-column>
+
+                        <el-table-column align="center" label="差异" width="120" sortable prop="diffStatus">
+                            <template slot="header" slot-scope="scope">
+                                <div class="custom-header">
+                                    <span>差异</span>
+                                    <el-select v-model="columnFilters.status" size="mini" placeholder="全部" clearable
+                                        @click.native.stop>
+                                        <el-option v-for="status in existingDiffOptions" :key="status" :label="status"
+                                            :value="status" />
+                                    </el-select>
+                                </div>
+                            </template>
+                            <template slot-scope="scope">
+                                <el-tooltip :content="scope.row.diffStatus || 'Unknown'" placement="top">
+                                    <i :class="getDiffIcon(scope.row.diffStatus)"
+                                        :style="{ color: getDiffColor(scope.row.diffStatus), fontSize: '18px', fontWeight: 'bold' }"></i>
+                                </el-tooltip>
+                                <span style="margin-left:5px">{{ scope.row.diffStatus }}</span>
+                            </template>
+                        </el-table-column>
+
+                        <el-table-column label="管理" width="150" align="center" fixed="right">
+                            <template slot-scope="scope">
+                                <el-button size="mini" type="text" icon="el-icon-connection"
+                                    :disabled="!deployment.targetOrgId" @click="handleDiff(scope.row)">比对</el-button>
+                                <el-button size="mini" type="text" icon="el-icon-delete" class="text-danger"
+                                    :disabled="isProcessing" @click="handleRemoveItem(scope.row)">移除</el-button>
+                            </template>
+                        </el-table-column>
+                    </el-table>
+                </el-tab-pane>
+
+                <el-tab-pane name="add">
+                    <span slot="label"><i class="el-icon-plus"></i> 添加元数据</span>
+
+                    <metadata-browser ref="metaBrowser" :sourceOrgId="deployment.sourceOrgId"
+                        :targetOrgId="deployment.targetOrgId" :initialItemList="itemList" :disabled="isProcessing"
+                        @auto-action="handleBrowserAction" @view-code="handleBrowserViewCode"
+                        @diff-code="handleBrowserDiffCode" />
+                </el-tab-pane>
+            </el-tabs>
         </el-card>
-
-        <metadata-browser ref="metaBrowser" @auto-action="handleBrowserAction" @view-code="handleBrowserViewCode"
-            @diff-code="handleBrowserDiffCode" />
 
         <el-dialog :title="previewTitle" :visible.sync="openCode" width="80%" append-to-body>
             <monaco-editor v-if="openCode" :value="codeContent" :original="oldCodeContent" :diffEditor="isDiffMode"
@@ -295,19 +304,20 @@ import { getToken } from "@/utils/auth";
 
 export default {
     name: "DeploymentDetail",
-    dicts: ['sys_salesforce_metadata_type'],
+    dicts: ['sys_salesforce_metadata_type', 'sys_salesforce_deploy_status'],
     components: { MetadataBrowser, MonacoEditor },
     data() {
         return {
             deploymentId: null,
+            activeTab: 'selected',
             deployment: {
                 testLevel: 'NoTestRun',
                 specifiedTests: '',
                 checkOnly: false
             },
-            // 【新增】本地持久化变量，记住用户刚才点击的操作（验证/部署）
-            // 解决刷新或 getDetail 覆盖后 checkOnly 丢失的问题
             localCheckOnly: false,
+            // 标记是否为快速部署模式
+            isQuickDeploy: false,
 
             itemList: [],
             orgMap: {},
@@ -318,7 +328,6 @@ export default {
             deploying: false,
             isCheckingStatus: false,
 
-            // WebSocket 相关
             websocket: null,
             isSocketConnected: false,
             socketRetryCount: 0,
@@ -336,7 +345,6 @@ export default {
             testFailures: 0,
             currentTestName: '',
 
-            // 【新增】防止重复弹窗的标志位，严格控制
             hasShownSuccess: false,
 
             customColors: [
@@ -382,24 +390,20 @@ export default {
         },
         isProcessing() {
             const s = this.deployment.status;
-            // 扩展状态判断，包含 Salesforce 的原生状态
             const activeStatuses = [
                 'Processing', 'Deploying', 'Validating',
                 'Pending', 'InProgress', 'Queued', 'Canceling'
             ];
             return activeStatuses.includes(s) || this.validating || this.deploying;
         },
-        // 计算属性：动态获取正确的状态文本
         calculatedStatusLabel() {
             const status = this.deployment.status;
-            // 优先使用 localCheckOnly，因为它是我们本地确认过的操作
             const isCheck = this.localCheckOnly;
 
             if (status === 'Succeeded') return isCheck ? '验证成功' : '部署成功';
             if (status === 'Failed') return isCheck ? '验证失败' : '部署失败';
             if (status === 'Canceled') return '已取消';
 
-            // 处理 Salesforce 状态
             if (status === 'Pending' || status === 'Queued') return '排队中...';
             if (status === 'InProgress') return isCheck ? '正在验证...' : '正在部署...';
 
@@ -482,7 +486,6 @@ export default {
 
             Promise.all([p1, p2, p3]).finally(() => {
                 this.loading = false;
-                // 如果当前状态是进行中，自动连接 WebSocket
                 if (this.isProcessing) {
                     this.initWebSocket();
                 }
@@ -525,10 +528,13 @@ export default {
                 const res = JSON.parse(event.data);
 
                 if (res.status) {
-                    this.deployment.status = res.status;
+                    let newStatus = res.status;
+                    if (newStatus === 'Succeeded' && res.checkOnly) {
+                        newStatus = 'Validated';
+                    }
+                    this.deployment.status = newStatus;
                 }
 
-                // 优先使用后端返回的 checkOnly，并同步给本地变量
                 if (res.hasOwnProperty('checkOnly')) {
                     this.$set(this.deployment, 'checkOnly', res.checkOnly);
                     this.localCheckOnly = res.checkOnly;
@@ -536,8 +542,7 @@ export default {
 
                 this.updateProgress(res);
 
-                // 如果已经显示过成功提示，就不再进入下面的逻辑（防止重复弹窗）
-                if (this.hasShownSuccess && (res.status === 'Succeeded' || res.status === 'Failed')) {
+                if (this.hasShownSuccess && (res.status === 'Succeeded' || res.status === 'Failed' || res.status === 'Validated')) {
                     return;
                 }
 
@@ -546,7 +551,6 @@ export default {
                         this.deployment.errorMsg = res.errorMsg;
                     }
 
-                    // 使用 localCheckOnly 确保提示词准确
                     const isVerify = this.localCheckOnly;
 
                     if (!this.hasShownSuccess) {
@@ -559,15 +563,17 @@ export default {
                             this.progressStatus = 'exception';
                             this.compStateText = "失败";
                         }
-                        // 标记已显示，防止重复
                         this.hasShownSuccess = true;
                     }
 
                     this.resetButtonState();
-                    // 延迟断开连接
+                    // 任务结束，复位快速部署标记
+                    // 【优化】不要重置 isQuickDeploy，保持提示框显示
+                    // this.isQuickDeploy = false; 
+
                     setTimeout(() => {
                         this.disconnectSocket();
-                        this.getDetail(); // 刷新详情，这会重新覆盖 deployment
+                        this.getDetail();
                     }, 1500);
                 }
 
@@ -584,8 +590,6 @@ export default {
         websocketOnClose(e) {
             this.isSocketConnected = false;
             this.websocket = null;
-
-            // 简单重连
             if (this.isProcessing && this.socketRetryCount < 3) {
                 this.socketRetryCount++;
                 setTimeout(() => {
@@ -611,7 +615,6 @@ export default {
                 this.compPercent = Math.max(this.compPercent, cPercent);
             }
 
-            // 使用 localCheckOnly 保证文字正确
             const actionText = this.localCheckOnly ? "验证" : "部署";
 
             if (statusObj.stateDetail) {
@@ -638,6 +641,162 @@ export default {
             }
         },
 
+        handleDownloadPackage() {
+            const fileName = `deployment_pkg_${this.deploymentId}.zip`;
+            this.$modal.msgSuccess("正在生成并下载部署包，可能需要几分钟，请耐心等待...");
+
+            request({
+                url: '/salesforce/deployment/download/' + this.deploymentId,
+                method: 'post',
+                responseType: 'blob',
+                timeout: 600000
+            }).then(async (res) => {
+                const isBlob = res.type !== 'application/json';
+                if (isBlob) {
+                    const blob = new Blob([res]);
+                    if (window.navigator.msSaveOrOpenBlob) {
+                        navigator.msSaveBlob(blob, fileName);
+                    } else {
+                        const link = document.createElement('a');
+                        const href = window.URL.createObjectURL(blob);
+                        link.href = href;
+                        link.download = fileName;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        window.URL.revokeObjectURL(href);
+                    }
+                    this.$modal.msgSuccess("下载已完成！");
+                } else {
+                    const text = await res.text();
+                    const json = JSON.parse(text);
+                    this.$modal.msgError(json.msg || "下载失败");
+                }
+            }).catch(error => {
+                console.error("Download error:", error);
+                let msg = "下载失败，请联系管理员";
+                if (error.message && error.message.includes('timeout')) {
+                    msg = "生成部署包超时，请稍后重试或减小包体积";
+                }
+                this.$modal.msgError(msg);
+            });
+        },
+
+        handlePreviewPackage() {
+            this.previewDialog.open = true;
+            this.previewDialog.loading = true;
+            this.previewDialog.files = [];
+            this.previewDialog.fileContents = {};
+            this.previewDialog.packageXml = '';
+            this.previewDialog.currentFile = 'package.xml';
+            this.previewDialog.currentContent = '';
+
+            previewDeploymentPackage(this.deploymentId).then(res => {
+                const data = res.data;
+                this.previewDialog.files = data.files || [];
+                this.previewDialog.fileContents = data.fileContents || {};
+                this.previewDialog.packageXml = data.packageXml || '';
+
+                let pkgKey = Object.keys(this.previewDialog.fileContents).find(k => k.endsWith('package.xml'));
+                if (pkgKey) {
+                    this.selectPreviewFile(pkgKey);
+                } else if (this.previewDialog.packageXml) {
+                    this.previewDialog.currentContent = this.previewDialog.packageXml;
+                } else if (this.previewDialog.files.length > 0) {
+                    this.selectPreviewFile(this.previewDialog.files[0]);
+                }
+
+                this.previewDialog.loading = false;
+            }).catch(() => {
+                this.previewDialog.loading = false;
+            });
+        },
+        selectPreviewFile(fileName) {
+            this.previewDialog.currentFile = fileName;
+            if (fileName === 'package.xml' && this.previewDialog.packageXml && !this.previewDialog.fileContents[fileName]) {
+                this.previewDialog.currentContent = this.previewDialog.packageXml;
+                return;
+            }
+            const content = this.previewDialog.fileContents[fileName];
+            this.previewDialog.currentContent = content || '(无法预览或文件为空)';
+        },
+        getLanguage(fileName) {
+            if (!fileName) return 'xml';
+            if (fileName.endsWith('.cls') || fileName.endsWith('.trigger')) return 'java';
+            if (fileName.endsWith('.js')) return 'javascript';
+            if (fileName.endsWith('.css')) return 'css';
+            if (fileName.endsWith('.json')) return 'json';
+            return 'xml';
+        },
+        handleBrowserAction(event) {
+            if (event.action === 'add') {
+                const itemToAdd = [{ metadataType: event.type, memberName: event.name }];
+                addDeploymentItems(this.deploymentId, itemToAdd).then(res => {
+                    this.refreshBrowserMap(event);
+                });
+            } else if (event.action === 'batch-add') {
+                const itemsPayload = event.items.map(i => ({
+                    metadataType: i.type,
+                    memberName: i.name
+                }));
+                addDeploymentItems(this.deploymentId, itemsPayload).then(res => {
+                    this.refreshBrowserMap(event, true);
+                });
+            } else if (event.action === 'remove') {
+                removeDeploymentItems(event.id).then(() => {
+                    this.$modal.msgSuccess("已移除");
+                    this.getItems();
+                });
+            } else if (event.action === 'batch-remove') {
+                const ids = event.ids.join(',');
+                removeDeploymentItems(ids).then(() => {
+                    this.$modal.msgSuccess("批量移除成功");
+                    this.getItems();
+                });
+            }
+        },
+        refreshBrowserMap(event, isBatch = false) {
+            listDeploymentItems(this.deploymentId).then(listRes => {
+                this.itemList = listRes.data;
+                if (this.$refs.metaBrowser) {
+                    if (isBatch) {
+                        event.items.forEach(evtItem => {
+                            const match = this.itemList.find(
+                                i => i.metadataType === evtItem.type && i.memberName === evtItem.name
+                            );
+                            if (match) {
+                                this.$refs.metaBrowser.updateMapAfterAdd(evtItem.key, match.id);
+                            }
+                        });
+                    } else {
+                        const newItem = this.itemList.find(
+                            i => i.metadataType === event.type && i.memberName === event.name
+                        );
+                        if (newItem) {
+                            this.$refs.metaBrowser.updateMapAfterAdd(event.key, newItem.id);
+                        }
+                    }
+                }
+            });
+        },
+        getDictLabel(value) {
+            if (!value) return '';
+            const datas = this.dict.type.sys_salesforce_metadata_type;
+            if (datas) {
+                const found = datas.find(item => item.value === value);
+                if (found) return found.label;
+            }
+            return value;
+        },
+        clearColumnFilters() {
+            this.columnFilters = {
+                type: '',
+                name: '',
+                parent: '',
+                status: ''
+            };
+            this.$modal.msgSuccess("筛选条件已重置");
+        },
         handleDeploy(checkOnly) {
             const actionName = checkOnly ? "验证" : "部署";
             this.$confirm(`确认要执行【${actionName}】操作吗？`, "警告", {
@@ -645,19 +804,18 @@ export default {
                 cancelButtonText: "取消",
                 type: "warning"
             }).then(() => {
-                // 设置本地状态
                 this.localCheckOnly = checkOnly;
+                // 【优化】普通部署重置快速部署标记
+                this.isQuickDeploy = false;
                 this.$set(this.deployment, 'checkOnly', checkOnly);
 
                 if (checkOnly) this.validating = true;
                 else this.deploying = true;
 
                 this.resetProgress();
-                // 重置弹窗标志
                 this.hasShownSuccess = false;
 
                 deployPackage(this.deploymentId, checkOnly).then(res => {
-                    // 移除这里的 msgSuccess，避免和最终完成的重复
                     this.compStateText = "正在连接服务器...";
                     this.initWebSocket();
                 }).catch(() => {
@@ -666,7 +824,6 @@ export default {
                 });
             });
         },
-
         handleQuickDeploy() {
             this.$confirm('将使用上次验证成功的 ID 进行快速部署（免上传），确认吗？', "快速部署", {
                 confirmButtonText: "立即部署",
@@ -675,6 +832,7 @@ export default {
             }).then(() => {
                 this.deploying = true;
                 this.localCheckOnly = false;
+                this.isQuickDeploy = true;
                 this.$set(this.deployment, 'checkOnly', false);
 
                 this.resetProgress();
@@ -685,10 +843,21 @@ export default {
                     this.initWebSocket();
                 }).catch(() => {
                     this.deploying = false;
+                    this.isQuickDeploy = false;
                 });
             });
         },
-
+        handleGlobalRecalculate() {
+            if (this.activeTab === 'selected') {
+                this.handleCheckStatus();
+            }
+            else if (this.activeTab === 'add') {
+                if (this.$refs.metaBrowser) {
+                    this.$refs.metaBrowser.handleQuery();
+                    this.$modal.msgSuccess("正在刷新元数据列表差异状态...");
+                }
+            }
+        },
         resetProgress() {
             this.progressStatus = null;
             this.compTotal = 0;
@@ -707,15 +876,11 @@ export default {
         },
         getDetail() {
             return getDeployment(this.deploymentId).then(res => {
-                // 获取最新数据
                 const newData = res.data || {};
-
-                // 【关键修复】合并 localCheckOnly 到新数据中，防止刷新后丢失状态导致文字变回"部署成功"
-                // 只有当状态是 Succeeded 且我们有本地记录时才覆盖，避免逻辑污染
-                if (newData.status === 'Succeeded' && this.localCheckOnly) {
+                if (newData.status === 'Validated') {
+                    this.localCheckOnly = true;
                     newData.checkOnly = true;
                 }
-
                 this.deployment = newData;
             });
         },
@@ -784,19 +949,6 @@ export default {
             if (status === 'Invalid') return '#F56C6C';
             return '#409EFF';
         },
-
-        openMetadataBrowser() {
-            if (!this.deployment.sourceOrgId) {
-                this.$modal.msgError("部署包缺少源环境信息，无法添加元数据");
-                return;
-            }
-            this.$refs.metaBrowser.open(
-                this.deployment.sourceOrgId, 
-                this.deployment.targetOrgId, 
-                this.itemList
-            );
-        },
-
         handleRemoveItem(row) {
             this.$confirm('确认移除该元数据吗？', "警告", { type: "warning" }).then(() => {
                 removeDeploymentItems(row.id).then(() => {
@@ -872,154 +1024,6 @@ export default {
                 loading.close();
             });
         },
-        handleDownloadPackage() {
-            const fileName = `deployment_pkg_${this.deploymentId}.zip`;
-            this.$modal.msgSuccess("正在生成并下载部署包，可能需要几分钟，请耐心等待...");
-            
-            request({
-                url: '/salesforce/deployment/download/' + this.deploymentId,
-                method: 'post',
-                responseType: 'blob',
-                timeout: 600000 // 10分钟超时
-            }).then(async (res) => {
-                const isBlob = res.type !== 'application/json';
-                if (isBlob) {
-                    const blob = new Blob([res]);
-                    if (window.navigator.msSaveOrOpenBlob) {
-                        navigator.msSaveBlob(blob, fileName);
-                    } else {
-                        const link = document.createElement('a');
-                        const href = window.URL.createObjectURL(blob);
-                        link.href = href;
-                        link.download = fileName;
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                        window.URL.revokeObjectURL(href);
-                    }
-                    this.$modal.msgSuccess("下载已完成！");
-                } else {
-                    const text = await res.text();
-                    const json = JSON.parse(text);
-                    this.$modal.msgError(json.msg || "下载失败");
-                }
-            }).catch(error => {
-                console.error("Download error:", error);
-                let msg = "下载失败，请联系管理员";
-                if (error.message && error.message.includes('timeout')) {
-                    msg = "生成部署包超时，请稍后重试或减小包体积";
-                }
-                this.$modal.msgError(msg);
-            });
-        },
-        handlePreviewPackage() {
-            this.previewDialog.open = true;
-            this.previewDialog.loading = true;
-            this.previewDialog.files = [];
-            this.previewDialog.fileContents = {};
-            this.previewDialog.packageXml = '';
-            this.previewDialog.currentFile = 'package.xml';
-            this.previewDialog.currentContent = '';
-
-            previewDeploymentPackage(this.deploymentId).then(res => {
-                const data = res.data;
-                this.previewDialog.files = data.files || [];
-                this.previewDialog.fileContents = data.fileContents || {};
-                this.previewDialog.packageXml = data.packageXml || '';
-
-                let pkgKey = Object.keys(this.previewDialog.fileContents).find(k => k.endsWith('package.xml'));
-                if (pkgKey) {
-                    this.selectPreviewFile(pkgKey);
-                } else if (this.previewDialog.packageXml) {
-                    this.previewDialog.currentContent = this.previewDialog.packageXml;
-                } else if (this.previewDialog.files.length > 0) {
-                    this.selectPreviewFile(this.previewDialog.files[0]);
-                }
-
-                this.previewDialog.loading = false;
-            }).catch(() => {
-                this.previewDialog.loading = false;
-            });
-        },
-        selectPreviewFile(fileName) {
-            this.previewDialog.currentFile = fileName;
-            if (fileName === 'package.xml' && this.previewDialog.packageXml && !this.previewDialog.fileContents[fileName]) {
-                this.previewDialog.currentContent = this.previewDialog.packageXml;
-                return;
-            }
-            const content = this.previewDialog.fileContents[fileName];
-            this.previewDialog.currentContent = content || '(无法预览或文件为空)';
-        },
-        getLanguage(fileName) {
-            if (!fileName) return 'xml';
-            if (fileName.endsWith('.cls') || fileName.endsWith('.trigger')) return 'java';
-            if (fileName.endsWith('.js')) return 'javascript';
-            if (fileName.endsWith('.css')) return 'css';
-            if (fileName.endsWith('.json')) return 'json';
-            return 'xml';
-        },
-        handleBrowserAction(event) {
-            if (event.action === 'add') {
-                const itemToAdd = [{ metadataType: event.type, memberName: event.name }];
-                addDeploymentItems(this.deploymentId, itemToAdd).then(res => {
-                    // this.$modal.msgSuccess("已添加: " + event.name);
-                    this.refreshBrowserMap(event);
-                });
-            } else if (event.action === 'batch-add') {
-                const itemsPayload = event.items.map(i => ({
-                    metadataType: i.type,
-                    memberName: i.name
-                }));
-                addDeploymentItems(this.deploymentId, itemsPayload).then(res => {
-                    // this.$modal.msgSuccess(`成功添加 ${itemsPayload.length} 条元数据`);
-                    this.refreshBrowserMap(event, true);
-                });
-            } else if (event.action === 'remove') {
-                removeDeploymentItems(event.id).then(() => {
-                    this.$modal.msgSuccess("已移除");
-                    this.getItems();
-                });
-            } else if (event.action === 'batch-remove') {
-                const ids = event.ids.join(',');
-                removeDeploymentItems(ids).then(() => {
-                    this.$modal.msgSuccess("批量移除成功");
-                    this.getItems();
-                });
-            }
-        },
-        refreshBrowserMap(event, isBatch = false) {
-            listDeploymentItems(this.deploymentId).then(listRes => {
-                this.itemList = listRes.data;
-                if (this.$refs.metaBrowser) {
-                    if (isBatch) {
-                        event.items.forEach(evtItem => {
-                            const match = this.itemList.find(
-                                i => i.metadataType === evtItem.type && i.memberName === evtItem.name
-                            );
-                            if (match) {
-                                this.$refs.metaBrowser.updateMapAfterAdd(evtItem.key, match.id);
-                            }
-                        });
-                    } else {
-                        const newItem = this.itemList.find(
-                            i => i.metadataType === event.type && i.memberName === event.name
-                        );
-                        if (newItem) {
-                            this.$refs.metaBrowser.updateMapAfterAdd(event.key, newItem.id);
-                        }
-                    }
-                }
-            });
-        },
-        getDictLabel(value) {
-            if (!value) return '';
-            const datas = this.dict.type.sys_salesforce_metadata_type;
-            if (datas) {
-                const found = datas.find(item => item.value === value);
-                if (found) return found.label;
-            }
-            return value;
-        },
         clearColumnFilters() {
             this.columnFilters = {
                 type: '',
@@ -1034,9 +1038,15 @@ export default {
 </script>
 
 <style scoped>
-/* 保持原有样式 */
+/* 保持原有样式，此处省略以节省篇幅，请直接保留你文件中的 CSS */
 .mb-20 {
     margin-bottom: 20px;
+}
+
+.sticky-card {
+    position: sticky;
+    top: 0;
+    z-index: 999;
 }
 
 .card-title {
@@ -1096,24 +1106,11 @@ export default {
     padding-top: 15px;
     background-color: #fbfbfc;
     border-radius: 4px;
-    /* 增加内边距，让表单不那么拥挤 */
-    padding: 15px 20px; 
-}
-
-.form-tip {
-    font-size: 12px;
-    color: #909399;
-    margin-top: 5px;
-    line-height: 1.5;
+    padding-left: 10px;
 }
 
 .config-form {
     margin-bottom: 0;
-}
-
-/* 优化：调整一下行高，避免错位 */
-.config-form .el-form-item {
-    margin-bottom: 0; /* 默认不留底边距，由布局控制 */
 }
 
 .progress-container {
@@ -1207,5 +1204,23 @@ export default {
     margin-bottom: 8px;
     color: #606266;
     font-weight: 600;
+}
+
+.tabs-card {
+    margin-bottom: 0;
+}
+
+.item-badge {
+    margin-top: -3px;
+    margin-left: 5px;
+}
+
+.quick-deploy-tip {
+    color: #67C23A;
+    padding: 10px 0;
+    text-align: center;
+    background-color: #f0f9eb;
+    border-radius: 4px;
+    border: 1px solid #e1f3d8;
 }
 </style>
