@@ -69,8 +69,8 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Override
     public MetadataConnection getMetadataConnection(Long orgId) throws ConnectionException {
         SfOrg org = sfOrgService.selectSfOrgById(orgId);
-        if (org == null) throw new ConnectionException("未找到ID为 " + orgId + " 的Salesforce环境配置！");
-        if (StringUtils.isEmpty(org.getAccessToken()) || StringUtils.isEmpty(org.getInstanceUrl())) {
+        if(org == null) throw new ConnectionException("未找到ID为 " + orgId + " 的Salesforce环境配置！");
+        if(StringUtils.isEmpty(org.getAccessToken()) || StringUtils.isEmpty(org.getInstanceUrl())) {
             throw new ConnectionException("环境 [" + org.getName() + "] 尚未授权，请先前往环境管理进行授权。");
         }
         verifyAndRefreshSession(org);
@@ -90,13 +90,13 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             testConfig.setServiceEndpoint(org.getInstanceUrl() + "/services/Soap/m/58.0");
             MetadataConnection testConn = new MetadataConnection(testConfig);
             testConn.describeMetadata(58.0);
-        } catch (ConnectionException e) {
-            if (isSessionExpired(e)) {
+        } catch(ConnectionException e) {
+            if(isSessionExpired(e)) {
                 log.info("检测到 Org [{}] Session 已过期，正在执行自动续期...", org.getName());
                 try {
                     refreshAccessToken(org);
                     log.info("Org [{}] 自动续期成功！", org.getName());
-                } catch (Exception refreshEx) {
+                } catch(Exception refreshEx) {
                     log.error("自动续期失败", refreshEx);
                     throw new ConnectionException("Salesforce授权已过期且自动续期失败：" + refreshEx.getMessage());
                 }
@@ -109,13 +109,13 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     private boolean isSessionExpired(ConnectionException e) {
         String msg = e.getMessage();
-        if (StringUtils.isEmpty(msg)) return false;
+        if(StringUtils.isEmpty(msg)) return false;
         return msg.contains("INVALID_SESSION_ID") || msg.contains("Session expired") ||
                 msg.contains("Session not found") || msg.contains("Full authentication is required");
     }
 
     private void refreshAccessToken(SfOrg org) {
-        if (StringUtils.isEmpty(org.getRefreshToken()) || StringUtils.isEmpty(org.getClientId()) || StringUtils.isEmpty(org.getClientSecret())) {
+        if(StringUtils.isEmpty(org.getRefreshToken()) || StringUtils.isEmpty(org.getClientId()) || StringUtils.isEmpty(org.getClientSecret())) {
             throw new ServiceException("无法自动续期：缺少 Refresh Token、Client ID 或 Client Secret。");
         }
         String instance = "Sandbox".equalsIgnoreCase(org.getOrgType()) ? "https://test.salesforce.com" : "https://login.salesforce.com";
@@ -127,9 +127,9 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                 .form("refresh_token", org.getRefreshToken())
                 .execute().body();
         JSONObject json = JSON.parseObject(result); // FastJson2
-        if (json.getString("access_token") != null) {
+        if(json.getString("access_token") != null) {
             org.setAccessToken(json.getString("access_token"));
-            if (json.getString("instance_url") != null) org.setInstanceUrl(json.getString("instance_url"));
+            if(json.getString("instance_url") != null) org.setInstanceUrl(json.getString("instance_url"));
             sfOrgService.updateSfOrg(org);
         } else {
             throw new ServiceException("刷新失败: " + json.getString("error_description"));
@@ -143,9 +143,9 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         query.setType("ApexClass");
         FileProperties[] results = connection.listMetadata(new ListMetadataQuery[]{query}, 58.0);
         List<String> classNames = new ArrayList<>();
-        if (results != null) {
-            for (FileProperties file : results)
-                if (file.getFullName() != null) classNames.add(file.getFullName());
+        if(results != null) {
+            for(FileProperties file : results)
+                if(file.getFullName() != null) classNames.add(file.getFullName());
         }
         return classNames;
     }
@@ -164,48 +164,79 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         retrieveRequest.setUnpackaged(manifest);
         AsyncResult asyncResult = connection.retrieve(retrieveRequest);
         RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
-        if (result.getStatus() != RetrieveStatus.Succeeded)
+        if(result.getStatus() != RetrieveStatus.Succeeded)
             throw new Exception("Retrieve failed: " + result.getErrorMessage());
         return smartExtract(result.getZipFile(), type, memberName);
     }
 
+    /**
+     * 从 ZIP 包中智能提取指定元数据的内容
+     * 修复：增加对 CustomLabel 和特殊子类型的精确匹配支持
+     */
     private String smartExtract(byte[] zipData, String type, String memberName) throws Exception {
-        if (zipData == null || zipData.length == 0) return "No content retrieved.";
+        if(zipData == null || zipData.length == 0) return "No content retrieved.";
+
         StringBuilder contentBuilder = new StringBuilder();
         boolean found = false;
-        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                String entryName = entry.getName();
-                if (entry.isDirectory() || entryName.endsWith("package.xml")) continue;
-                boolean isMatch = false;
-                if (isObjectChild(type) && memberName.contains(".")) {
-                    String objName = memberName.split("\\.")[0];
-                    if (entryName.endsWith("objects/" + objName + ".object")) isMatch = true;
-                } else if (isWorkflowChild(type) && memberName.contains(".")) {
-                    String objName = memberName.split("\\.")[0];
-                    if (entryName.endsWith("workflows/" + objName + ".workflow")) isMatch = true;
-                } else if (isBundleType(type) && entryName.contains(memberName)) isMatch = true;
-                else if (entryName.contains(memberName)) isMatch = true;
 
-                if (isMatch) {
+        try(ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
+            ZipEntry entry;
+            while((entry = zis.getNextEntry()) != null) {
+                String entryName = entry.getName();
+                if(entry.isDirectory() || entryName.endsWith("package.xml")) continue;
+
+                boolean isMatch = false;
+
+                // 【修复点 1】专门处理 CustomLabel
+                // CustomLabel 文件名固定为 labels/CustomLabels.labels，不包含 memberName
+                if("CustomLabel".equals(type) && entryName.endsWith("labels/CustomLabels.labels")) {
+                    isMatch = true;
+                }
+                // 【修复点 2】处理子元素类型 (CustomField, ValidationRule 等)
+                // 它们位于 objects/对象名.object 文件中
+                else if(isObjectChild(type) && memberName.contains(".")) {
+                    String objName = memberName.split("\\.")[0];
+                    if(entryName.endsWith("objects/" + objName + ".object")) isMatch = true;
+                }
+                // 【修复点 3】处理 Workflow 子元素
+                else if(isWorkflowChild(type) && memberName.contains(".")) {
+                    String objName = memberName.split("\\.")[0];
+                    if(entryName.endsWith("workflows/" + objName + ".workflow")) isMatch = true;
+                }
+                // 【修复点 4】处理 Bundle 类型 (LWC / Aura)
+                // Bundle 包含多个文件，只要路径包含组件名就算匹配
+                else if(isBundleType(type) && entryName.contains(memberName)) {
+                    isMatch = true;
+                }
+                // 5. 默认兜底：文件名包含成员名 (适用于 Class, Page, Trigger 等标准文件)
+                else if(entryName.contains(memberName)) {
+                    isMatch = true;
+                }
+
+                if(isMatch) {
                     found = true;
+                    // 读取文件内容
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[1024];
                     int len;
-                    while ((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
+                    while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
+
                     String fileContent = new String(bos.toByteArray(), StandardCharsets.UTF_8);
-                    if (isBundleType(type)) {
-                        contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n").append(fileContent).append("\n\n");
+
+                    // 如果是 Bundle，可能由多个文件组成，拼接显示
+                    if(isBundleType(type)) {
+                        contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n")
+                                .append(fileContent).append("\n\n");
                     } else {
-                        if (!entryName.endsWith("-meta.xml") || entryName.endsWith(".object") || entryName.endsWith(".workflow"))
-                            return fileContent;
-                        if (contentBuilder.length() == 0) contentBuilder.append(fileContent);
+                        // 对于单文件，找到即返回
+                        // 注意：Retrieve 单个 CustomLabel 时，Salesforce 返回的 XML 通常只包含该 Label，所以直接返回即可
+                        return fileContent;
                     }
                 }
             }
         }
-        if (!found) return "Error: File not found in retrieved package.";
+
+        if(!found) return "Error: File not found in retrieved package. (Type: " + type + ", Name: " + memberName + ")";
         return contentBuilder.toString();
     }
 
@@ -225,7 +256,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     public List<FileProperties> listMetadata(Long orgId, String type) throws Exception {
         String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
         List<FileProperties> cacheList = redisCache.getCacheList(cacheKey);
-        if (cacheList != null && !cacheList.isEmpty()) return cacheList;
+        if(cacheList != null && !cacheList.isEmpty()) return cacheList;
         return refreshMetadataCache(orgId, type);
     }
 
@@ -236,7 +267,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         query.setType(type);
         FileProperties[] results = connection.listMetadata(new ListMetadataQuery[]{query}, 58.0);
         List<FileProperties> list = new ArrayList<>();
-        if (results != null) for (FileProperties f : results) if (f.getFullName() != null) list.add(f);
+        if(results != null) for(FileProperties f : results) if(f.getFullName() != null) list.add(f);
         list.sort((a, b) -> b.getLastModifiedDate().compareTo(a.getLastModifiedDate()));
         String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
         redisCache.setCacheList(cacheKey, !list.isEmpty() ? list : new ArrayList<>());
@@ -249,14 +280,14 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         CompletableFuture<String> sourceFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return retrieveMetadata(sourceOrgId, type, memberName);
-            } catch (Exception e) {
+            } catch(Exception e) {
                 throw new RuntimeException(e.getMessage());
             }
         });
         CompletableFuture<String> targetFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return retrieveMetadata(targetOrgId, type, memberName);
-            } catch (Exception e) {
+            } catch(Exception e) {
                 return "";
             }
         });
@@ -272,7 +303,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         request.setUnpackaged(manifest);
         AsyncResult asyncResult = connection.retrieve(request);
         RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
-        if (result.getStatus() == RetrieveStatus.Succeeded) return result.getZipFile();
+        if(result.getStatus() == RetrieveStatus.Succeeded) return result.getZipFile();
         else throw new Exception("Retrieve failed: " + result.getErrorMessage());
     }
 
@@ -297,11 +328,11 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             DeployResult result = connection.checkDeployStatus(processId, false);
 
             // 2. 只有当部署结束(Done)时，才尝试拉取一次完整日志
-            if (result.isDone()) {
+            if(result.isDone()) {
                 try {
                     log.info("部署/验证已完成 (ID: {})，正在拉取完整日志...", processId);
                     result = connection.checkDeployStatus(processId, true);
-                } catch (Exception e) {
+                } catch(Exception e) {
                     log.warn("无法拉取部署详情 (日志可能过大)，自动降级为摘要模式。错误: {}", e.getMessage());
                 }
             }
@@ -320,14 +351,14 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             json.put("errorMessage", result.getErrorMessage());
             json.put("stateDetail", result.getStateDetail());
 
-            if (result.getDetails() != null) {
+            if(result.getDetails() != null) {
                 JSONObject details = new JSONObject();
 
                 // --- 手工提取 componentFailures ---
                 // --- 优化 componentFailures 提取 ---
-                if (result.getDetails().getComponentFailures() != null) {
+                if(result.getDetails().getComponentFailures() != null) {
                     JSONArray failures = new JSONArray();
-                    for (DeployMessage msg : result.getDetails().getComponentFailures()) {
+                    for(DeployMessage msg : result.getDetails().getComponentFailures()) {
                         JSONObject f = new JSONObject();
                         f.put("fileName", msg.getFileName());
                         f.put("problem", msg.getProblem());
@@ -345,15 +376,15 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                 }
 
                 // --- 手工提取 runTestResult ---
-                if (result.getDetails().getRunTestResult() != null) {
+                if(result.getDetails().getRunTestResult() != null) {
                     JSONObject testRes = new JSONObject();
                     RunTestsResult sfRunRes = result.getDetails().getRunTestResult();
 
                     testRes.put("numFailures", sfRunRes.getNumFailures());
 
-                    if (sfRunRes.getFailures() != null) {
+                    if(sfRunRes.getFailures() != null) {
                         JSONArray testFailures = new JSONArray();
-                        for (RunTestFailure fail : sfRunRes.getFailures()) {
+                        for(RunTestFailure fail : sfRunRes.getFailures()) {
                             JSONObject t = new JSONObject();
                             t.put("name", fail.getName());
                             t.put("methodName", fail.getMethodName());
@@ -364,9 +395,9 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                         testRes.put("failures", testFailures);
                     }
 
-                    if (sfRunRes.getCodeCoverageWarnings() != null) {
+                    if(sfRunRes.getCodeCoverageWarnings() != null) {
                         JSONArray warnings = new JSONArray();
-                        for (CodeCoverageWarning w : sfRunRes.getCodeCoverageWarnings()) {
+                        for(CodeCoverageWarning w : sfRunRes.getCodeCoverageWarnings()) {
                             JSONObject warn = new JSONObject();
                             warn.put("message", w.getMessage());
                             warnings.add(warn);
@@ -380,7 +411,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
             return json.toString();
 
-        } catch (Throwable t) {
+        } catch(Throwable t) {
             // 【终极兜底】捕获所有错误（包括 StackOverflow/OOM），防止 JVM 崩溃
             log.error("严重错误：检查部署状态时发生异常，已拦截。", t);
 
@@ -395,14 +426,14 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     // [新增] 辅助分析方法
     private String analyzeSolution(String errorMsg) {
-        if (errorMsg == null) return "";
-        if (errorMsg.contains("Code coverage")) {
+        if(errorMsg == null) return "";
+        if(errorMsg.contains("Code coverage")) {
             return "代码覆盖率不足，请编写更多单元测试或检查 @isTest 类。";
         }
-        if (errorMsg.contains("Dependent class is invalid")) {
+        if(errorMsg.contains("Dependent class is invalid")) {
             return "依赖类缺失或由编译错误，请检查相关联的类是否已包含在部署包中。";
         }
-        if (errorMsg.contains("FIELD_CUSTOM_VALIDATION_EXCEPTION")) {
+        if(errorMsg.contains("FIELD_CUSTOM_VALIDATION_EXCEPTION")) {
             return "触发了自定义验证规则，请检查数据或暂时停用该规则。";
         }
         return "请根据报错信息检查元数据定义。";
@@ -411,9 +442,9 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     private RetrieveResult waitForRetrieve(MetadataConnection connection, String id) throws Exception {
         int maxPolls = 600;
         int sleepMillis = 1000;
-        for (int i = 0; i < maxPolls; i++) {
+        for(int i = 0; i < maxPolls; i++) {
             RetrieveResult result = connection.checkRetrieveStatus(id, true);
-            if (result.isDone()) return result;
+            if(result.isDone()) return result;
             Thread.sleep(sleepMillis);
         }
         throw new Exception("Salesforce Retrieve request timed out (waited 10 mins).");
@@ -431,13 +462,13 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         Set<String> typeSet = new HashSet<>();
         try {
             DescribeMetadataResult result = conn.describeMetadata(58.0);
-            if (result != null) {
-                for (DescribeMetadataObject obj : result.getMetadataObjects()) {
+            if(result != null) {
+                for(DescribeMetadataObject obj : result.getMetadataObjects()) {
                     typeSet.add(obj.getXmlName());
-                    if (obj.getChildXmlNames() != null) Collections.addAll(typeSet, obj.getChildXmlNames());
+                    if(obj.getChildXmlNames() != null) Collections.addAll(typeSet, obj.getChildXmlNames());
                 }
             }
-        } catch (Exception e) {
+        } catch(Exception e) {
             // fallback
         }
         List<String> mustHaveTypes = Arrays.asList("ApexClass", "ApexTrigger", "CustomObject", "CustomField");
@@ -456,10 +487,10 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         query.setDictType(DICT_TYPE_KEY);
         List<SysDictData> existingList = dictDataService.selectDictDataList(query);
         Map<String, SysDictData> existMap = new HashMap<>();
-        for (SysDictData data : existingList) existMap.put(data.getDictValue(), data);
+        for(SysDictData data : existingList) existMap.put(data.getDictValue(), data);
         long sortOrder = existingList.size() + 10;
-        for (String apiName : allTypes) {
-            if (existMap.containsKey(apiName)) continue;
+        for(String apiName : allTypes) {
+            if(existMap.containsKey(apiName)) continue;
             SysDictData newData = new SysDictData();
             newData.setDictSort(sortOrder++);
             newData.setDictLabel(apiName);
@@ -471,7 +502,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     }
 
     private void checkAndCreateDictType() {
-        if (dictTypeService.selectDictTypeByType(DICT_TYPE_KEY) == null) {
+        if(dictTypeService.selectDictTypeByType(DICT_TYPE_KEY) == null) {
             SysDictType newType = new SysDictType();
             newType.setDictName("Salesforce元数据类型");
             newType.setDictType(DICT_TYPE_KEY);
@@ -481,9 +512,9 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     @Override
     public void clearCacheForOrg(Long orgId) {
-        if (orgId == null) return;
+        if(orgId == null) return;
         String pattern = REDIS_META_KEY_PREFIX + orgId + ":*";
         Collection<String> keys = redisCache.keys(pattern);
-        if (keys != null && !keys.isEmpty()) redisCache.deleteObject(keys);
+        if(keys != null && !keys.isEmpty()) redisCache.deleteObject(keys);
     }
 }
