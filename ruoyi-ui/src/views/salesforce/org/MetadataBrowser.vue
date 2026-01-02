@@ -130,7 +130,7 @@
     </el-table>
 
     <pagination v-show="total > 0" :total="total" :page.sync="queryParams.pageNum" :limit.sync="queryParams.pageSize"
-      @pagination="fetchList" />
+      :page-sizes="[50, 100, 200, 300, 500]" @pagination="fetchList" />
 
     <div slot="footer" class="dialog-footer">
       <el-button @click="visible = false">关 闭</el-button>
@@ -152,7 +152,6 @@ export default {
       syncLoading: false,
       typesLoading: false,
       existMap: new Map(),
-      // 【新增】Map 响应式触发器
       mapUpdateTrigger: 0,
 
       list: [],
@@ -164,7 +163,7 @@ export default {
 
       queryParams: {
         pageNum: 1,
-        pageSize: 10,
+        pageSize: 50,
         orgId: null,
         type: 'ApexClass',
         keyword: ''
@@ -182,11 +181,8 @@ export default {
       const org = this.orgOptions.find(item => item.id === this.currentOrgId);
       return org ? org.name : `ID: ${this.currentOrgId}`;
     },
-    // 【修改】计算当前类型已选数量（增加 trigger 依赖）
     selectedCurrentTypeCount() {
-      // 依赖注入：只要 mapUpdateTrigger 变了，这个计算属性就会重新执行
       const _ = this.mapUpdateTrigger;
-
       if (!this.existMap.size) return 0;
       let count = 0;
       const prefix = this.queryParams.type + ':';
@@ -197,7 +193,6 @@ export default {
       }
       return count;
     },
-    // 【新增】计算部署包总数（增加 trigger 依赖）
     deploymentTotalCount() {
       const _ = this.mapUpdateTrigger;
       return this.existMap.size;
@@ -236,7 +231,6 @@ export default {
       this.targetOrgId = targetOrgId;
       this.visible = true;
       this.existMap.clear();
-      // 【新增】初始化 trigger
       this.mapUpdateTrigger = 0;
 
       // 重置筛选
@@ -251,7 +245,6 @@ export default {
         itemList.forEach(item => {
           this.existMap.set(item.metadataType + ':' + item.memberName, item.id);
         });
-        // 【新增】更新视图
         this.mapUpdateTrigger++;
       }
 
@@ -319,10 +312,11 @@ export default {
         params: { orgId: this.currentOrgId, type: this.queryParams.type }
       }).then(res => {
         this.syncLoading = false;
-        this.$modal.msgSuccess(res.msg);
+        this.$modal.msgSuccess(res.msg || "同步成功");
         this.fetchList();
-      }).catch(() => {
+      }).catch(err => {
         this.syncLoading = false;
+        console.error("Sync error:", err);
       });
     },
 
@@ -384,11 +378,22 @@ export default {
         });
 
         this.loading = false;
-        this.$nextTick(() => { this.checkExistingRows(); });
-      }).catch(() => {
+        this.$nextTick(() => {
+          // 1. 恢复勾选状态
+          this.checkExistingRows();
+
+          // 2. 【新增】表格滚动条滚回顶部
+          if (this.$refs.metaTable && this.$refs.metaTable.bodyWrapper) {
+            this.$refs.metaTable.bodyWrapper.scrollTop = 0;
+          }
+        });
+      }).catch(err => {
         this.loading = false;
         this.list = [];
         this.total = 0;
+        console.error("Fetch list error:", err);
+        // 【关键修复】显示错误提示，而不是让用户以为是空数据
+        this.$modal.msgError("元数据加载失败，请尝试刷新或检查网络");
       });
     },
 
@@ -416,13 +421,17 @@ export default {
       const isChecked = selection.indexOf(row) !== -1;
 
       if (isChecked) {
+        // 【优化关键点】乐观更新：先在本地 Map 中占位，使计数器立即+1，消除延时感
+        // 稍后接口返回成功后，detail.vue 会调用 updateMapAfterAdd 更新为真实的 ID，用户无感知
+        this.existMap.set(key, 'PENDING');
+        this.mapUpdateTrigger++; // 强制触发计算属性重新计算
+
         this.$emit('auto-action', { action: 'add', type: currentType, name: row.fullName, key: key });
       } else {
         const itemId = this.existMap.get(key);
         if (itemId) {
           this.$emit('auto-action', { action: 'remove', id: itemId, key: key });
           this.existMap.delete(key);
-          // 【新增】移除后触发更新
           this.mapUpdateTrigger++;
         } else {
           this.$refs.metaTable.toggleRowSelection(row, true);
@@ -435,23 +444,24 @@ export default {
       const isSelectAll = selection.length > 0;
 
       if (isSelectAll) {
-        // 批量添加
         const batchItems = [];
         selection.forEach(row => {
           const key = currentType + ':' + row.fullName;
           if (!this.existMap.has(key)) {
-            batchItems.push({
-              type: currentType,
-              name: row.fullName,
-              key: key
-            });
+            batchItems.push({ type: currentType, name: row.fullName, key: key });
+
+            // 【优化关键点】批量乐观更新：直接把所有勾选的都先占位
+            this.existMap.set(key, 'PENDING');
           }
         });
+
+        // 如果有新选中的项，触发更新并提交
         if (batchItems.length > 0) {
+          this.mapUpdateTrigger++; // 立即刷新界面计数
           this.$emit('auto-action', { action: 'batch-add', items: batchItems });
         }
       } else {
-        // 批量移除
+        // (取消全选的逻辑保持不变，因为 delete 本身就是同步的，已经很快了)
         const batchIds = [];
         const batchKeys = [];
         this.filteredList.forEach(row => {
@@ -467,7 +477,6 @@ export default {
         if (batchIds.length > 0) {
           batchKeys.forEach(k => this.existMap.delete(k));
           this.$emit('auto-action', { action: 'batch-remove', ids: batchIds });
-          // 【新增】批量移除后触发更新
           this.mapUpdateTrigger++;
         }
       }
@@ -475,7 +484,6 @@ export default {
 
     updateMapAfterAdd(key, newId) {
       this.existMap.set(key, newId);
-      // 【新增】添加成功回调后触发更新
       this.mapUpdateTrigger++;
     },
 

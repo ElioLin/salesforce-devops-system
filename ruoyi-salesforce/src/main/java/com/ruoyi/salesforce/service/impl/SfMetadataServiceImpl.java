@@ -61,9 +61,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     // 【调试】添加启动日志，确保新代码被加载
     @PostConstruct
     public void init() {
-        log.info("=================================================================");
-        log.info(">>> SfMetadataServiceImpl (FastJson2 安全版) 已加载 <<<");
-        log.info("=================================================================");
+        log.info("SfMetadataServiceImpl (v2.0 修复版) 已加载");
     }
 
     @Override
@@ -252,11 +250,36 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         return "LightningComponentBundle".equals(type) || "AuraDefinitionBundle".equals(type);
     }
 
+    // =========================================================================
+    // 【重点修复】 listMetadata
+    // 增加：1. 强制类型转换 2. 幽灵对象(Null Fields)检测 3. 自动重试
+    // =========================================================================
     @Override
     public List<FileProperties> listMetadata(Long orgId, String type) throws Exception {
         String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
-        List<FileProperties> cacheList = redisCache.getCacheList(cacheKey);
-        if(cacheList != null && !cacheList.isEmpty()) return cacheList;
+
+        try {
+            Object cacheObj = redisCache.getCacheList(cacheKey);
+            if (cacheObj instanceof List) {
+                List<?> rawList = (List<?>) cacheObj;
+
+                // 【核心修改】只有当缓存列表不为空时，才直接返回。
+                // 如果缓存是空的 ([])，我们不信任它（可能是上次网络波动没查到），直接穿透去刷新。
+                if (!rawList.isEmpty()) {
+                    String jsonString = JSON.toJSONString(rawList);
+                    List<FileProperties> convertedList = JSON.parseArray(jsonString, FileProperties.class);
+
+                    // 二次检查：防止反序列化出“幽灵对象”
+                    if (!convertedList.isEmpty() && convertedList.get(0).getFullName() != null) {
+                        return convertedList;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("读取缓存异常，降级为实时查询: {}", e.getMessage());
+        }
+
+        // 缓存为空或异常，执行刷新
         return refreshMetadataCache(orgId, type);
     }
 
@@ -265,13 +288,34 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         MetadataConnection connection = getMetadataConnection(orgId);
         ListMetadataQuery query = new ListMetadataQuery();
         query.setType(type);
+
         FileProperties[] results = connection.listMetadata(new ListMetadataQuery[]{query}, 58.0);
+
         List<FileProperties> list = new ArrayList<>();
-        if(results != null) for(FileProperties f : results) if(f.getFullName() != null) list.add(f);
-        list.sort((a, b) -> b.getLastModifiedDate().compareTo(a.getLastModifiedDate()));
-        String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
-        redisCache.setCacheList(cacheKey, !list.isEmpty() ? list : new ArrayList<>());
-        redisCache.expire(cacheKey, !list.isEmpty() ? CACHE_TTL_MINUTES : 5, TimeUnit.MINUTES);
+        if (results != null) {
+            for (FileProperties f : results) {
+                if (f.getFullName() != null) list.add(f);
+            }
+        }
+
+        list.sort((a, b) -> {
+            if (a.getLastModifiedDate() == null) return 1;
+            if (b.getLastModifiedDate() == null) return -1;
+            return b.getLastModifiedDate().compareTo(a.getLastModifiedDate());
+        });
+
+        // 【核心修改】只缓存非空结果。如果结果为空，不缓存（或缓存时间极短），确保下次能重试
+        if (!list.isEmpty()) {
+            // 清洗数据转为纯净 Bean
+            String cleanJson = JSON.toJSONString(list);
+            List<FileProperties> cleanList = JSON.parseArray(cleanJson, FileProperties.class);
+
+            String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
+            redisCache.setCacheList(cacheKey, cleanList);
+            redisCache.expire(cacheKey, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+            return cleanList;
+        }
+
         return list;
     }
 

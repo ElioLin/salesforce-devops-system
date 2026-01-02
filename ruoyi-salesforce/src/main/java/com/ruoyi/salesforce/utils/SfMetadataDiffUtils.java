@@ -1,11 +1,7 @@
 package com.ruoyi.salesforce.utils;
 
 import org.apache.commons.codec.digest.DigestUtils;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.w3c.dom.Text;
+import org.w3c.dom.*;
 import org.xml.sax.InputSource;
 
 import javax.xml.parsers.DocumentBuilder;
@@ -15,44 +11,35 @@ import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
-import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
+import java.util.*;
 
 /**
- * Salesforce 元数据差异比对工具类
- * 用于解决 XML 乱序、换行符差异导致的虚假差异问题
+ * Salesforce 元数据差异比对工具类 (v2.0 增强版)
+ * 包含：XML排序、去噪、语义哈希
  */
 public class SfMetadataDiffUtils {
 
-    /**
-     * 计算文件的语义哈希值
-     * @param fileName 文件名
-     * @param data 文件二进制内容
-     * @return 优化后的 MD5
-     */
-    public static String computeSemanticHash(String fileName, byte[] data) {
-        if (data == null || data.length == 0) return null;
+    // 【新增】黑名单：这些字段在比对时必须忽略，否则会产生 False Positive
+    private static final Set<String> IGNORED_TAGS = new HashSet<>(Arrays.asList(
+            "id", "createdDate", "createdById", "lastModifiedDate", "lastModifiedById",
+            "systemModstamp", "majorNumber", "minorNumber", "namespacePrefix"
+    ));
 
+    public static String computeSemanticHash(String fileName, byte[] data) {
+        if(data == null || data.length == 0) return null;
         String content = new String(data, StandardCharsets.UTF_8);
         String ext = getExtension(fileName);
 
         try {
-            // 1. 如果是 XML 结构的元数据，进行 XML 规范化排序
-            if (isXmlMetadata(ext)) {
+            if(isXmlMetadata(ext)) {
                 return calculateXmlHash(content);
-            }
-            // 2. 如果是代码文件，进行文本标准化（去除回车换行差异）
-            else {
+            } else {
                 return calculateTextHash(content);
             }
-        } catch (Exception e) {
-            // 如果解析失败（比如文件损坏），降级为原始 MD5
+        } catch(Exception e) {
             return DigestUtils.md5Hex(data);
         }
     }
@@ -63,123 +50,134 @@ public class SfMetadataDiffUtils {
     }
 
     private static boolean isXmlMetadata(String ext) {
-        return ext.equals("xml") || ext.equals("object") || ext.equals("profile") ||
-                ext.equals("permissionset") || ext.equals("layout") || ext.equals("workflow") ||
-                ext.equals("labels") || ext.equals("flow") || ext.equals("component") || ext.equals("page");
+        return Arrays.asList("xml", "object", "profile", "permissionset", "layout",
+                "workflow", "labels", "flow", "component", "page", "app", "tab").contains(ext);
     }
 
-    /**
-     * 文本标准化哈希：统一换行符，去除首尾空白
-     */
     private static String calculateTextHash(String content) {
-        // 统一换行符为 \n
-        String normalized = content.replace("\r\n", "\n").replace("\r", "\n");
-        // 去除首尾空白
-        normalized = normalized.trim();
+        // 激进的文本标准化：去除所有空白符，只比对有效字符
+        // 注意：代码文件不能去空格，但比对差异时通常可以忽略行尾空格
+        // 这里为了指纹的一致性，采用 trim + 统一换行
+        String normalized = content.replaceAll("\\r\\n", "\n").replaceAll("\\r", "\n").trim();
         return DigestUtils.md5Hex(normalized);
     }
 
-    /**
-     * XML 规范化哈希：解析 XML，对子节点进行递归排序，忽略空白节点
-     */
     private static String calculateXmlHash(String xmlContent) throws Exception {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-        factory.setIgnoringElementContentWhitespace(true); // 忽略空白
-        factory.setNamespaceAware(true);
+        factory.setIgnoringElementContentWhitespace(true);
+        factory.setNamespaceAware(true); // 重要：处理 xml link
         DocumentBuilder builder = factory.newDocumentBuilder();
-
         Document doc = builder.parse(new InputSource(new StringReader(xmlContent)));
 
-        // 1. 递归移除空白文本节点
-        removeEmptyTextNodes(doc.getDocumentElement());
+        Element root = doc.getDocumentElement();
 
-        // 2. 递归排序所有子节点
-        sortChildNodes(doc.getDocumentElement());
+        // 1. 【新增】递归移除黑名单节点 (去噪)
+        cleanNodes(root);
 
-        // 3. 转换回字符串
+        // 2. 移除空白文本
+        removeEmptyTextNodes(root);
+
+        // 3. 属性排序
+        sortAttributes(root);
+
+        // 4. 子节点排序
+        sortChildNodes(root);
+
+        // 5. 输出为标准化字符串
         TransformerFactory tf = TransformerFactory.newInstance();
         Transformer transformer = tf.newTransformer();
-        // 设置输出格式，确保转换的一致性
         transformer.setOutputProperty(OutputKeys.INDENT, "yes");
         transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+        // 设置不包含 XML 声明，避免版本号差异
+        transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
 
         StringWriter writer = new StringWriter();
         transformer.transform(new DOMSource(doc), new StreamResult(writer));
 
-        // 4. 对规范化后的 XML 字符串计算哈希
+        // 再次进行文本标准化哈希
         return calculateTextHash(writer.toString());
     }
 
     /**
-     * 递归移除纯空白的 Text Node
+     * 【新增】清洗节点：移除黑名单标签
      */
+    private static void cleanNodes(Node node) {
+        NodeList childNodes = node.getChildNodes();
+        // 倒序遍历以便删除
+        for(int i = childNodes.getLength() - 1; i >= 0; i--) {
+            Node child = childNodes.item(i);
+            if(child.getNodeType() == Node.ELEMENT_NODE) {
+                if(IGNORED_TAGS.contains(child.getNodeName())) {
+                    node.removeChild(child);
+                } else {
+                    cleanNodes(child); // 递归
+                }
+            }
+        }
+    }
+
     private static void removeEmptyTextNodes(Node node) {
         NodeList childNodes = node.getChildNodes();
-        for (int i = childNodes.getLength() - 1; i >= 0; i--) {
+        for(int i = childNodes.getLength() - 1; i >= 0; i--) {
             Node child = childNodes.item(i);
-            if (child.getNodeType() == Node.TEXT_NODE) {
-                if (child.getTextContent().trim().isEmpty()) {
+            if(child.getNodeType() == Node.TEXT_NODE) {
+                if(child.getTextContent().trim().isEmpty()) {
                     node.removeChild(child);
                 }
-            } else if (child.getNodeType() == Node.ELEMENT_NODE) {
+            } else if(child.getNodeType() == Node.ELEMENT_NODE) {
                 removeEmptyTextNodes(child);
             }
         }
     }
 
-    /**
-     * 核心算法：递归对子元素进行排序
-     * 排序规则：优先按 fullName 文本内容排序，其次按 TagName 排序，最后按 TextContent 排序
-     */
+    private static void sortAttributes(Element element) {
+        if(!element.hasAttributes()) return;
+        NamedNodeMap attributes = element.getAttributes();
+        if(attributes.getLength() <= 1) return;
+
+        List<Attr> attrList = new ArrayList<>();
+        for(int i = 0; i < attributes.getLength(); i++) {
+            attrList.add((Attr) attributes.item(i));
+        }
+        attrList.sort(Comparator.comparing(Attr::getName));
+
+        for(Attr attr : attrList) element.removeAttributeNode(attr);
+        for(Attr attr : attrList) element.setAttributeNode(attr);
+    }
+
     private static void sortChildNodes(Node node) {
         List<Node> children = new ArrayList<>();
         NodeList childNodes = node.getChildNodes();
-
-        for (int i = 0; i < childNodes.getLength(); i++) {
+        for(int i = 0; i < childNodes.getLength(); i++) {
             children.add(childNodes.item(i));
         }
 
-        // 仅对 Element 类型的节点进行排序，属性保持不变
-        Collections.sort(children, new Comparator<Node>() {
-            @Override
-            public int compare(Node n1, Node n2) {
-                if (n1.getNodeType() != n2.getNodeType()) {
-                    return Short.compare(n1.getNodeType(), n2.getNodeType());
-                }
-                if (n1.getNodeType() == Node.ELEMENT_NODE) {
-                    Element e1 = (Element) n1;
-                    Element e2 = (Element) n2;
+        Collections.sort(children, (n1, n2) -> {
+            if(n1.getNodeType() != n2.getNodeType()) return Short.compare(n1.getNodeType(), n2.getNodeType());
+            if(n1.getNodeType() == Node.ELEMENT_NODE) {
+                Element e1 = (Element) n1;
+                Element e2 = (Element) n2;
+                int tagCompare = e1.getTagName().compareTo(e2.getTagName());
+                if(tagCompare != 0) return tagCompare;
 
-                    // 1. 优先比对 Tag Name
-                    int tagCompare = e1.getTagName().compareTo(e2.getTagName());
-                    if (tagCompare != 0) return tagCompare;
+                String name1 = getChildText(e1, "fullName");
+                String name2 = getChildText(e2, "fullName");
+                if(name1 != null && name2 != null) return name1.compareTo(name2);
 
-                    // 2. 如果 Tag Name 相同（例如都是 <field>），则尝试获取其 <fullName> 子元素的值进行比对
-                    String name1 = getChildText(e1, "fullName");
-                    String name2 = getChildText(e2, "fullName");
-                    if (name1 != null && name2 != null) {
-                        return name1.compareTo(name2);
-                    }
-                    // 如果是 <application> 等，可能用 <name> 作为 Key
-                    String n1Name = getChildText(e1, "name");
-                    String n2Name = getChildText(e2, "name");
-                    if (n1Name != null && n2Name != null) {
-                        return n1Name.compareTo(n2Name);
-                    }
+                String n1Name = getChildText(e1, "name");
+                String n2Name = getChildText(e2, "name");
+                if(n1Name != null && n2Name != null) return n1Name.compareTo(n2Name);
 
-                    // 3. 最后比对整个节点的文本内容
-                    return e1.getTextContent().trim().compareTo(e2.getTextContent().trim());
-                }
-                return 0;
+                return e1.getTextContent().trim().compareTo(e2.getTextContent().trim());
             }
+            return 0;
         });
 
-        // 重新挂载节点
-        for (Node child : children) {
+        for(Node child : children) {
             node.removeChild(child);
             node.appendChild(child);
-            // 递归深度排序
-            if (child.getNodeType() == Node.ELEMENT_NODE) {
+            if(child.getNodeType() == Node.ELEMENT_NODE) {
+                sortAttributes((Element) child);
                 sortChildNodes(child);
             }
         }
@@ -187,9 +185,6 @@ public class SfMetadataDiffUtils {
 
     private static String getChildText(Element parent, String childTagName) {
         NodeList list = parent.getElementsByTagName(childTagName);
-        if (list.getLength() > 0) {
-            return list.item(0).getTextContent();
-        }
-        return null;
+        return list.getLength() > 0 ? list.item(0).getTextContent() : null;
     }
 }

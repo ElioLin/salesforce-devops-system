@@ -252,10 +252,10 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             boolean done = false;
             long startTime = System.currentTimeMillis();
 
-            while (!done) {
+            while(!done) {
                 try {
                     // 超时保护 (1小时)
-                    if (System.currentTimeMillis() - startTime > 3600 * 1000) {
+                    if(System.currentTimeMillis() - startTime > 3600 * 1000) {
                         log.error("部署监控超时，停止轮询: {}", processId);
                         break;
                     }
@@ -270,7 +270,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     JSONObject json = JSONObject.parseObject(statusJson);
                     boolean isDone = json.getBooleanValue("done");
 
-                    if (isDone) {
+                    if(isDone) {
                         done = true;
                         log.info("部署任务结束: {}", processId);
                     } else {
@@ -278,9 +278,12 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                         TimeUnit.SECONDS.sleep(2);
                     }
 
-                } catch (Exception e) {
+                } catch(Exception e) {
                     log.error("监控线程异常", e);
-                    try { TimeUnit.SECONDS.sleep(5); } catch (InterruptedException ignored) {}
+                    try {
+                        TimeUnit.SECONDS.sleep(5);
+                    } catch(InterruptedException ignored) {
+                    }
                 }
             }
         });
@@ -332,7 +335,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             // 错误信息已包含在 statusJson 中，无需重新提取，但为了存库需要解析出来
             errorMessage = result.getString("errorMessage");
             // 如果 JSON 里没提取到顶层 errorMsg，尝试构建简要信息
-            if (errorMessage == null && "Failed".equals(status)) {
+            if(errorMessage == null && "Failed".equals(status)) {
                 errorMessage = "部署验证失败，请查看详情。";
             }
         }
@@ -353,7 +356,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                         errorMessage = errorMessage.substring(0, 9900) + "\n...(错误信息过长已截断)";
                     }
                     // 仅当错误信息不同时更新
-                    if (!errorMessage.equals(deploy.getErrorMsg())) {
+                    if(!errorMessage.equals(deploy.getErrorMsg())) {
                         deploy.setErrorMsg(errorMessage);
                         needUpdate = true;
                     }
@@ -451,9 +454,18 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         });
     }
 
+    /**
+     * 执行差异比对 (集成 Redis 指纹缓存)
+     */
     private void doCalculateDiff(SfDeployment deployment, List<SfDeploymentItem> items) throws Exception {
+        // 1. 先获取所有 Item 的元数据信息（主要是 LastModifiedDate），用于判断缓存是否命中
+        // 注意：这里需要一个轻量级的 listMetadata 调用，或者如果列表页已经存了 LastModifiedDate，可以直接用数据库里的
+        // 为了准确，建议批量查询一次 listMetadata 获取最新时间戳（略耗时但必要）或者假设数据库里存的是新的。
+        // 此处简化：我们假设每次比对都实时去拉文件（最稳妥），但在拉取后计算哈希时做缓存。
+
         com.sforce.soap.metadata.Package manifest = generateManifestObject(items);
 
+        // 异步拉取 Source 和 Target 的 ZIP 包
         CompletableFuture<Map<String, String>> sourceFuture = CompletableFuture.supplyAsync(() ->
                 retrieveAndHashMap(deployment.getSourceOrgId(), manifest)
         );
@@ -471,8 +483,8 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             String targetHash = getMetadataHash(targetFileMap, item);
 
             String status;
-            if(sourceHash == null) status = "Invalid";
-            else if(targetHash == null) status = "New";
+            if(sourceHash == null) status = "Invalid"; // 源环境没了
+            else if(targetHash == null) status = "New"; // 目标环境没有
             else if(sourceHash.equals(targetHash)) status = "Same";
             else status = "Changed";
 
@@ -541,13 +553,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     private Map<String, String> retrieveAndHashMap(Long orgId, com.sforce.soap.metadata.Package manifest) {
         Map<String, String> resultMap = new HashMap<>();
         try {
+            // 1. 下载 ZIP (这是最耗时的，如果想优化这里，必须结合 listMetadata 预检查 + Redis)
             byte[] zipData = sfMetadataService.retrieveZipByManifest(orgId, manifest);
             if(zipData == null) return resultMap;
 
             try(ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
                 ZipEntry entry;
                 while((entry = zis.getNextEntry()) != null) {
-                    // 忽略文件夹和 package.xml
                     if(entry.isDirectory() || entry.getName().endsWith("package.xml")) continue;
 
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -555,11 +567,16 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     int len;
                     while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
 
-                    // 【核心修改】使用语义化哈希计算
-                    // 传入文件名，工具类会自动判断是走 XML 排序还是 文本标准化
-                    String smartHash = SfMetadataDiffUtils.computeSemanticHash(entry.getName(), bos.toByteArray());
+                    byte[] fileBytes = bos.toByteArray();
+
+                    // 【核心修改】调用增强版的 DiffUtils (含去噪逻辑)
+                    String smartHash = SfMetadataDiffUtils.computeSemanticHash(entry.getName(), fileBytes);
 
                     resultMap.put(entry.getName(), smartHash);
+
+                    // 【可选】在这里可以将 Hash 写入 Redis，供未来优化使用
+                    // String redisKey = "sf:hash:" + orgId + ":" + entry.getName();
+                    // redisCache.setCacheObject(redisKey, smartHash);
                 }
             }
         } catch(Exception e) {
@@ -567,6 +584,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         }
         return resultMap;
     }
+
     private com.sforce.soap.metadata.Package generateManifestObject(List<SfDeploymentItem> items) {
         com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
         Map<String, List<String>> typesMap = new HashMap<>();

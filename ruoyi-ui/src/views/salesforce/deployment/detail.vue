@@ -50,20 +50,37 @@
             </el-row>
 
             <div class="config-section">
-                <el-form label-width="80px" size="small" :inline="true" class="config-form">
-                    <el-form-item label="测试级别">
-                        <el-select v-model="deployment.testLevel" placeholder="请选择" style="width: 220px">
-                            <el-option label="默认 (NoTestRun / Default)" value="NoTestRun" />
-                            <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
-                            <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
-                        </el-select>
-                    </el-form-item>
-                    <el-form-item label="指定类名" v-if="deployment.testLevel === 'RunSpecifiedTests'">
-                        <el-input v-model="deployment.specifiedTests" placeholder="多个类名用逗号分隔" style="width: 300px" />
-                    </el-form-item>
-                    <el-form-item>
-                        <el-button type="text" icon="el-icon-check" @click="handleSaveConfig">保存配置</el-button>
-                    </el-form-item>
+                <el-form label-width="100px" size="small" class="config-form">
+                    <el-row :gutter="20" type="flex" align="middle">
+                        <el-col :span="12" :xs="24">
+                            <el-form-item label="测试级别" style="margin-bottom: 0;">
+                                <el-select v-model="deployment.testLevel" placeholder="请选择" style="width: 100%; max-width: 300px;">
+                                    <el-option label="默认 (NoTestRun / Default)" value="NoTestRun" />
+                                    <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
+                                    <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
+                                </el-select>
+                                <el-button type="primary" icon="el-icon-check" plain style="margin-left: 10px;"
+                                    @click="handleSaveConfig">保存配置</el-button>
+                            </el-form-item>
+                        </el-col>
+                    </el-row>
+
+                    <transition name="el-zoom-in-top">
+                        <div v-if="deployment.testLevel === 'RunSpecifiedTests'" style="margin-top: 15px;">
+                            <el-form-item label="指定类名">
+                                <el-input 
+                                    type="textarea" 
+                                    v-model="deployment.specifiedTests" 
+                                    :autosize="{ minRows: 3, maxRows: 10 }"
+                                    placeholder="请输入测试类名，多个类名请用英文逗号 (,) 分隔。&#10;例如: AccountTriggerTest, OpportunityServiceTest"
+                                    style="width: 100%; max-width: 800px;" 
+                                />
+                                <div class="form-tip">
+                                    <i class="el-icon-info"></i> 提示：请确保类名准确无误，通常用于 Quick Deploy 或生产环境部署。
+                                </div>
+                            </el-form-item>
+                        </div>
+                    </transition>
                 </el-form>
             </div>
 
@@ -779,7 +796,7 @@ export default {
                 this.itemList
             );
         },
-        
+
         handleRemoveItem(row) {
             this.$confirm('确认移除该元数据吗？', "警告", { type: "warning" }).then(() => {
                 removeDeploymentItems(row.id).then(() => {
@@ -945,7 +962,7 @@ export default {
             if (event.action === 'add') {
                 const itemToAdd = [{ metadataType: event.type, memberName: event.name }];
                 addDeploymentItems(this.deploymentId, itemToAdd).then(res => {
-                    this.$modal.msgSuccess("已添加: " + event.name);
+                    // this.$modal.msgSuccess("已添加: " + event.name);
                     this.refreshBrowserMap(event);
                 });
             } else if (event.action === 'batch-add') {
@@ -954,7 +971,7 @@ export default {
                     memberName: i.name
                 }));
                 addDeploymentItems(this.deploymentId, itemsPayload).then(res => {
-                    this.$modal.msgSuccess(`成功添加 ${itemsPayload.length} 条元数据`);
+                    // this.$modal.msgSuccess(`成功添加 ${itemsPayload.length} 条元数据`);
                     this.refreshBrowserMap(event, true);
                 });
             } else if (event.action === 'remove') {
@@ -1079,11 +1096,24 @@ export default {
     padding-top: 15px;
     background-color: #fbfbfc;
     border-radius: 4px;
-    padding-left: 10px;
+    /* 增加内边距，让表单不那么拥挤 */
+    padding: 15px 20px; 
+}
+
+.form-tip {
+    font-size: 12px;
+    color: #909399;
+    margin-top: 5px;
+    line-height: 1.5;
 }
 
 .config-form {
     margin-bottom: 0;
+}
+
+/* 优化：调整一下行高，避免错位 */
+.config-form .el-form-item {
+    margin-bottom: 0; /* 默认不留底边距，由布局控制 */
 }
 
 .progress-container {
