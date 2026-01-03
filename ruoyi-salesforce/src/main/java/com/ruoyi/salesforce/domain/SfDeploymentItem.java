@@ -27,6 +27,26 @@ public class SfDeploymentItem {
     private String diffStatus;
     private Date lastCheckTime;
 
+    private Date lastModifiedDate;
+
+    private String lastModifiedByName;
+
+    public Date getLastModifiedDate() {
+        return lastModifiedDate;
+    }
+
+    public void setLastModifiedDate(Date lastModifiedDate) {
+        this.lastModifiedDate = lastModifiedDate;
+    }
+
+    public void setLastModifiedByName(String lastModifiedByName) {
+        this.lastModifiedByName = lastModifiedByName;
+    }
+
+    public String getLastModifiedByName() {
+        return lastModifiedByName;
+    }
+
     // Getter & Setter
     public String getDiffStatus() {
         return diffStatus;

@@ -130,17 +130,13 @@ export default {
       loading: false,
       syncLoading: false,
       typesLoading: false,
-
       existMap: new Map(),
       mapUpdateTrigger: 0,
-
       list: [],
       total: 0,
       orgOptions: [],
       metadataTypeOptions: [],
-
       localTargetOrgId: null,
-
       queryParams: {
         pageNum: 1,
         pageSize: 50,
@@ -148,7 +144,6 @@ export default {
         type: 'ApexClass',
         keyword: ''
       },
-
       nameFilter: '',
       parentFilter: '',
       diffFilter: '',
@@ -156,13 +151,28 @@ export default {
     };
   },
   computed: {
-    /** 获取当前源环境名称 */
     currentOrgName() {
       if (!this.sourceOrgId) return '';
       const org = this.orgOptions.find(item => item.id === this.sourceOrgId);
       return org ? org.name : `ID: ${this.sourceOrgId}`;
     },
-    /** 提取当前列表中存在的差异状态 */
+    // 下面这两个计算属性不再使用，但保留逻辑也无妨，或者删除
+    selectedCurrentTypeCount() {
+      const _ = this.mapUpdateTrigger;
+      if (!this.existMap.size) return 0;
+      let count = 0;
+      const prefix = this.queryParams.type + ':';
+      for (let key of this.existMap.keys()) {
+        if (key.startsWith(prefix)) {
+          count++;
+        }
+      }
+      return count;
+    },
+    deploymentTotalCount() {
+      const _ = this.mapUpdateTrigger;
+      return this.existMap.size;
+    },
     existingDiffOptions() {
       if (!this.list || this.list.length === 0) return [];
       const statusSet = new Set(
@@ -170,7 +180,6 @@ export default {
       );
       return Array.from(statusSet).sort();
     },
-    /** 前端差异筛选后的列表 */
     filteredList() {
       if (!this.diffFilter) return this.list;
       return this.list.filter(item => item.diffStatus === this.diffFilter);
@@ -204,13 +213,10 @@ export default {
     this.getOrgList();
   },
   methods: {
-    /** 初始化 */
     initBrowser() {
       this.loadMetadataTypes();
       this.fetchList();
     },
-
-    /** 同步父组件列表到本地Map */
     syncExistMap(itemList) {
       this.existMap.clear();
       if (itemList && itemList.length > 0) {
@@ -223,19 +229,13 @@ export default {
         this.checkExistingRows();
       });
     },
-
-    /** 更新Map状态 */
     updateMapAfterAdd(key, newId) {
       this.existMap.set(key, newId);
       this.mapUpdateTrigger++;
     },
-
-    /** 行是否可选 */
     checkSelectable(row) {
       return !this.disabled;
     },
-
-    /** 字典翻译 */
     getDictLabel(value) {
       if (!value) return '';
       const datas = this.dict.type.sys_salesforce_metadata_type;
@@ -245,19 +245,13 @@ export default {
       }
       return value;
     },
-
-    /** 获取父对象名 */
     getParentName(name) {
       if (name && name.includes('.')) return name.split('.')[0];
       return '-';
     },
-
-    /** 获取Org列表 */
     getOrgList() {
       request({ url: '/salesforce/org/list', method: 'get', params: { pageNum: 1, pageSize: 100 } }).then(res => { this.orgOptions = res.rows; });
     },
-
-    /** 加载元数据类型 */
     loadMetadataTypes() {
       if (!this.sourceOrgId) return;
       this.typesLoading = true;
@@ -269,14 +263,10 @@ export default {
         this.metadataTypeOptions = ['ApexClass', 'ApexTrigger', 'CustomObject', 'CustomField'];
       });
     },
-
-    /** 刷新按钮 */
     handleQuery() {
       this.queryParams.pageNum = 1;
       this.fetchList();
     },
-
-    /** 类型切换 */
     handleTypeChange() {
       this.nameFilter = '';
       this.parentFilter = '';
@@ -286,8 +276,6 @@ export default {
       this.list = [];
       this.fetchList();
     },
-
-    /** 搜索框防抖 */
     handleInputSearch() {
       if (this.debounceTimer) {
         clearTimeout(this.debounceTimer);
@@ -304,8 +292,6 @@ export default {
         this.fetchList();
       }, 500);
     },
-
-    /** 强制同步 */
     handleSync() {
       if (!this.queryParams.type) {
         this.$modal.msgWarning("请先选择元数据类型");
@@ -325,18 +311,14 @@ export default {
         console.error("Sync error:", err);
       });
     },
-
-    /** 拉取列表 */
     fetchList() {
       if (!this.queryParams.orgId) return;
       this.loading = true;
-
       const pSource = request({
         url: '/system/sf/meta/list',
         method: 'get',
         params: this.queryParams
       });
-
       let pTarget = Promise.resolve({ rows: [] });
       if (this.localTargetOrgId) {
         const targetParams = {
@@ -352,19 +334,16 @@ export default {
           params: targetParams
         });
       }
-
       Promise.all([pSource, pTarget]).then(([resSource, resTarget]) => {
         const sourceList = resSource.rows || [];
         const targetList = resTarget.rows || [];
         this.total = resSource.total;
-
         const targetMap = new Map();
         targetList.forEach(item => {
           if (item.fullName) {
             targetMap.set(item.fullName.toLowerCase(), item.lastModifiedDate);
           }
         });
-
         this.list = sourceList.map(item => {
           let status = '';
           if (this.localTargetOrgId) {
@@ -383,7 +362,6 @@ export default {
           }
           return { ...item, diffStatus: status };
         });
-
         this.loading = false;
         this.$nextTick(() => {
           this.checkExistingRows();
@@ -399,14 +377,12 @@ export default {
         this.$modal.msgError("元数据加载失败，请尝试刷新或检查网络");
       });
     },
-
     getDiffTagType(status) {
       if (status === 'New') return 'success';
       if (status === 'Changed') return 'warning';
       if (status === 'Same') return 'info';
       return '';
     },
-
     checkExistingRows() {
       if (!this.$refs.metaTable) return;
       const currentType = this.queryParams.type;
@@ -418,13 +394,11 @@ export default {
         }
       });
     },
-
     handleSelect(selection, row) {
       if (this.disabled) return;
       const currentType = this.queryParams.type;
       const key = currentType + ':' + row.fullName;
       const isChecked = selection.indexOf(row) !== -1;
-
       if (isChecked) {
         this.existMap.set(key, 'PENDING');
         this.mapUpdateTrigger++;
@@ -438,12 +412,10 @@ export default {
         }
       }
     },
-
     handleSelectAll(selection) {
       if (this.disabled) return;
       const currentType = this.queryParams.type;
       const isSelectAll = selection.length > 0;
-
       if (isSelectAll) {
         const batchItems = [];
         selection.forEach(row => {
@@ -477,11 +449,9 @@ export default {
         }
       }
     },
-
     handleView(row) {
       this.$emit('view-code', { type: this.queryParams.type, name: row.fullName });
     },
-
     handleDiff(row) {
       if (!this.localTargetOrgId) {
         this.$modal.msgError("请先选择比对基准环境！");
@@ -568,7 +538,6 @@ export default {
   font-weight: 600;
 }
 
-/* 分页容器样式 */
 .pagination-wrapper {
   display: flex;
   justify-content: flex-end;

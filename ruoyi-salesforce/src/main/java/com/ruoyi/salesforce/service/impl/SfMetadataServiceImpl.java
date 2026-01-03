@@ -71,11 +71,14 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         if(StringUtils.isEmpty(org.getAccessToken()) || StringUtils.isEmpty(org.getInstanceUrl())) {
             throw new ConnectionException("环境 [" + org.getName() + "] 尚未授权，请先前往环境管理进行授权。");
         }
-        verifyAndRefreshSession(org);
+
+        // 【优化】移除主动 Session 检查，改为操作时捕获异常重试，极大提升响应速度
+        // verifyAndRefreshSession(org);
+
         ConnectorConfig config = new ConnectorConfig();
         config.setSessionId(org.getAccessToken());
-        config.setConnectionTimeout(60000);
-        config.setReadTimeout(600000);
+        config.setConnectionTimeout(60000); // 增加到 60s
+        config.setReadTimeout(600000);      // 读取超时 10分钟
         String metadataEndpoint = org.getInstanceUrl() + "/services/Soap/m/58.0";
         config.setServiceEndpoint(metadataEndpoint);
         return new MetadataConnection(config);
@@ -105,7 +108,8 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         }
     }
 
-    private boolean isSessionExpired(ConnectionException e) {
+    // 辅助判断异常类型的方法 (需要确保该方法在类中存在或被添加)
+    private boolean isSessionExpired(Exception e) {
         String msg = e.getMessage();
         if(StringUtils.isEmpty(msg)) return false;
         return msg.contains("INVALID_SESSION_ID") || msg.contains("Session expired") ||
@@ -135,21 +139,23 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     }
 
     @Override
-    public List<String> testConnection(Long orgId) throws Exception {
-        MetadataConnection connection = getMetadataConnection(orgId);
-        ListMetadataQuery query = new ListMetadataQuery();
-        query.setType("ApexClass");
-        FileProperties[] results = connection.listMetadata(new ListMetadataQuery[]{query}, 58.0);
-        List<String> classNames = new ArrayList<>();
-        if(results != null) {
-            for(FileProperties file : results)
-                if(file.getFullName() != null) classNames.add(file.getFullName());
+    public String retrieveMetadata(Long orgId, String type, String memberName) throws Exception {
+        try {
+            return doRetrieveMetadata(orgId, type, memberName);
+        } catch (Exception e) {
+            // 捕获 Session 过期异常并重试
+            if (isSessionExpired(e) || (e.getCause() instanceof ConnectionException && isSessionExpired((ConnectionException) e.getCause()))) {
+                log.info("Org {} Session 过期，刷新后重试 retrieveMetadata...", orgId);
+                SfOrg org = sfOrgService.selectSfOrgById(orgId);
+                refreshAccessToken(org);
+                return doRetrieveMetadata(orgId, type, memberName);
+            }
+            throw e;
         }
-        return classNames;
     }
 
-    @Override
-    public String retrieveMetadata(Long orgId, String type, String memberName) throws Exception {
+    // 提取原本的 retrieve 逻辑到 doRetrieveMetadata
+    private String doRetrieveMetadata(Long orgId, String type, String memberName) throws Exception {
         MetadataConnection connection = getMetadataConnection(orgId);
         RetrieveRequest retrieveRequest = new RetrieveRequest();
         retrieveRequest.setApiVersion(58.0);
@@ -160,17 +166,20 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         manifest.setTypes(new PackageTypeMembers[]{typeMember});
         manifest.setVersion("58.0");
         retrieveRequest.setUnpackaged(manifest);
+
         AsyncResult asyncResult = connection.retrieve(retrieveRequest);
         RetrieveResult result = waitForRetrieve(connection, asyncResult.getId());
+
         if(result.getStatus() != RetrieveStatus.Succeeded)
             throw new Exception("Retrieve failed: " + result.getErrorMessage());
+
         return smartExtract(result.getZipFile(), type, memberName);
     }
-
     /**
      * 从 ZIP 包中智能提取指定元数据的内容
      * 修复：增加对 CustomLabel 和特殊子类型的精确匹配支持
      */
+    // 3. 重写 smartExtract，解决 CustomLabel 为空和其他元数据匹配问题
     private String smartExtract(byte[] zipData, String type, String memberName) throws Exception {
         if(zipData == null || zipData.length == 0) return "No content retrieved.";
 
@@ -181,39 +190,52 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             ZipEntry entry;
             while((entry = zis.getNextEntry()) != null) {
                 String entryName = entry.getName();
+                // 忽略目录和 package.xml
                 if(entry.isDirectory() || entryName.endsWith("package.xml")) continue;
 
                 boolean isMatch = false;
 
-                // 【修复点 1】专门处理 CustomLabel
-                // CustomLabel 文件名固定为 labels/CustomLabels.labels，不包含 memberName
-                if("CustomLabel".equals(type) && entryName.endsWith("labels/CustomLabels.labels")) {
-                    isMatch = true;
+                // 【修复点 1】CustomLabel 精确匹配
+                // 文件名固定为 labels/CustomLabels.labels，不管 memberName 是什么
+                if("CustomLabel".equals(type)) {
+                    if (entryName.endsWith("labels/CustomLabels.labels")) isMatch = true;
                 }
-                // 【修复点 2】处理子元素类型 (CustomField, ValidationRule 等)
-                // 它们位于 objects/对象名.object 文件中
+                // 【修复点 2】Profile 特殊处理
+                // System Administrator 的 memberName 是 "System Administrator"，但文件名是 "Admin.profile"
+                // 这里的策略是：Retrieve Profile 时只会返回那一个 Profile 文件，所以只要是 .profile 结尾通常就是它
+                else if ("Profile".equals(type)) {
+                    if (entryName.endsWith(".profile")) isMatch = true;
+                }
+                // 【修复点 3】PermissionSet 类似
+                else if ("PermissionSet".equals(type)) {
+                    if (entryName.endsWith(".permissionset")) isMatch = true;
+                }
+                // 【修复点 4】Layout 特殊处理
+                // Layout 名字可能包含空格或特殊字符，ZIP 中会被 URL 编码或替换，直接 contains 可能失败
+                // 策略：Retrieve 单个 Layout 时，ZIP 里通常只有这一个 layout 文件
+                else if ("Layout".equals(type)) {
+                    if (entryName.endsWith(".layout")) isMatch = true;
+                }
+                // 【原有逻辑保持】子元素 (CustomField 等)
                 else if(isObjectChild(type) && memberName.contains(".")) {
                     String objName = memberName.split("\\.")[0];
                     if(entryName.endsWith("objects/" + objName + ".object")) isMatch = true;
                 }
-                // 【修复点 3】处理 Workflow 子元素
                 else if(isWorkflowChild(type) && memberName.contains(".")) {
                     String objName = memberName.split("\\.")[0];
                     if(entryName.endsWith("workflows/" + objName + ".workflow")) isMatch = true;
                 }
-                // 【修复点 4】处理 Bundle 类型 (LWC / Aura)
-                // Bundle 包含多个文件，只要路径包含组件名就算匹配
-                else if(isBundleType(type) && entryName.contains(memberName)) {
-                    isMatch = true;
+                // 【原有逻辑保持】Bundle (LWC/Aura)
+                else if(isBundleType(type)) {
+                    if (entryName.contains(memberName)) isMatch = true;
                 }
-                // 5. 默认兜底：文件名包含成员名 (适用于 Class, Page, Trigger 等标准文件)
+                // 【兜底逻辑】普通文件
                 else if(entryName.contains(memberName)) {
                     isMatch = true;
                 }
 
                 if(isMatch) {
                     found = true;
-                    // 读取文件内容
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[1024];
                     int len;
@@ -221,20 +243,17 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
                     String fileContent = new String(bos.toByteArray(), StandardCharsets.UTF_8);
 
-                    // 如果是 Bundle，可能由多个文件组成，拼接显示
                     if(isBundleType(type)) {
                         contentBuilder.append("/* --- File: ").append(entryName).append(" --- */\n")
                                 .append(fileContent).append("\n\n");
                     } else {
-                        // 对于单文件，找到即返回
-                        // 注意：Retrieve 单个 CustomLabel 时，Salesforce 返回的 XML 通常只包含该 Label，所以直接返回即可
                         return fileContent;
                     }
                 }
             }
         }
 
-        if(!found) return "Error: File not found in retrieved package. (Type: " + type + ", Name: " + memberName + ")";
+        if(!found) return "Warning: File not found in retrieved package. (Type: " + type + ", Name: " + memberName + ")";
         return contentBuilder.toString();
     }
 
@@ -304,16 +323,23 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             return b.getLastModifiedDate().compareTo(a.getLastModifiedDate());
         });
 
-        // 【核心修改】只缓存非空结果。如果结果为空，不缓存（或缓存时间极短），确保下次能重试
+        // 【核心修复区域】
         if (!list.isEmpty()) {
-            // 清洗数据转为纯净 Bean
-            String cleanJson = JSON.toJSONString(list);
-            List<FileProperties> cleanList = JSON.parseArray(cleanJson, FileProperties.class);
-
             String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
-            redisCache.setCacheList(cacheKey, cleanList);
+
+            // 修复Bug 1：先删除旧缓存，防止 setCacheList 出现追加数据导致翻倍的情况
+            redisCache.deleteObject(cacheKey);
+
+            // 修复Bug 2：移除之前的 JSON 序列化/反序列化“清洗”逻辑
+            // 原来的代码: String cleanJson = JSON.toJSONString(list); ...
+            // 这会导致 WSC SDK 中的 Calendar 对象数据丢失 (变成1970)
+
+            // 直接缓存原始列表
+            redisCache.setCacheList(cacheKey, list);
             redisCache.expire(cacheKey, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
-            return cleanList;
+
+            // 直接返回从 Salesforce 获取的新鲜列表，确保前端显示的时间是正确的
+            return list;
         }
 
         return list;

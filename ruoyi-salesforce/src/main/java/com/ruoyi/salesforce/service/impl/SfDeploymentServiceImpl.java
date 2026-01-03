@@ -75,21 +75,85 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         return sfDeploymentMapper.insert(sfDeployment);
     }
 
+    /**
+     * 添加部署项 (优化版：自动填充修改人和修改时间)
+     */
     @Override
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public void addItems(Long deploymentId, List<SfDeploymentItem> items) {
-        // 【优化】校验当前状态是否允许修改
+        // 1. 校验当前状态是否允许修改
         checkIfLocked(deploymentId);
 
-        for(SfDeploymentItem item : items) {
+        // 2. 获取部署包信息，我们需要 SourceOrgId 来查询元数据详情
+        SfDeployment deployment = sfDeploymentMapper.selectById(deploymentId);
+        if (deployment == null) {
+            throw new ServiceException("部署包不存在");
+        }
+
+        // 3. 【新增】填充元数据详细信息 (修改人、修改时间)
+        // 这利用了 MetadataService 的 Redis 缓存，不会造成额外的 API 调用压力
+        populateMetadataInfo(deployment.getSourceOrgId(), items);
+
+        // 4. 入库
+        for (SfDeploymentItem item : items) {
             item.setDeploymentId(deploymentId);
             item.setCreateTime(new Date());
             item.setAction("Add");
-            item.setDiffStatus("Comparing");
+            item.setDiffStatus("Comparing"); // 初始状态为比对中
             sfDeploymentItemMapper.insert(item);
         }
-        // 添加后触发一次比对
+
+        // 5. 触发异步差异比对
         checkDiffStatus(deploymentId);
+    }
+
+    /**
+     * 【新增】辅助方法：从缓存或API填充元数据的修改人与修改时间
+     */
+    /**
+     * 【新增】辅助方法：从缓存或API填充元数据的修改人与修改时间
+     */
+    private void populateMetadataInfo(Long orgId, List<SfDeploymentItem> items) {
+        if (orgId == null || items == null || items.isEmpty()) return;
+
+        try {
+            Map<String, List<SfDeploymentItem>> typeMap = new HashMap<>();
+            for (SfDeploymentItem item : items) {
+                typeMap.computeIfAbsent(item.getMetadataType(), k -> new ArrayList<>()).add(item);
+            }
+
+            for (Map.Entry<String, List<SfDeploymentItem>> entry : typeMap.entrySet()) {
+                String type = entry.getKey();
+                List<SfDeploymentItem> currentTypeItems = entry.getValue();
+
+                List<FileProperties> remoteList = sfMetadataService.listMetadata(orgId, type);
+
+                Map<String, FileProperties> remoteMap = new HashMap<>();
+                if (remoteList != null) {
+                    for (FileProperties fp : remoteList) {
+                        remoteMap.put(fp.getFullName(), fp);
+                    }
+                }
+
+                for (SfDeploymentItem item : currentTypeItems) {
+                    FileProperties match = remoteMap.get(item.getMemberName());
+                    if (match != null) {
+                        item.setLastModifiedByName(match.getLastModifiedByName());
+
+                        // 【修复 1】日期 1970 问题修复
+                        // 判断是否为有效日期（例如大于 2000-01-01），过滤掉 null 或 1970 默认值
+                        // 946684800000L = 2000-01-01 00:00:00
+                        if (match.getLastModifiedDate() != null && match.getLastModifiedDate().getTimeInMillis() > 946684800000L) {
+                            item.setLastModifiedDate(match.getLastModifiedDate().getTime());
+                        } else {
+                            item.setLastModifiedDate(null); // 显式置空
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("自动填充元数据修改信息失败: {}", e.getMessage());
+        }
     }
 
 

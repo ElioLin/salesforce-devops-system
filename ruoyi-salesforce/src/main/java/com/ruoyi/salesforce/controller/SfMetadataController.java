@@ -24,18 +24,6 @@ public class SfMetadataController {
     @Autowired
     private ISfMetadataService sfMetadataService;
 
-    // 测试接口：http://localhost:8080/system/sf/meta/listApex?orgId=1
-    @GetMapping("/listApex")
-    public AjaxResult listApex(@RequestParam("orgId") Long orgId) {
-        try {
-            List<String> list = sfMetadataService.testConnection(orgId);
-            return AjaxResult.success("连接成功！查询到的Apex类：", list);
-        } catch (Exception e) {
-            e.printStackTrace();
-            return AjaxResult.error("连接失败：" + e.getMessage());
-        }
-    }
-
     /**
      * 获取元数据列表 (支持分页)
      * URL: /system/sf/meta/list?orgId=1&type=ApexClass&pageNum=1&pageSize=10

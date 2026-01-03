@@ -1,6 +1,6 @@
 <template>
     <div class="app-container">
-        <el-card shadow="never" class="mb-20 sticky-card" v-loading="loading">
+        <el-card shadow="never" class="mb-20" v-loading="loading">
             <div slot="header" class="clearfix">
                 <span class="card-title">{{ deployment.title || '部署包详情' }}</span>
 
@@ -65,7 +65,9 @@
                         </el-select>
                     </el-form-item>
                     <el-form-item label="指定类名" v-if="deployment.testLevel === 'RunSpecifiedTests'">
-                        <el-input v-model="deployment.specifiedTests" placeholder="多个类名用逗号分隔" style="width: 300px" />
+                        <el-select v-model="specifiedTestsArr" multiple filterable allow-create default-first-option
+                            placeholder="输入类名并回车" style="width: 400px" no-data-text="输入类名按回车添加">
+                        </el-select>
                     </el-form-item>
                     <el-form-item>
                         <el-button type="text" icon="el-icon-check" @click="handleSaveConfig">保存配置</el-button>
@@ -316,8 +318,8 @@ export default {
                 checkOnly: false
             },
             localCheckOnly: false,
-            // 标记是否为快速部署模式
             isQuickDeploy: false,
+            specifiedTestsArr: [],
 
             itemList: [],
             orgMap: {},
@@ -380,14 +382,17 @@ export default {
         };
     },
     computed: {
+        /** 获取源环境名称 */
         sourceOrgName() {
             if (!this.deployment || !this.deployment.sourceOrgId) return '-';
             return this.orgMap[this.deployment.sourceOrgId] || this.deployment.sourceOrgId;
         },
+        /** 获取目标环境名称 */
         targetOrgName() {
             if (!this.deployment || !this.deployment.targetOrgId) return '-';
             return this.orgMap[this.deployment.targetOrgId] || this.deployment.targetOrgId;
         },
+        /** 判断当前是否处于处理中状态 */
         isProcessing() {
             const s = this.deployment.status;
             const activeStatuses = [
@@ -396,6 +401,7 @@ export default {
             ];
             return activeStatuses.includes(s) || this.validating || this.deploying;
         },
+        /** 计算状态显示的中文名称 */
         calculatedStatusLabel() {
             const status = this.deployment.status;
             const isCheck = this.localCheckOnly;
@@ -416,16 +422,19 @@ export default {
         isPolling() {
             return this.isSocketConnected;
         },
+        /** 提取当前列表存在的元数据类型 */
         existingTypeOptions() {
             if (!this.itemList || this.itemList.length === 0) return [];
             const types = new Set(this.itemList.map(item => item.metadataType));
             return Array.from(types).sort();
         },
+        /** 提取当前列表存在的差异状态 */
         existingDiffOptions() {
             if (!this.itemList || this.itemList.length === 0) return [];
             const statusSet = new Set(this.itemList.map(item => item.diffStatus).filter(s => s));
             return Array.from(statusSet).sort();
         },
+        /** 前端过滤后的列表数据 */
         filteredItemList() {
             return this.itemList.filter(item => {
                 if (this.columnFilters.type && item.metadataType !== this.columnFilters.type) return false;
@@ -438,6 +447,7 @@ export default {
                 return true;
             });
         },
+        /** 是否应该显示测试进度条 */
         shouldShowTestProgress() {
             return this.testTotal > 0 ||
                 (this.deployment.testLevel && this.deployment.testLevel !== 'NoTestRun');
@@ -452,6 +462,19 @@ export default {
             if (this.progressStatus === 'exception') return 'exception';
             if (this.testPercent === 100) return 'success';
             return null;
+        }
+    },
+    watch: {
+        // 监听 deployment.specifiedTests，同步到 Tag 输入框
+        'deployment.specifiedTests': {
+            handler(val) {
+                if (val) {
+                    this.specifiedTestsArr = val.split(',').filter(item => item && item.trim());
+                } else {
+                    this.specifiedTestsArr = [];
+                }
+            },
+            immediate: true
         }
     },
     created() {
@@ -567,10 +590,7 @@ export default {
                     }
 
                     this.resetButtonState();
-                    // 任务结束，复位快速部署标记
-                    // 【优化】不要重置 isQuickDeploy，保持提示框显示
-                    // this.isQuickDeploy = false; 
-
+                    // 任务结束，保持快速部署的提示，不重置 isQuickDeploy
                     setTimeout(() => {
                         this.disconnectSocket();
                         this.getDetail();
@@ -797,6 +817,7 @@ export default {
             };
             this.$modal.msgSuccess("筛选条件已重置");
         },
+        /** 点击部署/验证 */
         handleDeploy(checkOnly) {
             const actionName = checkOnly ? "验证" : "部署";
             this.$confirm(`确认要执行【${actionName}】操作吗？`, "警告", {
@@ -805,7 +826,7 @@ export default {
                 type: "warning"
             }).then(() => {
                 this.localCheckOnly = checkOnly;
-                // 【优化】普通部署重置快速部署标记
+                // 常规部署时，强制关闭快速部署模式
                 this.isQuickDeploy = false;
                 this.$set(this.deployment, 'checkOnly', checkOnly);
 
@@ -824,6 +845,7 @@ export default {
                 });
             });
         },
+        /** 点击快速部署 */
         handleQuickDeploy() {
             this.$confirm('将使用上次验证成功的 ID 进行快速部署（免上传），确认吗？', "快速部署", {
                 confirmButtonText: "立即部署",
@@ -832,6 +854,7 @@ export default {
             }).then(() => {
                 this.deploying = true;
                 this.localCheckOnly = false;
+                // 标记为快速部署模式，用于显示特殊提示
                 this.isQuickDeploy = true;
                 this.$set(this.deployment, 'checkOnly', false);
 
@@ -857,6 +880,19 @@ export default {
                     this.$modal.msgSuccess("正在刷新元数据列表差异状态...");
                 }
             }
+        },
+        handleSaveConfig() {
+            const specTestsStr = this.specifiedTestsArr.join(',');
+
+            const data = {
+                id: this.deploymentId,
+                testLevel: this.deployment.testLevel,
+                specifiedTests: specTestsStr
+            };
+            updateDeployment(data).then(res => {
+                this.$modal.msgSuccess("配置已保存");
+                this.deployment.specifiedTests = specTestsStr;
+            });
         },
         resetProgress() {
             this.progressStatus = null;
@@ -894,16 +930,6 @@ export default {
         getParentName(name) {
             if (name && name.includes('.')) return name.split('.')[0];
             return '-';
-        },
-        handleSaveConfig() {
-            const data = {
-                id: this.deploymentId,
-                testLevel: this.deployment.testLevel,
-                specifiedTests: this.deployment.specifiedTests
-            };
-            updateDeployment(data).then(res => {
-                this.$modal.msgSuccess("配置已保存");
-            });
         },
         handleCheckStatus() {
             if (!this.deployment.targetOrgId) {
@@ -976,7 +1002,8 @@ export default {
             request({
                 url: '/system/sf/meta/retrieve',
                 method: 'get',
-                params: { orgId, type, name }
+                params: { orgId, type, name },
+                timeout: 600000 // 10分钟
             }).then(response => {
                 loading.close();
                 this.codeContent = response.data;
@@ -1011,7 +1038,8 @@ export default {
                     targetOrgId: this.deployment.targetOrgId,
                     type: type,
                     name: name
-                }
+                },
+                timeout: 600000 // 10分钟
             }).then(response => {
                 loading.close();
                 const diffData = response.data;
@@ -1041,12 +1069,6 @@ export default {
 /* 保持原有样式，此处省略以节省篇幅，请直接保留你文件中的 CSS */
 .mb-20 {
     margin-bottom: 20px;
-}
-
-.sticky-card {
-    position: sticky;
-    top: 0;
-    z-index: 999;
 }
 
 .card-title {
@@ -1222,5 +1244,17 @@ export default {
     background-color: #f0f9eb;
     border-radius: 4px;
     border: 1px solid #e1f3d8;
+}
+
+/* 【新增】让 el-tabs__header 吸顶 */
+::v-deep .el-tabs__header {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background-color: #fff;
+    /* 必须设置背景色，否则文字会重叠 */
+    margin-bottom: 15px;
+    padding-top: 10px;
+    /* 增加一点顶部间距美观 */
 }
 </style>

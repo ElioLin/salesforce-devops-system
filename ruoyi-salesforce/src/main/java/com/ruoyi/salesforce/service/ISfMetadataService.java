@@ -9,10 +9,6 @@ import com.sforce.soap.metadata.FileProperties;
 import com.sforce.soap.metadata.MetadataConnection;
 
 public interface ISfMetadataService {
-    /**
-     * 测试连接
-     */
-    List<String> testConnection(Long orgId) throws Exception;
 
     /**
      * 【核心升级】智能拉取指定元数据的内容（支持LWC、字段等复杂类型）
