@@ -52,18 +52,37 @@
         <template slot="header" slot-scope="scope">
           <div class="custom-header">
             <span>元数据名称</span>
-            <el-input v-model="nameFilter" size="mini" placeholder="输入名称筛选..." clearable @input="handleInputSearch"
-              prefix-icon="el-icon-search" @click.native.stop />
+            <div style="display: flex; width: 100%">
+              <el-select v-model="nameFilterOp" size="mini" style="width: 100px; margin-right: 5px;"
+                @change="handleInputSearch" @click.native.stop>
+                <el-option label="包含" value="contains" />
+                <el-option label="不包含" value="not_contains" />
+                <el-option label="等于" value="equals" />
+              </el-select>
+              <el-input v-model="nameFilter" size="mini" placeholder="输入名称筛选..." clearable @input="handleInputSearch"
+                prefix-icon="el-icon-search" @click.native.stop />
+            </div>
           </div>
+        </template>
+        <template slot-scope="scope">
+          {{ getShortName(scope.row.fullName) }}
         </template>
       </el-table-column>
 
-      <el-table-column label="所属对象" width="180">
+      <el-table-column label="所属对象" width="240">
         <template slot="header" slot-scope="scope">
           <div class="custom-header">
             <span>所属对象</span>
-            <el-input v-model="parentFilter" size="mini" placeholder="输入对象筛选..." clearable @input="handleInputSearch"
-              prefix-icon="el-icon-search" @click.native.stop />
+            <div style="display: flex; width: 100%">
+              <el-select v-model="parentFilterOp" size="mini" style="width: 100px; margin-right: 5px;"
+                @change="handleInputSearch" @click.native.stop>
+                <el-option label="包含" value="contains" />
+                <el-option label="不包含" value="not_contains" />
+                <el-option label="等于" value="equals" />
+              </el-select>
+              <el-input v-model="parentFilter" size="mini" placeholder="输入对象筛选..." clearable @input="handleInputSearch"
+                prefix-icon="el-icon-search" @click.native.stop />
+            </div>
           </div>
         </template>
         <template slot-scope="scope">{{ getParentName(scope.row.fullName) }}</template>
@@ -93,7 +112,7 @@
 
       <el-table-column label="操作" width="140" align="center" fixed="right">
         <template slot-scope="scope">
-          <el-button size="mini" type="text" icon="el-icon-view" @click="handleView(scope.row)">代码</el-button>
+          <!-- <el-button size="mini" type="text" icon="el-icon-view" @click="handleView(scope.row)">代码</el-button> -->
           <el-button size="mini" type="text" icon="el-icon-connection" :disabled="!localTargetOrgId"
             @click="handleDiff(scope.row)">比对</el-button>
         </template>
@@ -145,7 +164,10 @@ export default {
         keyword: ''
       },
       nameFilter: '',
+      // 【新增】筛选操作符默认值
+      nameFilterOp: 'contains',
       parentFilter: '',
+      parentFilterOp: 'contains',
       diffFilter: '',
       debounceTimer: null
     };
@@ -156,23 +178,6 @@ export default {
       const org = this.orgOptions.find(item => item.id === this.sourceOrgId);
       return org ? org.name : `ID: ${this.sourceOrgId}`;
     },
-    // 下面这两个计算属性不再使用，但保留逻辑也无妨，或者删除
-    selectedCurrentTypeCount() {
-      const _ = this.mapUpdateTrigger;
-      if (!this.existMap.size) return 0;
-      let count = 0;
-      const prefix = this.queryParams.type + ':';
-      for (let key of this.existMap.keys()) {
-        if (key.startsWith(prefix)) {
-          count++;
-        }
-      }
-      return count;
-    },
-    deploymentTotalCount() {
-      const _ = this.mapUpdateTrigger;
-      return this.existMap.size;
-    },
     existingDiffOptions() {
       if (!this.list || this.list.length === 0) return [];
       const statusSet = new Set(
@@ -180,9 +185,61 @@ export default {
       );
       return Array.from(statusSet).sort();
     },
+    /**
+         * 【修改】前端二次过滤逻辑
+         * 1. 支持 contains, not_contains, equals
+         * 2. 【优化】名称匹配逻辑使用 getShortName() 处理后的短名称进行比对
+         */
     filteredList() {
-      if (!this.diffFilter) return this.list;
-      return this.list.filter(item => item.diffStatus === this.diffFilter);
+      let result = this.list;
+
+      // 差异状态过滤
+      if (this.diffFilter) {
+        result = result.filter(item => item.diffStatus === this.diffFilter);
+      }
+
+      // 名称过滤
+      if (this.nameFilter) {
+        const filter = this.nameFilter.toLowerCase();
+        const op = this.nameFilterOp;
+        result = result.filter(item => {
+          // 【关键修改】这里使用 getShortName 获取显示的短名称进行比对
+          const val = this.getShortName(item.fullName || '').toLowerCase();
+
+          if (op === 'equals') return val === filter;
+          if (op === 'not_contains') return !val.includes(filter);
+          return val.includes(filter); // contains
+        });
+      }
+
+      // 父对象过滤
+      if (this.parentFilter) {
+        const filter = this.parentFilter.toLowerCase();
+        const op = this.parentFilterOp;
+        result = result.filter(item => {
+          const val = this.getParentName(item.fullName).toLowerCase();
+          if (op === 'equals') return val === filter;
+          if (op === 'not_contains') return !val.includes(filter);
+          return val.includes(filter); // contains
+        });
+      }
+
+      return result;
+    },
+    // 以下未使用属性保留或删除均可
+    selectedCurrentTypeCount() {
+      const _ = this.mapUpdateTrigger;
+      if (!this.existMap.size) return 0;
+      let count = 0;
+      const prefix = this.queryParams.type + ':';
+      for (let key of this.existMap.keys()) {
+        if (key.startsWith(prefix)) count++;
+      }
+      return count;
+    },
+    deploymentTotalCount() {
+      const _ = this.mapUpdateTrigger;
+      return this.existMap.size;
     }
   },
   watch: {
@@ -216,6 +273,12 @@ export default {
     initBrowser() {
       this.loadMetadataTypes();
       this.fetchList();
+    },
+    getShortName(name) {
+      if (name && name.includes('.')) {
+        return name.substring(name.indexOf('.') + 1);
+      }
+      return name;
     },
     syncExistMap(itemList) {
       this.existMap.clear();
@@ -269,25 +332,41 @@ export default {
     },
     handleTypeChange() {
       this.nameFilter = '';
+      this.nameFilterOp = 'contains';
       this.parentFilter = '';
+      this.parentFilterOp = 'contains';
       this.diffFilter = '';
       this.queryParams.keyword = '';
       this.queryParams.pageNum = 1;
       this.list = [];
       this.fetchList();
     },
+    // 【修改】搜索框输入逻辑
     handleInputSearch() {
       if (this.debounceTimer) {
         clearTimeout(this.debounceTimer);
       }
       this.debounceTimer = setTimeout(() => {
+        let text = '';
+        let isNotContains = false;
+
+        // 优先使用名称过滤
         if (this.nameFilter) {
-          this.queryParams.keyword = this.nameFilter;
+          text = this.nameFilter;
+          if (this.nameFilterOp === 'not_contains') isNotContains = true;
         } else if (this.parentFilter) {
-          this.queryParams.keyword = this.parentFilter;
-        } else {
-          this.queryParams.keyword = '';
+          text = this.parentFilter;
+          if (this.parentFilterOp === 'not_contains') isNotContains = true;
         }
+
+        // 核心逻辑：如果是“不包含”，我们不能传给后端，因为后端通常是 LIKE 查询
+        // 所以如果不包含，我们传空字符串（查全量），然后靠前端 filteredList 进行过滤
+        if (isNotContains) {
+          this.queryParams.keyword = '';
+        } else {
+          this.queryParams.keyword = text;
+        }
+
         this.queryParams.pageNum = 1;
         this.fetchList();
       }, 500);

@@ -75,35 +75,36 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         return sfDeploymentMapper.insert(sfDeployment);
     }
 
-    /**
-     * 添加部署项 (优化版：自动填充修改人和修改时间)
-     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addItems(Long deploymentId, List<SfDeploymentItem> items) {
-        // 1. 校验当前状态是否允许修改
         checkIfLocked(deploymentId);
 
-        // 2. 获取部署包信息，我们需要 SourceOrgId 来查询元数据详情
         SfDeployment deployment = sfDeploymentMapper.selectById(deploymentId);
-        if (deployment == null) {
-            throw new ServiceException("部署包不存在");
-        }
+        if (deployment == null) throw new ServiceException("部署包不存在");
 
-        // 3. 【新增】填充元数据详细信息 (修改人、修改时间)
-        // 这利用了 MetadataService 的 Redis 缓存，不会造成额外的 API 调用压力
+        // 1. 填充元数据信息 (修改人/时间)
         populateMetadataInfo(deployment.getSourceOrgId(), items);
 
-        // 4. 入库
+        // 2. 入库
         for (SfDeploymentItem item : items) {
             item.setDeploymentId(deploymentId);
             item.setCreateTime(new Date());
             item.setAction("Add");
-            item.setDiffStatus("Comparing"); // 初始状态为比对中
+            item.setDiffStatus("Comparing");
             sfDeploymentItemMapper.insert(item);
         }
 
-        // 5. 触发异步差异比对
+        // 3. 【新增】触发异步预取内容 (Pre-fetching)
+        // 这样当用户之后点击“比对”时，源环境的内容已经躺在 Redis 里了，秒开
+        try {
+            // 需要强转一下或者在接口定义里加这个方法
+            ((SfMetadataServiceImpl) sfMetadataService).preloadMetadata(deployment.getSourceOrgId(), items);
+        } catch (Exception e) {
+            log.warn("触发预取任务失败: {}", e.getMessage());
+        }
+
+        // 4. 触发比对状态计算 (Hash比对)
         checkDiffStatus(deploymentId);
     }
 

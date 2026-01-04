@@ -165,22 +165,41 @@
                             </template>
                         </el-table-column>
 
-                        <el-table-column prop="memberName" label="名称" sortable>
+                        <el-table-column prop="memberName" label="名称" sortable min-width="260">
                             <template slot="header" slot-scope="scope">
                                 <div class="custom-header">
                                     <span>名称</span>
-                                    <el-input v-model="columnFilters.name" size="mini" placeholder="筛选名称..." clearable
-                                        @click.native.stop prefix-icon="el-icon-search" />
+                                    <div style="display: flex; width: 100%">
+                                        <el-select v-model="columnFilters.nameOp" size="mini"
+                                            style="width: 100px; margin-right: 5px;" @click.native.stop>
+                                            <el-option label="包含" value="contains" />
+                                            <el-option label="不包含" value="not_contains" />
+                                            <el-option label="等于" value="equals" />
+                                        </el-select>
+                                        <el-input v-model="columnFilters.name" size="mini" placeholder="筛选名称..."
+                                            clearable @click.native.stop />
+                                    </div>
                                 </div>
+                            </template>
+                            <template slot-scope="scope">
+                                {{ getShortName(scope.row.memberName) }}
                             </template>
                         </el-table-column>
 
-                        <el-table-column label="所属对象" width="180" sortable>
+                        <el-table-column label="所属对象" width="240" sortable>
                             <template slot="header" slot-scope="scope">
                                 <div class="custom-header">
                                     <span>所属对象</span>
-                                    <el-input v-model="columnFilters.parent" size="mini" placeholder="筛选..." clearable
-                                        @click.native.stop prefix-icon="el-icon-search" />
+                                    <div style="display: flex; width: 100%">
+                                        <el-select v-model="columnFilters.parentOp" size="mini"
+                                            style="width: 100px; margin-right: 5px;" @click.native.stop>
+                                            <el-option label="包含" value="contains" />
+                                            <el-option label="不包含" value="not_contains" />
+                                            <el-option label="等于" value="equals" />
+                                        </el-select>
+                                        <el-input v-model="columnFilters.parent" size="mini" placeholder="筛选..."
+                                            clearable @click.native.stop />
+                                    </div>
                                 </div>
                             </template>
                             <template slot-scope="scope">{{ getParentName(scope.row.memberName) }}</template>
@@ -235,9 +254,9 @@
             </el-tabs>
         </el-card>
 
-        <el-dialog :title="previewTitle" :visible.sync="openCode" width="80%" append-to-body>
+        <el-dialog :title="previewTitle" :visible.sync="openCode" width="90%" append-to-body top="2vh">
             <monaco-editor v-if="openCode" :value="codeContent" :original="oldCodeContent" :diffEditor="isDiffMode"
-                language="java" height="600px" theme="vs-dark" />
+                language="java" height="750px" theme="vs-dark" :options="editorOptions" />
             <div slot="footer" class="dialog-footer">
                 <el-button @click="openCode = false">关 闭</el-button>
             </div>
@@ -373,26 +392,39 @@ export default {
                 currentContent: ''
             },
 
+            // 【修改】增加 filterOperator
             columnFilters: {
                 type: '',
                 name: '',
+                nameOp: 'contains', // contains, not_contains, equals
                 parent: '',
+                parentOp: 'contains',
                 status: ''
+            },
+
+            editorOptions: {
+                readOnly: true,
+                originalEditable: false,
+                automaticLayout: true,
+                renderSideBySide: true,
+                ignoreTrimWhitespace: false,
+                hideUnchangedRegions: {
+                    enabled: true,
+                    revealLineCount: 10,
+                    minimumLineCount: 20
+                }
             }
         };
     },
     computed: {
-        /** 获取源环境名称 */
         sourceOrgName() {
             if (!this.deployment || !this.deployment.sourceOrgId) return '-';
             return this.orgMap[this.deployment.sourceOrgId] || this.deployment.sourceOrgId;
         },
-        /** 获取目标环境名称 */
         targetOrgName() {
             if (!this.deployment || !this.deployment.targetOrgId) return '-';
             return this.orgMap[this.deployment.targetOrgId] || this.deployment.targetOrgId;
         },
-        /** 判断当前是否处于处理中状态 */
         isProcessing() {
             const s = this.deployment.status;
             const activeStatuses = [
@@ -401,7 +433,6 @@ export default {
             ];
             return activeStatuses.includes(s) || this.validating || this.deploying;
         },
-        /** 计算状态显示的中文名称 */
         calculatedStatusLabel() {
             const status = this.deployment.status;
             const isCheck = this.localCheckOnly;
@@ -422,32 +453,63 @@ export default {
         isPolling() {
             return this.isSocketConnected;
         },
-        /** 提取当前列表存在的元数据类型 */
         existingTypeOptions() {
             if (!this.itemList || this.itemList.length === 0) return [];
             const types = new Set(this.itemList.map(item => item.metadataType));
             return Array.from(types).sort();
         },
-        /** 提取当前列表存在的差异状态 */
         existingDiffOptions() {
             if (!this.itemList || this.itemList.length === 0) return [];
             const statusSet = new Set(this.itemList.map(item => item.diffStatus).filter(s => s));
             return Array.from(statusSet).sort();
         },
-        /** 前端过滤后的列表数据 */
-        filteredItemList() {
+        /**
+         * 【修改】增强的列表过滤逻辑
+         * 1. 支持 contains, not_contains, equals
+         * 2. 【优化】名称匹配逻辑使用 getShortName() 处理后的短名称进行比对，实现“所见即所搜”
+         */
+         filteredItemList() {
             return this.itemList.filter(item => {
+                // 类型筛选
                 if (this.columnFilters.type && item.metadataType !== this.columnFilters.type) return false;
-                if (this.columnFilters.name && !item.memberName.toLowerCase().includes(this.columnFilters.name.toLowerCase())) return false;
-                if (this.columnFilters.parent) {
-                    const parent = this.getParentName(item.memberName);
-                    if (!parent.toLowerCase().includes(this.columnFilters.parent.toLowerCase())) return false;
+
+                // 名称筛选 (支持操作符)
+                if (this.columnFilters.name) {
+                    // 【关键修改】这里使用 getShortName 获取显示的短名称进行比对
+                    const val = this.getShortName(item.memberName).toLowerCase();
+                    const filter = this.columnFilters.name.toLowerCase();
+                    const op = this.columnFilters.nameOp;
+
+                    if (op === 'equals') {
+                        if (val !== filter) return false;
+                    } else if (op === 'not_contains') {
+                        if (val.includes(filter)) return false;
+                    } else { // contains
+                        if (!val.includes(filter)) return false;
+                    }
                 }
+
+                // 所属对象筛选 (支持操作符)
+                if (this.columnFilters.parent) {
+                    const parent = this.getParentName(item.memberName).toLowerCase();
+                    const filter = this.columnFilters.parent.toLowerCase();
+                    const op = this.columnFilters.parentOp;
+
+                    if (op === 'equals') {
+                        if (parent !== filter) return false;
+                    } else if (op === 'not_contains') {
+                        if (parent.includes(filter)) return false;
+                    } else { // contains
+                        if (!parent.includes(filter)) return false;
+                    }
+                }
+
+                // 状态筛选
                 if (this.columnFilters.status && item.diffStatus !== this.columnFilters.status) return false;
+
                 return true;
             });
         },
-        /** 是否应该显示测试进度条 */
         shouldShowTestProgress() {
             return this.testTotal > 0 ||
                 (this.deployment.testLevel && this.deployment.testLevel !== 'NoTestRun');
@@ -465,7 +527,6 @@ export default {
         }
     },
     watch: {
-        // 监听 deployment.specifiedTests，同步到 Tag 输入框
         'deployment.specifiedTests': {
             handler(val) {
                 if (val) {
@@ -523,7 +584,12 @@ export default {
                 }
             });
         },
-
+        getShortName(name) {
+            if (name && name.includes('.')) {
+                return name.substring(name.indexOf('.') + 1);
+            }
+            return name;
+        },
         initWebSocket() {
             if (this.websocket) return;
 
@@ -590,7 +656,6 @@ export default {
                     }
 
                     this.resetButtonState();
-                    // 任务结束，保持快速部署的提示，不重置 isQuickDeploy
                     setTimeout(() => {
                         this.disconnectSocket();
                         this.getDetail();
@@ -812,12 +877,13 @@ export default {
             this.columnFilters = {
                 type: '',
                 name: '',
+                nameOp: 'contains',
                 parent: '',
+                parentOp: 'contains',
                 status: ''
             };
             this.$modal.msgSuccess("筛选条件已重置");
         },
-        /** 点击部署/验证 */
         handleDeploy(checkOnly) {
             const actionName = checkOnly ? "验证" : "部署";
             this.$confirm(`确认要执行【${actionName}】操作吗？`, "警告", {
@@ -826,7 +892,6 @@ export default {
                 type: "warning"
             }).then(() => {
                 this.localCheckOnly = checkOnly;
-                // 常规部署时，强制关闭快速部署模式
                 this.isQuickDeploy = false;
                 this.$set(this.deployment, 'checkOnly', checkOnly);
 
@@ -845,7 +910,6 @@ export default {
                 });
             });
         },
-        /** 点击快速部署 */
         handleQuickDeploy() {
             this.$confirm('将使用上次验证成功的 ID 进行快速部署（免上传），确认吗？', "快速部署", {
                 confirmButtonText: "立即部署",
@@ -854,7 +918,6 @@ export default {
             }).then(() => {
                 this.deploying = true;
                 this.localCheckOnly = false;
-                // 标记为快速部署模式，用于显示特殊提示
                 this.isQuickDeploy = true;
                 this.$set(this.deployment, 'checkOnly', false);
 
@@ -1056,7 +1119,9 @@ export default {
             this.columnFilters = {
                 type: '',
                 name: '',
+                nameOp: 'contains',
                 parent: '',
+                parentOp: 'contains',
                 status: ''
             };
             this.$modal.msgSuccess("筛选条件已重置");
@@ -1246,15 +1311,14 @@ export default {
     border: 1px solid #e1f3d8;
 }
 
-/* 【新增】让 el-tabs__header 吸顶 */
-::v-deep .el-tabs__header {
+
+/* ::v-deep .el-tabs__header {
     position: sticky;
-    top: 0;
-    z-index: 1000;
+    top: 84px;
+    z-index: 10;
     background-color: #fff;
-    /* 必须设置背景色，否则文字会重叠 */
     margin-bottom: 15px;
     padding-top: 10px;
-    /* 增加一点顶部间距美观 */
-}
+} */
+
 </style>
