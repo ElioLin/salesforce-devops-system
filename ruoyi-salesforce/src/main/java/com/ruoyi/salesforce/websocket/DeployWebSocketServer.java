@@ -120,4 +120,21 @@ public class DeployWebSocketServer {
             }
         }
     }
+
+    public static void sendMessage(String key, String message) {
+        CopyOnWriteArraySet<Session> sessions = sessionPool.get(key);
+        if (sessions != null && !sessions.isEmpty()) {
+            for (Session session : sessions) {
+                if (session.isOpen()) {
+                    try {
+                        synchronized (session) {
+                            session.getBasicRemote().sendText(message);
+                        }
+                    } catch (IOException e) {
+                        log.error("推送消息失败: " + key, e);
+                    }
+                }
+            }
+        }
+    }
 }

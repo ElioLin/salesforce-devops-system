@@ -23,7 +23,7 @@ public interface ISfOrgService extends IService<SfOrg> {
     /**
      * 查询Salesforce环境管理列表
      *
-     * @param sfOrg Salesforce环境管理
+     * @param orgId Salesforce环境管理
      * @return Salesforce环境管理集合
      */
     public SfOrg selectSfOrgByOrgId(String orgId);

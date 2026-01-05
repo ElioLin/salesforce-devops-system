@@ -646,7 +646,6 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     private Map<String, String> retrieveAndHashMap(Long orgId, com.sforce.soap.metadata.Package manifest) {
         Map<String, String> resultMap = new HashMap<>();
         try {
-            // 1. 下载 ZIP (这是最耗时的，如果想优化这里，必须结合 listMetadata 预检查 + Redis)
             byte[] zipData = sfMetadataService.retrieveZipByManifest(orgId, manifest);
             if(zipData == null) return resultMap;
 

@@ -74,7 +74,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
      * 定义一个操作接口，用于 Lambda 包装
      */
     @FunctionalInterface
-    private interface SfOperation<T> {
+    public interface SfOperation<T> {
         T execute() throws Exception;
     }
 
@@ -82,7 +82,8 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
      * 【核心修复】通用重试包装器
      * 自动捕获 INVALID_SESSION_ID，刷新 Token 后重试
      */
-    private <T> T executeWithRetry(Long orgId, SfOperation<T> operation) throws Exception {
+    @Override
+    public <T> T executeWithRetry(Long orgId, SfOperation<T> operation) throws Exception {
         try {
             return operation.execute();
         } catch(Exception e) {
@@ -131,7 +132,8 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     }
 
     // 【修复】刷新 Token 方法加锁，或者是被调用处加锁
-    private void refreshAccessToken(SfOrg org) {
+    @Override
+    public void refreshAccessToken(SfOrg org) {
         String instance = "Sandbox".equalsIgnoreCase(org.getOrgType()) ? "https://test.salesforce.com" : "https://login.salesforce.com";
         String tokenUrl = instance + "/services/oauth2/token";
 

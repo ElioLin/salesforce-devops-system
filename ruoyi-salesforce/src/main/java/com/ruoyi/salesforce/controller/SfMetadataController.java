@@ -5,6 +5,7 @@ import com.ruoyi.common.core.page.TableDataInfo;
 import com.ruoyi.common.utils.StringUtils;
 
 import com.ruoyi.salesforce.domain.vo.SfDiffVo;
+import com.ruoyi.salesforce.service.ISfDescribeApiService;
 import com.ruoyi.salesforce.service.ISfMetadataService;
 import com.sforce.soap.metadata.FileProperties;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController

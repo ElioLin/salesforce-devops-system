@@ -1,8 +1,11 @@
 package com.ruoyi.salesforce.service;
 
 import java.util.List;
+import java.util.Map;
 
+import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.domain.vo.SfDiffVo;
+import com.ruoyi.salesforce.service.impl.SfMetadataServiceImpl;
 import com.sforce.soap.metadata.AsyncResult;
 import com.sforce.soap.metadata.DeployOptions;
 import com.sforce.soap.metadata.FileProperties;
@@ -69,4 +72,8 @@ public interface ISfMetadataService {
      * 清除指定 Org 的所有元数据缓存
      */
     void clearCacheForOrg(Long orgId);
+
+    void refreshAccessToken(SfOrg sfOrg);
+
+    <T> T executeWithRetry(Long orgId, SfMetadataServiceImpl.SfOperation<T> operation) throws Exception;
 }
