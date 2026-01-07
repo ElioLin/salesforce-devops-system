@@ -60,4 +60,9 @@ public interface ISfDeploymentService extends IService<SfDeployment> {
     Map<String, Object> previewPackage(Long deploymentId);
 
     void downloadPackage(Long deploymentId, HttpServletResponse response);
+
+    /**
+     * 【新增】取消部署任务
+     */
+    void cancelDeploymentTask(Long deploymentId);
 }

@@ -35,4 +35,6 @@ public class SfDataObjConfig implements Serializable {
     // 配置表通常只需要记录创建时间即可，不需要完整的审计
     @TableField(fill = FieldFill.INSERT)
     private Date createTime;
+
+    public String mappingConfig;
 }

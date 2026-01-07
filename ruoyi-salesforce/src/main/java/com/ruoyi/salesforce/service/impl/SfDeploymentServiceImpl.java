@@ -5,6 +5,7 @@ import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.SfDeployment;
 import com.ruoyi.salesforce.domain.SfDeploymentItem;
 import com.ruoyi.salesforce.mapper.SfDeploymentItemMapper;
@@ -81,13 +82,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         checkIfLocked(deploymentId);
 
         SfDeployment deployment = sfDeploymentMapper.selectById(deploymentId);
-        if (deployment == null) throw new ServiceException("部署包不存在");
+        if(deployment == null) throw new ServiceException("部署包不存在");
 
         // 1. 填充元数据信息 (修改人/时间)
         populateMetadataInfo(deployment.getSourceOrgId(), items);
 
         // 2. 入库
-        for (SfDeploymentItem item : items) {
+        for(SfDeploymentItem item : items) {
             item.setDeploymentId(deploymentId);
             item.setCreateTime(new Date());
             item.setAction("Add");
@@ -99,8 +100,8 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         // 这样当用户之后点击“比对”时，源环境的内容已经躺在 Redis 里了，秒开
         try {
             // 需要强转一下或者在接口定义里加这个方法
-            ((SfMetadataServiceImpl) sfMetadataService).preloadMetadata(deployment.getSourceOrgId(), items);
-        } catch (Exception e) {
+            sfMetadataService.preloadMetadata(deployment.getSourceOrgId(), items);
+        } catch(Exception e) {
             log.warn("触发预取任务失败: {}", e.getMessage());
         }
 
@@ -115,36 +116,36 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
      * 【新增】辅助方法：从缓存或API填充元数据的修改人与修改时间
      */
     private void populateMetadataInfo(Long orgId, List<SfDeploymentItem> items) {
-        if (orgId == null || items == null || items.isEmpty()) return;
+        if(orgId == null || items == null || items.isEmpty()) return;
 
         try {
             Map<String, List<SfDeploymentItem>> typeMap = new HashMap<>();
-            for (SfDeploymentItem item : items) {
+            for(SfDeploymentItem item : items) {
                 typeMap.computeIfAbsent(item.getMetadataType(), k -> new ArrayList<>()).add(item);
             }
 
-            for (Map.Entry<String, List<SfDeploymentItem>> entry : typeMap.entrySet()) {
+            for(Map.Entry<String, List<SfDeploymentItem>> entry : typeMap.entrySet()) {
                 String type = entry.getKey();
                 List<SfDeploymentItem> currentTypeItems = entry.getValue();
 
                 List<FileProperties> remoteList = sfMetadataService.listMetadata(orgId, type);
 
                 Map<String, FileProperties> remoteMap = new HashMap<>();
-                if (remoteList != null) {
-                    for (FileProperties fp : remoteList) {
+                if(remoteList != null) {
+                    for(FileProperties fp : remoteList) {
                         remoteMap.put(fp.getFullName(), fp);
                     }
                 }
 
-                for (SfDeploymentItem item : currentTypeItems) {
+                for(SfDeploymentItem item : currentTypeItems) {
                     FileProperties match = remoteMap.get(item.getMemberName());
-                    if (match != null) {
+                    if(match != null) {
                         item.setLastModifiedByName(match.getLastModifiedByName());
 
                         // 【修复 1】日期 1970 问题修复
                         // 判断是否为有效日期（例如大于 2000-01-01），过滤掉 null 或 1970 默认值
                         // 946684800000L = 2000-01-01 00:00:00
-                        if (match.getLastModifiedDate() != null && match.getLastModifiedDate().getTimeInMillis() > 946684800000L) {
+                        if(match.getLastModifiedDate() != null && match.getLastModifiedDate().getTimeInMillis() > 946684800000L) {
                             item.setLastModifiedDate(match.getLastModifiedDate().getTime());
                         } else {
                             item.setLastModifiedDate(null); // 显式置空
@@ -152,7 +153,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     }
                 }
             }
-        } catch (Exception e) {
+        } catch(Exception e) {
             log.warn("自动填充元数据修改信息失败: {}", e.getMessage());
         }
     }
@@ -239,14 +240,23 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     }
 
     private void processAsyncDeployment(SfDeployment deployment, List<SfDeploymentItem> items, boolean checkOnly) {
+        // 定义变量以便在 catch 块中访问
+        String newAsyncId = null;
         try {
+            checkInterrupted(deployment.getId());
+
             // 推送 WS 消息：开始准备
             DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在提取代码..."));
-
             com.sforce.soap.metadata.Package manifest = generateManifestObject(items);
+
+            // 【检查点 2】 在去 Salesforce 提取代码之前
+            checkInterrupted(deployment.getId());
 
             log.info("开始提取代码，Org: {}", deployment.getSourceOrgId());
             byte[] zipBytes = sfMetadataService.retrieveZipByManifest(deployment.getSourceOrgId(), manifest);
+
+            // 【检查点 3】 清洗元数据之前
+            checkInterrupted(deployment.getId());
 
             if(zipBytes == null || zipBytes.length == 0) {
                 throw new RuntimeException("提取代码失败：返回的ZIP包为空");
@@ -257,6 +267,10 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在清洗元数据..."));
             zipBytes = MetadataCleaner.clean(zipBytes, items);
             log.info("元数据清洗完成，ZIP大小: {} bytes", zipBytes.length);
+
+            // 【检查点 4】 最关键的一步：在上传到目标环境之前！
+            // 如果此时用户点了取消，我们绝对不应该调用 deploy 方法
+            checkInterrupted(deployment.getId());
 
             // 部署
             log.info("开始部署，Org: {}", deployment.getTargetOrgId());
@@ -280,6 +294,17 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             }
 
             AsyncResult deployAsync = targetConn.deploy(zipBytes, deployOptions);
+            newAsyncId = deployAsync.getId(); // 拿到新 ID
+
+            // 万一在 conn.deploy() 执行的那几秒钟网络 IO 期间，用户点了取消：
+            // 此时 DB 状态变成了 Canceling，但是任务已经提交成功了。
+            // 我们必须立刻检查，如果发现被取消了，马上把刚提交的任务撤回！
+            SfDeployment currentCheck = sfDeploymentMapper.selectById(deployment.getId());
+            if("Canceling".equals(currentCheck.getStatus()) || "Canceled".equals(currentCheck.getStatus())) {
+                log.warn("检测到任务在提交期间被取消，立即执行远程撤回: {}", newAsyncId);
+                sfMetadataService.cancelDeploy(deployment.getTargetOrgId(), newAsyncId);
+                throw new InterruptedException("任务在提交后立即被取消");
+            }
 
             SfDeployment update = new SfDeployment();
             update.setId(deployment.getId());
@@ -292,11 +317,43 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             // 【关键】启动后台监控线程，轮询 SF 状态并推送 WS
             startMonitoring(deployment.getId(), deployment.getTargetOrgId(), deployAsync.getId());
 
+        } catch(InterruptedException e) {
+            log.info("任务被中断: {}", e.getMessage());
+            // 处理本地取消的收尾工作
+            handleDeploymentLocalCancel(deployment.getId());
         } catch(Exception e) {
             log.error("部署流程处理失败", e);
             handleDeploymentError(deployment.getId(), "流程异常: " + e.getMessage());
             DeployWebSocketServer.sendMessage(deployment.getId(), buildErrorJson(e.getMessage()));
         }
+    }
+
+    /**
+     * 【新增】辅助方法：检查任务是否被中断
+     */
+    private void checkInterrupted(Long deploymentId) throws InterruptedException {
+        // 这里必须查库，因为 Controller 里的 cancelDeploymentTask 修改的是数据库状态
+        SfDeployment current = sfDeploymentMapper.selectById(deploymentId);
+        if(current != null && ("Canceling".equals(current.getStatus()) || "Canceled".equals(current.getStatus()))) {
+            throw new InterruptedException("User canceled the operation");
+        }
+    }
+
+    /**
+     * 【新增】处理本地取消的情况（还没发给SF就取消了）
+     */
+    private void handleDeploymentLocalCancel(Long deploymentId) {
+        SfDeployment update = new SfDeployment();
+        update.setId(deploymentId);
+        update.setStatus("Canceled");
+        update.setErrorMsg("任务在提交到 Salesforce 之前已被取消。");
+        sfDeploymentMapper.updateById(update);
+
+        // 推送最终取消状态
+        JSONObject json = new JSONObject();
+        json.put("status", "Canceled");
+        json.put("done", true);
+        DeployWebSocketServer.sendMessage(deploymentId, json.toJSONString());
     }
 
     @Override
@@ -402,124 +459,200 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
     @Override
     public String checkDeployStatus(Long targetOrgId, String processId) throws Exception {
-        // 调用 Metadata Service 获取安全 JSON
-        String statusJson = sfMetadataService.checkDeployStatus(targetOrgId, processId);
-        JSONObject result = JSONObject.parseObject(statusJson);
-        String status = result.getString("status");
-        boolean isCheckOnly = result.getBooleanValue("checkOnly");
-
-        String finalStatus = null;
-        String errorMessage = null;
-
-        if("Succeeded".equals(status)) {
-            // 【关键修改】区分验证成功和部署成功
-            if(isCheckOnly) {
-                finalStatus = "Validated"; // 验证成功 -> Validated
-            } else {
-                finalStatus = "Succeeded"; // 部署成功 -> Succeeded
-                try {
-                    sfMetadataService.clearCacheForOrg(targetOrgId);
-                } catch(Exception e) {
-                    log.warn("自动清理缓存失败: {}", e.getMessage());
-                }
-            }
-        } else if("Failed".equals(status) || "Canceled".equals(status)) {
-            finalStatus = "Failed";
-            // 错误信息已包含在 statusJson 中，无需重新提取，但为了存库需要解析出来
-            errorMessage = result.getString("errorMessage");
-            // 如果 JSON 里没提取到顶层 errorMsg，尝试构建简要信息
-            if(errorMessage == null && "Failed".equals(status)) {
-                errorMessage = "部署验证失败，请查看详情。";
-            }
+        String statusJson;
+        try {
+            // 1. 调用元数据服务获取状态
+            statusJson = sfMetadataService.checkDeployStatus(targetOrgId, processId);
+        } catch(Exception e) {
+            // 如果底层调用本身出错（如网络超时），构造一个失败的 JSON
+            JSONObject errorJson = new JSONObject();
+            errorJson.put("done", true);
+            errorJson.put("status", "Failed");
+            errorJson.put("errorMessage", "获取部署状态异常: " + e.getMessage());
+            statusJson = errorJson.toString();
         }
 
-        // 更新数据库
-        if(finalStatus != null) {
-            SfDeployment deploy = sfDeploymentMapper.selectOne(
-                    new LambdaQueryWrapper<SfDeployment>().eq(SfDeployment::getLastAsyncId, processId)
-            );
-            if(deploy != null) {
-                boolean needUpdate = false;
-                if(!finalStatus.equals(deploy.getStatus())) {
-                    deploy.setStatus(finalStatus);
-                    needUpdate = true;
-                }
-                if(errorMessage != null) {
-                    if(errorMessage.length() > 9900) {
-                        errorMessage = errorMessage.substring(0, 9900) + "\n...(错误信息过长已截断)";
+        try {
+            JSONObject result = JSONObject.parseObject(statusJson);
+            String status = result.getString("status");
+            boolean isCheckOnly = result.getBooleanValue("checkOnly");
+            boolean isDone = result.getBooleanValue("done");
+
+            String finalStatus = null;
+            String errorMessage = null;
+
+            // 2. 根据状态判断最终结果
+            if("Succeeded".equals(status) || "Validated".equals(status)) {
+                if(isCheckOnly || "Validated".equals(status)) {
+                    finalStatus = "Validated";
+                } else {
+                    finalStatus = "Succeeded";
+                    try {
+                        sfMetadataService.clearCacheForOrg(targetOrgId);
+                    } catch(Exception e) {
+                        log.warn("自动清理缓存失败: {}", e.getMessage());
                     }
-                    // 仅当错误信息不同时更新
-                    if(!errorMessage.equals(deploy.getErrorMsg())) {
-                        deploy.setErrorMsg(errorMessage);
+                }
+            } else if("Canceled".equals(status)) {
+                finalStatus = "Canceled"; // 明确设置为已取消
+                errorMessage = "用户主动取消了部署任务。";
+            } else if("Failed".equals(status)) {
+                finalStatus = "Failed";
+                // 提取详细错误信息
+                errorMessage = extractErrorMessage(result);
+                if(errorMessage == null || errorMessage.contains("未返回具体错误信息")) {
+                    String topLevelMsg = result.getString("errorMessage");
+                    if(topLevelMsg != null) {
+                        errorMessage = topLevelMsg;
+                    }
+                }
+            } else if(isDone && finalStatus == null) {
+                // 防御性编程：如果 done=true 但状态不是上述几种，强制标记为 Failed (防止卡在 Processing)
+                finalStatus = "Failed";
+                errorMessage = "部署已结束，但在未知状态下停止: " + status;
+            }
+
+            // 3. 更新数据库 (确保无论正常流程还是异常流程，只要结束了就更新 DB)
+            if(finalStatus != null) {
+                SfDeployment deploy = sfDeploymentMapper.selectOne(
+                        new LambdaQueryWrapper<SfDeployment>().eq(SfDeployment::getLastAsyncId, processId)
+                );
+                if(deploy != null) {
+                    boolean needUpdate = false;
+                    // 状态变更或者是最终态时，强制更新
+                    if(!finalStatus.equals(deploy.getStatus())) {
+                        deploy.setStatus(finalStatus);
                         needUpdate = true;
                     }
-                }
-                if(needUpdate) {
-                    sfDeploymentMapper.updateById(deploy);
+                    if(errorMessage != null) {
+                        if(errorMessage.length() > 9900) {
+                            errorMessage = errorMessage.substring(0, 9900) + "\n...(错误信息过长已截断)";
+                        }
+                        // 只要有错误信息就更新，避免覆盖为空
+                        if(!errorMessage.equals(deploy.getErrorMsg())) {
+                            deploy.setErrorMsg(errorMessage);
+                            needUpdate = true;
+                        }
+                    }
+                    if(needUpdate) {
+                        sfDeploymentMapper.updateById(deploy);
+                    }
                 }
             }
+        } catch(Throwable t) {
+            // 【核心修复】如果在解析或更新 DB 过程中发生异常，必须捕获并强制标记数据库为失败
+            // 否则数据库会一直卡在 "Validating"，导致前端刷新后无限重连
+            log.error("处理部署状态结果时发生系统异常", t);
+
+            try {
+                SfDeployment deploy = sfDeploymentMapper.selectOne(
+                        new LambdaQueryWrapper<SfDeployment>().eq(SfDeployment::getLastAsyncId, processId)
+                );
+                if(deploy != null) {
+                    deploy.setStatus("Failed");
+                    deploy.setErrorMsg("系统处理部署结果时异常: " + t.getMessage());
+                    sfDeploymentMapper.updateById(deploy);
+                }
+            } catch(Exception ex) {
+                log.error("强制更新部署失败状态也失败了", ex);
+            }
+
+            // 重新构造一个失败的 JSON 返回给前端，确保前端也能收到结束信号
+            JSONObject errorJson = new JSONObject();
+            errorJson.put("done", true);
+            errorJson.put("status", "Failed");
+            errorJson.put("errorMessage", "系统处理异常: " + t.getMessage());
+            return errorJson.toString();
         }
+
         return statusJson;
     }
 
-    // 提取错误信息逻辑 (抽取为独立方法)
+    /**
+     * 【修复】提取详细错误信息（组件错误、测试失败、覆盖率不足）
+     */
     private String extractErrorMessage(JSONObject result) {
         String errorMessage = result.getString("errorMessage");
-        if(errorMessage == null) {
-            JSONObject details = result.getJSONObject("details");
-            if(details != null) {
-                StringBuilder sb = new StringBuilder();
-                boolean hasErrors = false;
 
-                // 元数据错误
-                JSONArray failures = details.getJSONArray("componentFailures");
-                if(failures != null && !failures.isEmpty()) {
-                    sb.append("【元数据校验失败】:\n");
-                    int count = Math.min(failures.size(), 50);
+        JSONObject details = result.getJSONObject("details");
+        if(details != null) {
+            StringBuilder sb = new StringBuilder();
+            boolean hasSpecificErrors = false;
+
+            // 1. 元数据组件错误
+            JSONArray failures = details.getJSONArray("componentFailures");
+            if(failures != null && !failures.isEmpty()) {
+                sb.append("【元数据校验失败】:\n");
+                int count = Math.min(failures.size(), 20);
+                for(int i = 0; i < count; i++) {
+                    JSONObject fail = failures.getJSONObject(i);
+                    sb.append(i + 1).append(". [").append(fail.getString("fileName")).append("]: ")
+                            .append(fail.getString("problem")).append("\n");
+                }
+                if(failures.size() > 20) sb.append("... (共 ").append(failures.size()).append(" 个错误)\n");
+                sb.append("\n");
+                hasSpecificErrors = true;
+            }
+
+            // 2. 单元测试结果
+            if(details.containsKey("runTestResult")) {
+                JSONObject testResult = details.getJSONObject("runTestResult");
+
+                // 2.1 测试用例执行失败
+                JSONArray testFailures = testResult.getJSONArray("failures");
+                if(testFailures != null && !testFailures.isEmpty()) {
+                    sb.append("【单元测试失败】:\n");
+                    int count = Math.min(testFailures.size(), 20);
                     for(int i = 0; i < count; i++) {
-                        JSONObject fail = failures.getJSONObject(i);
-                        sb.append(i + 1).append(". [").append(fail.getString("fileName")).append("]: ")
-                                .append(fail.getString("problem")).append("\n");
+                        JSONObject fail = testFailures.getJSONObject(i);
+                        sb.append(i + 1).append(". [").append(fail.getString("name"))
+                                .append(".").append(fail.getString("methodName")).append("]: ")
+                                .append(fail.getString("message")).append("\n");
                     }
-                    if(failures.size() > 50) sb.append("... (更多错误未显示)\n");
+                    if(testFailures.size() > 20) sb.append("... (共 ").append(testFailures.size()).append(" 个错误)\n");
                     sb.append("\n");
-                    hasErrors = true;
+                    hasSpecificErrors = true;
                 }
 
-                // 单元测试错误
-                if(details.containsKey("runTestResult")) {
-                    JSONObject testResult = details.getJSONObject("runTestResult");
-                    JSONArray testFailures = testResult.getJSONArray("failures");
-                    if(testFailures != null && !testFailures.isEmpty()) {
-                        sb.append("【单元测试失败】:\n");
-                        int count = Math.min(testFailures.size(), 50);
-                        for(int i = 0; i < count; i++) {
-                            JSONObject fail = testFailures.getJSONObject(i);
-                            sb.append(i + 1).append(". [").append(fail.getString("name"))
-                                    .append(".").append(fail.getString("methodName")).append("]: ")
-                                    .append(fail.getString("message")).append("\n");
-                        }
-                        if(testFailures.size() > 50) sb.append("... (更多错误未显示)\n");
-                        hasErrors = true;
-                    }
+                // 2.2 【关键修复】代码覆盖率警告/错误
+                JSONArray codeWarnings = testResult.getJSONArray("codeCoverageWarnings");
+                if(codeWarnings != null && !codeWarnings.isEmpty()) {
+                    sb.append("【代码覆盖率不足】:\n");
+                    int count = Math.min(codeWarnings.size(), 20); // 稍微增加显示数量
+                    for(int i = 0; i < count; i++) {
+                        JSONObject warn = codeWarnings.getJSONObject(i);
+                        String name = warn.getString("name");
+                        String msg = warn.getString("message");
 
-                    // 覆盖率警告
-                    JSONArray codeWarnings = testResult.getJSONArray("codeCoverageWarnings");
-                    if(codeWarnings != null && !codeWarnings.isEmpty()) {
-                        sb.append("【覆盖率警告】:\n");
-                        int count = Math.min(codeWarnings.size(), 50);
-                        for(int i = 0; i < count; i++) {
-                            JSONObject warn = codeWarnings.getJSONObject(i);
-                            sb.append(i + 1).append(". ").append(warn.getString("message")).append("\n");
+                        sb.append(i + 1).append(". ");
+
+                        // 如果有具体的类名，显示在前面，例如: [MyClass] Test coverage of selected Apex ...
+                        if(name != null && !name.equals("null") && !name.isEmpty()) {
+                            sb.append("[").append(name).append("] ");
                         }
-                        hasErrors = true;
+
+                        sb.append(msg).append("\n");
                     }
+                    if(codeWarnings.size() > 20) {
+                        sb.append("... (共 ").append(codeWarnings.size()).append(" 条警告)\n");
+                    }
+                    sb.append("\n");
+                    hasSpecificErrors = true;
                 }
+            }
 
-                if(hasErrors) errorMessage = sb.toString();
+            // 如果提取到了具体错误，返回拼接后的详情
+            if(hasSpecificErrors) {
+                // 有时候顶层 errorMessage 包含总结性描述，建议拼在最前面
+                if(errorMessage != null && !errorMessage.isEmpty()) {
+                    return "【错误摘要】: " + errorMessage + "\n\n" + sb.toString();
+                }
+                return sb.toString();
             }
         }
-        return errorMessage != null ? errorMessage : "部署失败，但未返回具体错误信息。";
+
+        // 如果没有提取到任何 details 里的错误，直接返回顶层错误信息
+        return errorMessage != null ? errorMessage : "部署验证失败，未返回具体原因。";
     }
 
     // ================== 差异比对逻辑 ==================
@@ -660,15 +793,24 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
 
                     byte[] fileBytes = bos.toByteArray();
+                    String fileName = entry.getName();
 
                     // 【核心修改】调用增强版的 DiffUtils (含去噪逻辑)
-                    String smartHash = SfMetadataDiffUtils.computeSemanticHash(entry.getName(), fileBytes);
+                    // 修复：Visualforce (.page/.component) 往往没有显式声明 xmlns:apex，导致 XML 解析报 Fatal Error
+                    // 策略：对这类文件直接使用物理 MD5，跳过 XML 语义分析；其他 XML 文件尝试语义分析，失败则降级。
+                    String smartHash;
+                    if(fileName.endsWith(".page") || fileName.endsWith(".component")) {
+                        smartHash = DigestUtils.md5Hex(fileBytes);
+                    } else {
+                        try {
+                            smartHash = SfMetadataDiffUtils.computeSemanticHash(fileName, fileBytes);
+                        } catch(Throwable e) {
+                            // 如果 XML 解析失败（如格式不规范），静默降级为普通 MD5，避免控制台刷 Fatal Error
+                            smartHash = DigestUtils.md5Hex(fileBytes);
+                        }
+                    }
 
-                    resultMap.put(entry.getName(), smartHash);
-
-                    // 【可选】在这里可以将 Hash 写入 Redis，供未来优化使用
-                    // String redisKey = "sf:hash:" + orgId + ":" + entry.getName();
-                    // redisCache.setCacheObject(redisKey, smartHash);
+                    resultMap.put(fileName, smartHash);
                 }
             }
         } catch(Exception e) {
@@ -790,5 +932,50 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         int len;
         while((len = in.read(buffer)) > 0) out.write(buffer, 0, len);
         return out.toByteArray();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelDeploymentTask(Long deploymentId) {
+        SfDeployment deployment = selectSfDeploymentById(deploymentId);
+        if(deployment == null) throw new ServiceException("部署包不存在");
+
+        String status = deployment.getStatus();
+
+        // 定义哪些状态表示任务已经在 Salesforce 端运行了
+        // 注意：Processing 不在这里面，Processing 被视为本地阶段
+        List<String> remoteRunningStatus = Arrays.asList(
+                "Validating", "Deploying", "Queued", "Pending", "InProgress"
+        );
+
+        // 1. 设置中间状态 "Canceling"
+        // 这一步非常关键，它充当了“本地中断信号”，异步线程中的 checkInterrupted 会检测到这个状态变化
+        deployment.setStatus("Canceling");
+        sfDeploymentMapper.updateById(deployment);
+
+        // 推送 UI 反馈
+        DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Canceling", "正在执行取消操作..."));
+
+        // 2. 分情况处理
+        if(remoteRunningStatus.contains(status)) {
+            // 【情况 A】：任务已在 Salesforce 运行，且 DB 里的 lastAsyncId 是当前任务的 ID
+            if(StringUtils.isNotEmpty(deployment.getLastAsyncId())) {
+                try {
+                    log.info("触发远程取消，ID: {}", deployment.getLastAsyncId());
+                    sfMetadataService.cancelDeploy(deployment.getTargetOrgId(), deployment.getLastAsyncId());
+                } catch(Exception e) {
+                    log.error("远程取消失败", e);
+                    // 即使远程调用报错，我们依然维持 Canceling 状态，
+                    // 让监控线程(startMonitoring)去最终确认任务是否真的停了，或者超时自动判定失败
+                }
+            }
+        } else {
+            // 【情况 B】：状态是 Processing (或者其他)，说明处于本地阶段
+            // 此时 DB 里的 lastAsyncId 可能是上一次任务的旧 ID，绝对不能用来取消！
+            log.info("任务处于本地准备阶段 ({})，仅执行本地中断，不调用 SF 接口", status);
+
+            // 这里不需要做其他操作了，因为上面已经 setStatus("Canceling")
+            // 异步线程 processAsyncDeployment 中的 checkInterrupted() 会捕获到这个变化并自动停止
+        }
     }
 }

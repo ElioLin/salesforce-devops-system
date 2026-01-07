@@ -5,6 +5,7 @@ import com.ruoyi.salesforce.domain.SfDataObjConfig;
 import com.ruoyi.salesforce.domain.SfDataRunLog;
 
 import java.util.List;
+import java.util.Map;
 
 public interface ISfDataReconcileService {
 
@@ -33,4 +34,6 @@ public interface ISfDataReconcileService {
     String getResultFilePath(Long logId);
 
     void processConfigsAsync(SfDataJob job, List<SfDataObjConfig> configs);
+
+    Map<String, Object> previewCsvData(Long jobId, int pageNum, int pageSize, String diffType, String fieldName);
 }

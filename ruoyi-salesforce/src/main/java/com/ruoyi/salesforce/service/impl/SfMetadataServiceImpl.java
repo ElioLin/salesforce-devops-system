@@ -165,6 +165,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     // 2. 业务功能实现 (全部接入 executeWithRetry)
     // =========================================================================
 
+    @Override
     @Async
     public void preloadMetadata(Long orgId, List<SfDeploymentItem> items) {
         if(items == null || items.isEmpty()) return;
@@ -361,7 +362,8 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
             if(result.getDetails() != null) {
                 JSONObject details = new JSONObject();
-                // ... (保持原有的详情解析逻辑) ...
+
+                // 1. 处理组件失败
                 if(result.getDetails().getComponentFailures() != null) {
                     JSONArray failures = new JSONArray();
                     for(DeployMessage msg : result.getDetails().getComponentFailures()) {
@@ -374,10 +376,14 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                     }
                     details.put("componentFailures", failures);
                 }
+
+                // 2. 处理测试结果
                 if(result.getDetails().getRunTestResult() != null) {
                     JSONObject testRes = new JSONObject();
                     RunTestsResult sfRunRes = result.getDetails().getRunTestResult();
                     testRes.put("numFailures", sfRunRes.getNumFailures());
+
+                    // 2.1 测试用例失败
                     if(sfRunRes.getFailures() != null) {
                         JSONArray testFailures = new JSONArray();
                         for(RunTestFailure fail : sfRunRes.getFailures()) {
@@ -389,17 +395,31 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                         }
                         testRes.put("failures", testFailures);
                     }
+
+                    // =========================【修复开始】=========================
+                    // 2.2 增加代码覆盖率警告提取 (Code Coverage Warnings)
+                    if(sfRunRes.getCodeCoverageWarnings() != null) {
+                        JSONArray codeWarnings = new JSONArray();
+                        for(CodeCoverageWarning warning : sfRunRes.getCodeCoverageWarnings()) {
+                            JSONObject w = new JSONObject();
+                            // Salesforce 返回的覆盖率错误信息通常在 message 字段中
+                            w.put("message", warning.getMessage());
+                            w.put("name", warning.getName()); // 关联的类名（可能为空）
+                            codeWarnings.add(w);
+                        }
+                        testRes.put("codeCoverageWarnings", codeWarnings);
+                    }
+                    // =========================【修复结束】=========================
+
                     details.put("runTestResult", testRes);
                 }
                 json.put("details", details);
             }
             return json.toString();
         } catch(Throwable t) {
-            // 如果是 Session 错误，抛出 Exception 供 executeWithRetry 捕获
             if(t instanceof Exception && isSessionExpired((Exception) t)) {
                 throw (Exception) t;
             }
-            // 其他错误返回 JSON
             JSONObject errorJson = new JSONObject();
             errorJson.put("done", true);
             errorJson.put("status", "Failed");
@@ -539,5 +559,15 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     private boolean isBundleType(String type) {
         return "LightningComponentBundle".equals(type) || "AuraDefinitionBundle".equals(type);
+    }
+
+    @Override
+    public void cancelDeploy(Long orgId, String processId) throws Exception {
+        executeWithRetry(orgId, () -> {
+            MetadataConnection connection = getMetadataConnection(orgId);
+            // 调用 Salesforce 原生取消接口
+            connection.cancelDeploy(processId);
+            return null; // Void return
+        });
     }
 }

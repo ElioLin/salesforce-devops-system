@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpServletResponse;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Salesforce 数据一致性比对 Controller
@@ -152,6 +153,26 @@ public class SfDataReconcileController extends BaseController {
             com.ruoyi.common.utils.file.FileUtils.writeBytes(filePath, response.getOutputStream());
         } catch (Exception e) {
             logger.error("下载文件失败", e);
+        }
+    }
+
+    /**
+     * 在线预览比对结果 (支持分页与筛选)
+     */
+    @GetMapping("/preview")
+    public AjaxResult previewResult(
+            @RequestParam("jobId") Long jobId,
+            @RequestParam(value = "pageNum", defaultValue = "1") int pageNum,
+            @RequestParam(value = "pageSize", defaultValue = "50") int pageSize,
+            @RequestParam(value = "diffType", required = false) String diffType, // 筛选: 差异类型
+            @RequestParam(value = "fieldName", required = false) String fieldName // 筛选: 字段名
+    ) {
+        try {
+            // 返回结构: { total: 100, rows: [...] }
+            Map<String, Object> result = reconcileService.previewCsvData(jobId, pageNum, pageSize, diffType, fieldName);
+            return AjaxResult.success(result);
+        } catch (Exception e) {
+            return AjaxResult.error("读取预览文件失败: " + e.getMessage());
         }
     }
 }

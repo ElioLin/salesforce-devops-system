@@ -81,6 +81,13 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
                     map.put("name", f.getString("name"));
                     map.put("label", f.getString("label"));
                     map.put("type", f.getString("type"));
+                    // --- 【核心补充】支持关联对象映射 ---
+                    map.put("relationshipName", f.getString("relationshipName"));
+                    JSONArray referenceTo = f.getJSONArray("referenceTo");
+                    if (referenceTo != null && !referenceTo.isEmpty()) {
+                        // 关联的对象名，例如 ["User"] 或 ["Account", "Contact"] (多态关联)
+                        map.put("referenceTo", referenceTo.toList(String.class));
+                    }
                     // 关键属性
                     map.put("createable", f.getBooleanValue("createable"));
                     map.put("updateable", f.getBooleanValue("updateable"));

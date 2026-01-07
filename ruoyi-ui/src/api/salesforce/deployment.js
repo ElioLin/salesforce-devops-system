@@ -118,3 +118,11 @@ export function previewDeploymentPackage(id) {
     timeout: 60000 // 预览需要去Salesforce拉包，设置长超时
   })
 }
+
+// 【新增】取消部署任务
+export function cancelDeployment(deploymentId) {
+  return request({
+    url: '/salesforce/deployment/cancel/' + deploymentId,
+    method: 'post'
+  })
+}

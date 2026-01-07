@@ -7,6 +7,7 @@ ruoyi:
   # 版权年份
   copyrightYear: 2025
   # 文件路径 示例（ Windows配置D:/ruoyi/uploadPath，Linux配置 /home/ruoyi/uploadPath）
+  #profile: /home/sf-devops/uploadPath
   profile: D:/ruoyi/uploadPath
   # 获取ip地址开关
   addressEnabled: false
@@ -15,8 +16,10 @@ ruoyi:
   # Salesforce配置
   salesforce:
     # 你的回调地址，本地开发用 localhost，线上改成你的域名
+    #callbackUrl: http://192.168.156.202:8080/system/sf/callback
     callbackUrl: http://localhost:8080/system/sf/callback
     # 【新增】前端访问地址 (授权成功后跳转回这里，例如 Vue 项目的访问地址)
+    #frontendUrl: http://192.168.156.202:80
     frontendUrl: http://localhost:80
     clientId: 3MVG9pRzvMkjMb6kgFzuHUiyE9anfivt3g1oKlhtcKPeOlHNA2G22Rp5Dg78RUAFpP5ZYNAvNcFll5oINlJNE
     clientSecret: F4D238AD0FAF6547094FABAF2BB1E9284E875F8D6E2256BB6E214D81EF24824B
@@ -42,7 +45,7 @@ server:
 # 日志配置
 logging:
   level:
-    com.ruoyi: debug
+    com.ruoyi: info
     org.springframework: warn
 
 # 用户配置

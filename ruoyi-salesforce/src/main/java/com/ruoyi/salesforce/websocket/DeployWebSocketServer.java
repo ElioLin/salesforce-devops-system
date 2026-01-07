@@ -105,7 +105,8 @@ public class DeployWebSocketServer {
     }
 
     public static void sendMessage(Long deploymentId, String message) {
-        CopyOnWriteArraySet<Session> sessions = sessionPool.get(String.valueOf(deploymentId));
+        String key = String.valueOf(deploymentId);
+        CopyOnWriteArraySet<Session> sessions = sessionPool.get(key);
         if (sessions != null && !sessions.isEmpty()) {
             for (Session session : sessions) {
                 if (session.isOpen()) {
@@ -117,6 +118,12 @@ public class DeployWebSocketServer {
                         log.error("推送消息失败: " + deploymentId, e);
                     }
                 }
+            }
+
+            // 【新增优化】如果消息表明任务已结束(done:true)，服务端主动关闭所有相关连接
+            // 解决多端同步问题及防止连接泄露
+            if (message.contains("\"done\":true")) {
+                closeAllSessions(key);
             }
         }
     }
@@ -135,6 +142,32 @@ public class DeployWebSocketServer {
                     }
                 }
             }
+
+            // 【新增优化】同上，针对 String key 的重载方法也加上清理逻辑
+            if (message.contains("\"done\":true")) {
+                closeAllSessions(key);
+            }
+        }
+    }
+
+    /**
+     * 【新增方法】主动关闭指定 Key 下的所有 WebSocket 会话并移除连接池
+     */
+    private static void closeAllSessions(String key) {
+        CopyOnWriteArraySet<Session> sessions = sessionPool.get(key);
+        if (sessions != null) {
+            for (Session session : sessions) {
+                try {
+                    if (session.isOpen()) {
+                        session.close(); // 发送关闭帧给客户端
+                    }
+                } catch (IOException e) {
+                    log.warn("关闭会话异常: " + e.getMessage());
+                }
+            }
+            // 从池中移除，释放内存
+            sessionPool.remove(key);
+            log.info("任务结束，服务端已强制断开并清理所有连接: Id={}", key);
         }
     }
 }

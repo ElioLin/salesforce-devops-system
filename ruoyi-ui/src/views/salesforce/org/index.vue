@@ -119,7 +119,7 @@
       </div>
     </el-dialog>
 
-    <metadata-browser ref="metaBrowser" @view-code="handleBrowserViewCode" @diff-code="handleBrowserDiffCode" />
+    <!-- <metadata-browser ref="metaBrowser" @view-code="handleBrowserViewCode" @diff-code="handleBrowserDiffCode" /> -->
 
     <el-dialog :title="previewTitle" :visible.sync="openCode" width="80%" append-to-body>
       <monaco-editor v-if="openCode" :value="codeContent" :original="oldCodeContent" :diffEditor="isDiffMode"

@@ -185,4 +185,15 @@ public class SfDeploymentController extends BaseController {
     public void download(@PathVariable("deploymentId") Long deploymentId, HttpServletResponse response) throws IOException {
         sfDeploymentService.downloadPackage(deploymentId, response);
     }
+
+    /**
+     * 【新增】取消正在进行的部署任务
+     */
+    @PreAuthorize("@ss.hasPermi('salesforce:deployment:edit')")
+    @Log(title = "部署包管理", businessType = BusinessType.UPDATE)
+    @PostMapping("/cancel/{deploymentId}")
+    public AjaxResult cancel(@PathVariable Long deploymentId) {
+        sfDeploymentService.cancelDeploymentTask(deploymentId);
+        return AjaxResult.success("取消请求已提交");
+    }
 }

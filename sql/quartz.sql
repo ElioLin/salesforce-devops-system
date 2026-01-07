@@ -27,7 +27,7 @@ create table QRTZ_JOB_DETAILS (
     primary key (sched_name, job_name, job_group)
 ) engine=innodb comment = '任务详细信息表';
 
--- ----------------------------
+-- ----------------------------A
 -- 2、 存储已配置的 Trigger 的信息
 -- ----------------------------
 create table QRTZ_TRIGGERS (

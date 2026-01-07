@@ -3,6 +3,7 @@ package com.ruoyi.salesforce.service;
 import java.util.List;
 import java.util.Map;
 
+import com.ruoyi.salesforce.domain.SfDeploymentItem;
 import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.domain.vo.SfDiffVo;
 import com.ruoyi.salesforce.service.impl.SfMetadataServiceImpl;
@@ -76,4 +77,11 @@ public interface ISfMetadataService {
     void refreshAccessToken(SfOrg sfOrg);
 
     <T> T executeWithRetry(Long orgId, SfMetadataServiceImpl.SfOperation<T> operation) throws Exception;
+
+    void preloadMetadata(Long orgId, List<SfDeploymentItem> items);
+
+    /**
+     * 【新增】取消正在进行的部署
+     */
+    void cancelDeploy(Long orgId, String processId) throws Exception;
 }

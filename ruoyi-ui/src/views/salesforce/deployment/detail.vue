@@ -16,6 +16,21 @@
                 </el-tag>
 
                 <div style="float: right;">
+                    <el-button 
+                        v-if="isProcessing && deployment.status !== 'Canceling'"
+                        type="danger" 
+                        icon="el-icon-video-pause" 
+                        style="margin-right: 15px;" 
+                        :loading="canceling"
+                        @click="handleCancelDeploy">
+                        取消任务
+                    </el-button>
+
+                    <el-button type="text" icon="el-icon-link" style="margin-right: 15px;" @click="handleOpenSalesforce"
+                        :disabled="!salesforceDeployUrl">
+                        查看SF验证/部署情况
+                    </el-button>
+
                     <el-button type="text" icon="el-icon-refresh-left" :loading="isCheckingStatus"
                         style="margin-right: 15px;" @click="handleGlobalRecalculate"
                         :disabled="!deployment.targetOrgId || isProcessing">
@@ -49,6 +64,7 @@
                             :loading="validating" @click="handleDeploy(true)">仅验证</el-button>
                         <el-button type="success" icon="el-icon-upload" size="small" :disabled="isProcessing"
                             :loading="deploying" @click="handleDeploy(false)">完整部署</el-button>
+
                         <el-button v-if="deployment.status === 'Validated'" type="primary" icon="el-icon-lightning"
                             size="small" :disabled="isProcessing" @click="handleQuickDeploy">快速部署</el-button>
                     </el-button-group>
@@ -66,7 +82,7 @@
                     </el-form-item>
                     <el-form-item label="指定类名" v-if="deployment.testLevel === 'RunSpecifiedTests'">
                         <el-select v-model="specifiedTestsArr" multiple filterable allow-create default-first-option
-                            placeholder="输入类名并回车" style="width: 400px" no-data-text="输入类名按回车添加">
+                            placeholder="输入类名并回车" style="width: 800px" no-data-text="输入类名按回车添加">
                         </el-select>
                     </el-form-item>
                     <el-form-item>
@@ -116,8 +132,9 @@
                 </div>
             </div>
 
-            <el-alert v-if="deployment.status === 'Failed' && deployment.errorMsg" title="报错信息" type="error" show-icon
-                style="margin-top: 15px;" :closable="false">
+            <el-alert v-if="deployment.errorMsg" title="部署/验证详情"
+                :type="deployment.status === 'Succeeded' || deployment.status === 'Validated' ? 'success' : 'error'"
+                show-icon style="margin-top: 15px;" :closable="false">
                 <template slot="default">
                     <div class="error-msg-box">{{ deployment.errorMsg }}</div>
                 </template>
@@ -314,7 +331,8 @@ import {
     quickDeploy,
     checkDiffStatus,
     updateDeployment,
-    previewDeploymentPackage
+    previewDeploymentPackage,
+    cancelDeployment
 } from "@/api/salesforce/deployment";
 import { listOrg } from "@/api/salesforce/org";
 import MetadataBrowser from "@/views/salesforce/org/MetadataBrowser";
@@ -334,7 +352,8 @@ export default {
             deployment: {
                 testLevel: 'NoTestRun',
                 specifiedTests: '',
-                checkOnly: false
+                checkOnly: false,
+                errorMsg: '' // 初始化字段
             },
             localCheckOnly: false,
             isQuickDeploy: false,
@@ -392,11 +411,10 @@ export default {
                 currentContent: ''
             },
 
-            // 【修改】增加 filterOperator
             columnFilters: {
                 type: '',
                 name: '',
-                nameOp: 'contains', // contains, not_contains, equals
+                nameOp: 'contains',
                 parent: '',
                 parentOp: 'contains',
                 status: ''
@@ -413,24 +431,46 @@ export default {
                     revealLineCount: 10,
                     minimumLineCount: 20
                 }
-            }
+            },
+            isExplicitDisconnect: false, // 【新增】标记是否为显式断开
+            canceling: false
         };
     },
     computed: {
         sourceOrgName() {
             if (!this.deployment || !this.deployment.sourceOrgId) return '-';
-            return this.orgMap[this.deployment.sourceOrgId] || this.deployment.sourceOrgId;
+            const org = this.orgMap[this.deployment.sourceOrgId];
+            return org ? org.name : this.deployment.sourceOrgId;
         },
         targetOrgName() {
             if (!this.deployment || !this.deployment.targetOrgId) return '-';
-            return this.orgMap[this.deployment.targetOrgId] || this.deployment.targetOrgId;
+            const org = this.orgMap[this.deployment.targetOrgId];
+            return org ? org.name : this.deployment.targetOrgId;
+        },
+        /**
+         * 【新增】计算 Salesforce 部署监控页面的 URL
+         */
+        salesforceDeployUrl() {
+            const targetId = this.deployment.targetOrgId;
+            const asyncId = this.deployment.lastAsyncId;
+
+            if (!targetId || !asyncId) return '';
+
+            const org = this.orgMap[targetId];
+            if (!org || !org.instanceUrl) return '';
+
+            // 标准 Salesforce 部署监控链接
+            return `${org.instanceUrl}/changemgmt/monitorDeploymentsDetails.apexp?asyncId=${asyncId}`;
         },
         isProcessing() {
             const s = this.deployment.status;
             const activeStatuses = [
                 'Processing', 'Deploying', 'Validating',
-                'Pending', 'InProgress', 'Queued', 'Canceling'
+                'Pending', 'InProgress', 'Queued', 
+                'Canceling' // 取消中 仍然算作处理中，禁止操作
             ];
+            // 注意：这里没有 'Canceled'。
+            // 当状态变为 'Canceled' 时，isProcessing 为 false，用户可以重新编辑和部署。
             return activeStatuses.includes(s) || this.validating || this.deploying;
         },
         calculatedStatusLabel() {
@@ -440,6 +480,7 @@ export default {
             if (status === 'Succeeded') return isCheck ? '验证成功' : '部署成功';
             if (status === 'Failed') return isCheck ? '验证失败' : '部署失败';
             if (status === 'Canceled') return '已取消';
+            if (status === 'Canceling') return '取消中...';
 
             if (status === 'Pending' || status === 'Queued') return '排队中...';
             if (status === 'InProgress') return isCheck ? '正在验证...' : '正在部署...';
@@ -463,50 +504,34 @@ export default {
             const statusSet = new Set(this.itemList.map(item => item.diffStatus).filter(s => s));
             return Array.from(statusSet).sort();
         },
-        /**
-         * 【修改】增强的列表过滤逻辑
-         * 1. 支持 contains, not_contains, equals
-         * 2. 【优化】名称匹配逻辑使用 getShortName() 处理后的短名称进行比对，实现“所见即所搜”
-         */
-         filteredItemList() {
+        filteredItemList() {
             return this.itemList.filter(item => {
-                // 类型筛选
                 if (this.columnFilters.type && item.metadataType !== this.columnFilters.type) return false;
-
-                // 名称筛选 (支持操作符)
                 if (this.columnFilters.name) {
-                    // 【关键修改】这里使用 getShortName 获取显示的短名称进行比对
                     const val = this.getShortName(item.memberName).toLowerCase();
                     const filter = this.columnFilters.name.toLowerCase();
                     const op = this.columnFilters.nameOp;
-
                     if (op === 'equals') {
                         if (val !== filter) return false;
                     } else if (op === 'not_contains') {
                         if (val.includes(filter)) return false;
-                    } else { // contains
+                    } else {
                         if (!val.includes(filter)) return false;
                     }
                 }
-
-                // 所属对象筛选 (支持操作符)
                 if (this.columnFilters.parent) {
                     const parent = this.getParentName(item.memberName).toLowerCase();
                     const filter = this.columnFilters.parent.toLowerCase();
                     const op = this.columnFilters.parentOp;
-
                     if (op === 'equals') {
                         if (parent !== filter) return false;
                     } else if (op === 'not_contains') {
                         if (parent.includes(filter)) return false;
-                    } else { // contains
+                    } else {
                         if (!parent.includes(filter)) return false;
                     }
                 }
-
-                // 状态筛选
                 if (this.columnFilters.status && item.diffStatus !== this.columnFilters.status) return false;
-
                 return true;
             });
         },
@@ -554,6 +579,8 @@ export default {
         statusType(status) {
             if (status === 'Succeeded') return 'success';
             if (status === 'Failed') return 'danger';
+            if (status === 'Canceled') return 'info'; // 已取消用灰色
+            if (status === 'Canceling') return 'warning'; // 取消中用黄色
             if (['Processing', 'Deploying', 'Validating', 'Pending', 'InProgress', 'Queued'].includes(status)) return 'warning';
             return 'info';
         },
@@ -562,7 +589,7 @@ export default {
             this.loading = true;
             const p1 = listOrg({ pageNum: 1, pageSize: 100 }).then(res => {
                 res.rows.forEach(org => {
-                    this.$set(this.orgMap, org.id, org.name);
+                    this.$set(this.orgMap, org.id, org);
                 });
             });
             const p2 = this.getDetail();
@@ -570,12 +597,16 @@ export default {
 
             Promise.all([p1, p2, p3]).finally(() => {
                 this.loading = false;
+                // 如果当前状态是进行中，自动连接 WebSocket
                 if (this.isProcessing) {
                     this.initWebSocket();
                 }
             });
         },
         refreshData() {
+            // 【修复】手动刷新前，必须断开旧连接
+            this.disconnectSocket();
+
             this.loading = true;
             Promise.all([this.getDetail(), this.getItems()]).finally(() => {
                 this.loading = false;
@@ -584,6 +615,16 @@ export default {
                 }
             });
         },
+        /**
+         * 【新增】打开 Salesforce 部署监控页面
+         */
+        handleOpenSalesforce() {
+            if (this.salesforceDeployUrl) {
+                window.open(this.salesforceDeployUrl, '_blank');
+            } else {
+                this.$modal.msgWarning("无法获取目标环境链接或未执行过部署");
+            }
+        },
         getShortName(name) {
             if (name && name.includes('.')) {
                 return name.substring(name.indexOf('.') + 1);
@@ -591,7 +632,10 @@ export default {
             return name;
         },
         initWebSocket() {
-            if (this.websocket) return;
+            // 【修复】如果已经连接或正在连接，不再创建新的
+            if (this.websocket && (this.websocket.readyState === WebSocket.OPEN || this.websocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
 
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const host = window.location.host;
@@ -616,12 +660,34 @@ export default {
             try {
                 const res = JSON.parse(event.data);
 
+                // 更新 ID
+                if (res.id) {
+                    this.$set(this.deployment, 'lastAsyncId', res.id);
+                }
+
+                // 实时更新状态
                 if (res.status) {
                     let newStatus = res.status;
                     if (newStatus === 'Succeeded' && res.checkOnly) {
                         newStatus = 'Validated';
                     }
                     this.deployment.status = newStatus;
+
+                    // 如果是取消中或已取消，停止按钮 loading
+                    if (newStatus === 'Canceling' || newStatus === 'Canceled') {
+                        this.canceling = false;
+                        // 如果是最终取消态，强制停止处理标识
+                        if (newStatus === 'Canceled') {
+                            this.validating = false;
+                            this.deploying = false;
+                            this.isCheckingStatus = false;
+                        }
+                    }
+                }
+
+                // 更新错误信息
+                if (res.errorMsg || res.errorMessage) {
+                    this.$set(this.deployment, 'errorMsg', res.errorMsg || res.errorMessage);
                 }
 
                 if (res.hasOwnProperty('checkOnly')) {
@@ -631,37 +697,33 @@ export default {
 
                 this.updateProgress(res);
 
-                if (this.hasShownSuccess && (res.status === 'Succeeded' || res.status === 'Failed' || res.status === 'Validated')) {
-                    return;
-                }
-
-                if (res.status === 'Succeeded' || res.status === 'Failed' || res.status === 'Canceled') {
-                    if (res.errorMsg) {
-                        this.deployment.errorMsg = res.errorMsg;
-                    }
-
-                    const isVerify = this.localCheckOnly;
-
+                // 【核心修复】检测到任务结束
+                if (res.done === true) {
+                    // 1. 强制停止前端的 loading 状态
+                    this.resetButtonState();
+                    this.isProcessing = false;
+                    
+                    // 2. 只有第一次收到 done 时才弹窗，防止重复
                     if (!this.hasShownSuccess) {
-                        if (res.status === 'Succeeded') {
-                            this.$modal.msgSuccess(isVerify ? "验证成功！" : "部署成功！");
-                            this.progressStatus = 'success';
-                            this.compStateText = isVerify ? "验证完成" : "部署完成";
+                        this.hasShownSuccess = true;
+                        if (['Succeeded', 'Validated'].includes(this.deployment.status)) {
+                            this.$modal.msgSuccess(this.localCheckOnly ? "验证成功！" : "部署成功！");
+                            this.compStateText = this.localCheckOnly ? "验证完成" : "部署完成";
                         } else {
-                            this.$modal.msgError((isVerify ? "验证" : "部署") + "失败/取消");
-                            this.progressStatus = 'exception';
+                            this.$modal.msgError((this.localCheckOnly ? "验证" : "部署") + "失败");
                             this.compStateText = "失败";
                         }
-                        this.hasShownSuccess = true;
                     }
 
-                    this.resetButtonState();
-                    setTimeout(() => {
-                        this.disconnectSocket();
-                        this.getDetail();
-                    }, 1500);
-                }
+                    // 3. 彻底断开 Socket
+                    this.disconnectSocket();
 
+                    // 4. 延迟刷新全量数据 (等待后端 DB 事务提交)
+                    setTimeout(() => {
+                        this.getDetail();
+                    }, 1000);
+                    return;
+                }
             } catch (e) {
                 console.error("WS Message Error", e);
             }
@@ -675,16 +737,19 @@ export default {
         websocketOnClose(e) {
             this.isSocketConnected = false;
             this.websocket = null;
-            if (this.isProcessing && this.socketRetryCount < 3) {
+            if (!this.isExplicitDisconnect && this.isProcessing && this.socketRetryCount < 3) {
                 this.socketRetryCount++;
                 setTimeout(() => {
                     this.initWebSocket();
                 }, 3000);
             }
+            // 复位标记，以便下次连接使用
+            this.isExplicitDisconnect = false;
         },
 
         disconnectSocket() {
             if (this.websocket) {
+                this.isExplicitDisconnect = true;
                 this.websocket.close();
                 this.websocket = null;
             }
@@ -764,6 +829,31 @@ export default {
                     msg = "生成部署包超时，请稍后重试或减小包体积";
                 }
                 this.$modal.msgError(msg);
+            });
+        },
+
+        /**
+         * 【新增】处理取消部署
+         */
+         handleCancelDeploy() {
+            // 二次确认，防止误触
+            this.$confirm('确定要终止当前的 验证/部署 任务吗？<br/><span style="color:#F56C6C;font-size:12px">注意：Salesforce 可能需要几秒钟来处理取消请求，且部分已提交的更改可能无法回滚。</span>', '警告', {
+                confirmButtonText: '确定取消',
+                cancelButtonText: '我再想想',
+                type: 'warning',
+                dangerouslyUseHTMLString: true,
+                confirmButtonClass: 'el-button--danger'
+            }).then(() => {
+                this.canceling = true;
+                cancelDeployment(this.deploymentId).then(res => {
+                    this.$modal.msgSuccess("取消请求已发送，正在等待 Salesforce 响应...");
+                    // 注意：这里不需要手动设置 status = 'Canceling'
+                    // 因为后端调用成功后会推送 WebSocket 消息，自动更新状态
+                }).catch(() => {
+                    this.canceling = false;
+                });
+            }).catch(() => {
+                // 用户点击取消，不做操作
             });
         },
 
@@ -877,9 +967,7 @@ export default {
             this.columnFilters = {
                 type: '',
                 name: '',
-                nameOp: 'contains',
                 parent: '',
-                parentOp: 'contains',
                 status: ''
             };
             this.$modal.msgSuccess("筛选条件已重置");
@@ -894,6 +982,7 @@ export default {
                 this.localCheckOnly = checkOnly;
                 this.isQuickDeploy = false;
                 this.$set(this.deployment, 'checkOnly', checkOnly);
+                this.$set(this.deployment, 'errorMsg', '');
 
                 if (checkOnly) this.validating = true;
                 else this.deploying = true;
@@ -920,6 +1009,7 @@ export default {
                 this.localCheckOnly = false;
                 this.isQuickDeploy = true;
                 this.$set(this.deployment, 'checkOnly', false);
+                this.$set(this.deployment, 'errorMsg', '');
 
                 this.resetProgress();
                 this.hasShownSuccess = false;
@@ -1136,6 +1226,12 @@ export default {
     margin-bottom: 20px;
 }
 
+.sticky-card {
+    position: sticky;
+    top: 0;
+    z-index: 999;
+}
+
 .card-title {
     font-weight: bold;
     font-size: 16px;
@@ -1311,14 +1407,15 @@ export default {
     border: 1px solid #e1f3d8;
 }
 
-
+/* 【关键调整】让 el-tabs__header 吸顶 */
 /* ::v-deep .el-tabs__header {
+    position: -webkit-sticky;
     position: sticky;
     top: 84px;
     z-index: 10;
     background-color: #fff;
-    margin-bottom: 15px;
+    margin-bottom: 0;
     padding-top: 10px;
+    box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.05);
 } */
-
 </style>

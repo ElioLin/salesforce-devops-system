@@ -1,7 +1,9 @@
 package com.ruoyi.salesforce.service.impl;
 
+import cn.hutool.core.io.FileUtil;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.TypeReference;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.StringUtils;
@@ -25,6 +27,12 @@ import java.io.File;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+
+import cn.hutool.core.text.csv.CsvUtil;
+import cn.hutool.core.text.csv.CsvRow;
+import cn.hutool.core.text.csv.CsvReadConfig;
+
+import java.nio.charset.StandardCharsets;
 
 @Slf4j
 @Service
@@ -233,12 +241,12 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             publishProgress(job.getId(), "ANALYZING", "正在分析 [" + config.getObjectName() + "]...", 10);
 
             // 1. 构造 SOQL
-            List<String> srcFields = buildDynamicFields(job.getSourceOrgId(), config, config.getSourceKeyField());
+            List<String> srcFields = buildDynamicFields(job.getSourceOrgId(), config, config.getSourceKeyField(), false);
             String srcSoql = buildSoql(config.getObjectName(), srcFields, config.getSyncFilterLogic());
-
-            List<String> tgtFields = buildDynamicFields(job.getTargetOrgId(), config, config.getTargetKeyField());
+            log.info("源 SOQL: " + srcSoql);
+            List<String> tgtFields = buildDynamicFields(job.getTargetOrgId(), config, config.getTargetKeyField(), true);
             String tgtSoql = buildSoql(config.getObjectName(), tgtFields, config.getSyncFilterLogic());
-
+            log.info("目标 SOQL: " + tgtSoql);
             // 2. 提交 Bulk
             publishProgress(job.getId(), "SUBMITTING", "提交 Salesforce 查询...", 20);
             String srcJobId = bulkApiService.submitQueryJob(job.getSourceOrgId(), srcSoql);
@@ -321,68 +329,77 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     }
 
     /**
-     * 动态构建查询字段
+     * 核心优化：构建 SOQL 字段列表 (支持深度关联映射配置)
      */
-    private List<String> buildDynamicFields(Long orgId, SfDataObjConfig config, String keyField) throws Exception {
+    private List<String> buildDynamicFields(Long orgId, SfDataObjConfig config, String keyField, boolean isTarget) throws Exception {
         String objName = config.getObjectName();
+
+        // 1. 获取所有元数据字段
         List<Map<String, Object>> allFields = sfDescribeApiService.getSObjectFields(orgId, objName);
+        if(allFields == null || allFields.isEmpty()) return Collections.singletonList(keyField);
 
-        if (allFields == null || allFields.isEmpty()) {
-            log.warn("对象 [{}] Describe结果为空", objName);
-            return Collections.singletonList(keyField);
-        }
-
-        // 【核心判断】是否为自定义元数据类型 (__mdt)
-        // __mdt 类型的字段在 API 中经常返回 queryable=false，但实际上是支持 SOQL 的，所以需要强制放行
         boolean isMdt = StringUtils.isNotEmpty(objName) && objName.toLowerCase().endsWith("__mdt");
 
-        log.info("对象 [{}] (isMdt={}) Describe共获取到 {} 个字段，开始筛选...", objName, isMdt, allFields.size());
-
-        Set<String> excludedSet = new HashSet<>();
-        if (StringUtils.isNotEmpty(config.getExcludedFields())) {
-            for (String f : config.getExcludedFields().split(",")) {
-                excludedSet.add(f.trim().toLowerCase());
+        // 2. 解析前端传递的映射配置 JSON
+        // 结构: { "FieldName": { "type": "REFERENCE", "sourcePath": "...", "targetPath": "..." } }
+        Map<String, Map<String, String>> mappingConfig = new HashMap<>();
+        if(StringUtils.isNotEmpty(config.getMappingConfig())) {
+            try {
+                mappingConfig = JSON.parseObject(config.getMappingConfig(),
+                        new TypeReference<Map<String, Map<String, String>>>() {
+                        });
+            } catch(Exception e) {
+                log.error("解析映射配置失败", e);
             }
+        }
+
+        // 3. 处理排除字段
+        Set<String> excludedSet = new HashSet<>();
+        if(StringUtils.isNotEmpty(config.getExcludedFields())) {
+            for(String f : config.getExcludedFields().split(",")) excludedSet.add(f.trim().toLowerCase());
         }
 
         List<String> finalFields = new ArrayList<>();
-        finalFields.add(keyField);
+        finalFields.add(keyField); // 确保主键存在
 
-        int skippedByQueryable = 0;
-        int skippedByType = 0;
-        int skippedByExclude = 0;
-
-        for (Map<String, Object> field : allFields) {
+        for(Map<String, Object> field : allFields) {
             String name = getMapValueStr(field, "name");
             String type = getMapValueStr(field, "type");
+            String relationshipName = getMapValueStr(field, "relationshipName");
             boolean queryable = getMapValueBool(field, "queryable", true);
 
-            if (StringUtils.isEmpty(name)) continue;
-            if (name.equalsIgnoreCase(keyField)) continue;
-
-            if (excludedSet.contains(name.toLowerCase())) {
-                skippedByExclude++;
+            // 基础过滤
+            if(StringUtils.isEmpty(name) || name.equalsIgnoreCase(keyField)) continue;
+            if(excludedSet.contains(name.toLowerCase())) continue;
+            if(!queryable && !isMdt) continue;
+            if("base64".equalsIgnoreCase(type) || "address".equalsIgnoreCase(type) || "location".equalsIgnoreCase(type))
                 continue;
+
+            // --- 核心逻辑升级 ---
+
+            // 检查是否有自定义映射配置
+            if(mappingConfig.containsKey(name)) {
+                Map<String, String> configItem = mappingConfig.get(name);
+                String path = isTarget ? configItem.get("targetPath") : configItem.get("sourcePath");
+
+                if(StringUtils.isNotEmpty(path)) {
+                    // 如果配置了路径 (例如 Owner.Email)，直接使用配置的路径
+                    log.info("应用自定义映射: 字段 [{}] -> SOQL [{}]", name, path);
+                    finalFields.add(path);
+                    continue; // 处理完毕，跳过默认逻辑
+                }
             }
 
-            // 【核心修复】如果是 __mdt 对象，忽略 queryable=false 的限制
-            if (!queryable && !isMdt) {
-                if (skippedByQueryable < 3) log.info("字段 [{}] 被跳过: queryable=false", name);
-                skippedByQueryable++;
-                continue;
+            // 默认逻辑 (如果没有配置，或者是普通字段)
+            if(isTarget && "reference".equalsIgnoreCase(type) && StringUtils.isNotEmpty(relationshipName)) {
+                // 默认降级策略：尝试自动寻找 Source_Org_Id__c
+                // 只有在没配置的情况下才走这个默认逻辑，保证兼容性
+                String defaultTargetRelField = relationshipName + "." + config.getTargetKeyField();
+                finalFields.add(defaultTargetRelField);
+            } else {
+                finalFields.add(name);
             }
-
-            if ("base64".equalsIgnoreCase(type) || "address".equalsIgnoreCase(type) || "location".equalsIgnoreCase(type)) {
-                skippedByType++;
-                continue;
-            }
-
-            finalFields.add(name);
         }
-
-        log.info("筛选统计: Key=[{}], 总数=[{}], 最终可用=[{}]. 跳过详情: [不可查询(已放行MDT)={}, 类型不支持={}, 手动排除={}]",
-                keyField, allFields.size(), finalFields.size(), isMdt ? 0 : skippedByQueryable, skippedByType, skippedByExclude);
-
         return finalFields;
     }
 
@@ -390,19 +407,19 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
     private String getMapValueStr(Map<String, Object> map, String key) {
         Object val = map.get(key);
-        if (val == null) val = map.get(StringUtils.capitalize(key)); // Try "Name"
-        if (val == null) val = map.get(key.toLowerCase()); // Try "name"
+        if(val == null) val = map.get(StringUtils.capitalize(key)); // Try "Name"
+        if(val == null) val = map.get(key.toLowerCase()); // Try "name"
         return val == null ? null : val.toString();
     }
 
     private boolean getMapValueBool(Map<String, Object> map, String key, boolean defaultValue) {
         Object val = map.get(key);
         // 依次尝试 "Queryable", "queryable"
-        if (val == null) val = map.get(StringUtils.capitalize(key));
-        if (val == null) val = map.get(key.toLowerCase());
+        if(val == null) val = map.get(StringUtils.capitalize(key));
+        if(val == null) val = map.get(key.toLowerCase());
 
-        if (val == null) return defaultValue; // 这一步至关重要：如果没找到，默认它是可以查询的
-        if (val instanceof Boolean) return (Boolean) val;
+        if(val == null) return defaultValue; // 这一步至关重要：如果没找到，默认它是可以查询的
+        if(val instanceof Boolean) return (Boolean) val;
         return Boolean.parseBoolean(val.toString());
     }
 
@@ -423,5 +440,108 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         json.put("msg", msg);
         json.put("percent", percent);
         DeployWebSocketServer.sendMessage("reconcile_" + jobId, json.toJSONString());
+    }
+
+    /**
+     * 在线预览比对结果 (支持分页与筛选)
+     */
+    @Override
+    public Map<String, Object> previewCsvData(Long jobId, int pageNum, int pageSize, String diffType, String fieldName) {
+        // 1. 获取任务信息
+        // 修复：如果 Mapper 中没有 selectSfDataJobById，直接用 MyBatis Plus 的 selectById
+        SfDataJob job = jobMapper.selectById(jobId);
+        if(job == null) {
+            throw new ServiceException("任务不存在");
+        }
+
+        // 2. 定位结果文件
+        // 假设文件存储在临时目录，文件名为 reconcile_res_{jobId}.csv
+        // 生产环境建议在 SfDataJob 中增加 resultFilePath 字段来存储确切路径
+        String fileName = "reconcile_res_" + job.getId() + ".csv";
+        File file = new File("/tmp/sf_reconcile/" + fileName);
+
+        // 容错：如果找不到，尝试在同目录下模糊搜索
+        if(!file.exists()) {
+            File dir = new File("/tmp/sf_reconcile/");
+            if(dir.exists() && dir.isDirectory()) {
+                File[] match = dir.listFiles((d, name) -> name.startsWith("reconcile_res_") && name.contains(job.getId().toString()) && name.endsWith(".csv"));
+                if(match != null && match.length > 0) {
+                    file = match[0];
+                }
+            }
+        }
+
+        if(!file.exists()) {
+            // 修复 Map.of 报错 (JDK 8 不支持)
+            Map<String, Object> emptyMap = new HashMap<>();
+            emptyMap.put("total", 0);
+            emptyMap.put("rows", Collections.emptyList());
+            return emptyMap;
+        }
+
+        // 3. 读取 CSV (使用 Hutool)
+        CsvReadConfig config = CsvReadConfig.defaultConfig();
+        config.setFieldSeparator(',');
+        config.setTextDelimiter('\"');
+
+        List<CsvRow> allRows;
+        try {
+            // 强制 UTF-8 读取
+            allRows = CsvUtil.getReader(config).read(FileUtil.getReader(file, StandardCharsets.UTF_8)).getRows();
+        } catch(Exception e) {
+            throw new ServiceException("结果文件读取失败: " + e.getMessage());
+        }
+
+        if(allRows == null || allRows.isEmpty()) {
+            Map<String, Object> emptyMap = new HashMap<>();
+            emptyMap.put("total", 0);
+            emptyMap.put("rows", Collections.emptyList());
+            return emptyMap;
+        }
+
+        // 4. 解析数据 (跳过表头)
+        List<CsvRow> dataRows = allRows.size() > 1 ? allRows.subList(1, allRows.size()) : Collections.emptyList();
+
+        // 5. 内存过滤
+        List<Map<String, String>> filteredList = new ArrayList<>();
+        for(CsvRow row : dataRows) {
+            // 确保列数足够 (Source_Key, Target_Key, Diff_Type, Field_Name, Source_Value, Target_Value)
+            if(row.size() < 6) continue;
+
+            String rowDiffType = row.get(2);
+            String rowFieldName = row.get(3);
+
+            // 筛选条件匹配
+            boolean matchDiff = StringUtils.isEmpty(diffType) || (rowDiffType != null && rowDiffType.equalsIgnoreCase(diffType));
+            boolean matchField = StringUtils.isEmpty(fieldName) || (rowFieldName != null && rowFieldName.toLowerCase().contains(fieldName.toLowerCase()));
+
+            if(matchDiff && matchField) {
+                Map<String, String> item = new HashMap<>();
+                item.put("sourceKey", row.get(0));
+                item.put("targetKey", row.get(1));
+                item.put("diffType", row.get(2));
+                item.put("fieldName", row.get(3));
+                item.put("sourceValue", row.get(4));
+                item.put("targetValue", row.get(5));
+                filteredList.add(item);
+            }
+        }
+
+        // 6. 内存分页
+        int total = filteredList.size();
+        int fromIndex = (pageNum - 1) * pageSize;
+        int toIndex = Math.min(fromIndex + pageSize, total);
+
+        List<Map<String, String>> pageResult = new ArrayList<>();
+        if(fromIndex < total) {
+            pageResult = filteredList.subList(fromIndex, toIndex);
+        }
+
+        // JDK 8 写法
+        Map<String, Object> resultMap = new HashMap<>();
+        resultMap.put("total", total);
+        resultMap.put("rows", pageResult);
+
+        return resultMap;
     }
 }
