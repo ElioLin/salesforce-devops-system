@@ -21,7 +21,7 @@ public class SfDataRunLog implements Serializable {
     private Long id;
 
     private Long jobId;
-    private Long configId;
+
     private String runBatchNo;
 
     private String status;

@@ -16,12 +16,8 @@
                 </el-tag>
 
                 <div style="float: right;">
-                    <el-button 
-                        v-if="isProcessing && deployment.status !== 'Canceling'"
-                        type="danger" 
-                        icon="el-icon-video-pause" 
-                        style="margin-right: 15px;" 
-                        :loading="canceling"
+                    <el-button v-if="isProcessing && deployment.status !== 'Canceling'" type="danger"
+                        icon="el-icon-video-pause" style="margin-right: 15px;" :loading="canceling"
                         @click="handleCancelDeploy">
                         取消任务
                     </el-button>
@@ -153,7 +149,7 @@
                     <div class="list-header clearfix mb-10">
                         <div class="left-panel">
                             <el-tag size="small" type="info" effect="plain" class="count-tag">
-                                当前显示: <b class="text-primary">{{ filteredItemList.length }}</b> / 总共: {{ itemList.length
+                                当前筛选总条数: <b class="text-primary">{{ filteredItemList.length }}</b> / 总共: {{ itemList.length
                                 }}
                             </el-tag>
                         </div>
@@ -163,9 +159,13 @@
                         </div>
                     </div>
 
-                    <el-table v-loading="loadingItems" :data="filteredItemList" border stripe highlight-current-row
+                    <el-table v-loading="loadingItems" :data="pagedItemList" border stripe highlight-current-row
                         style="width: 100%">
-
+                        <el-table-column type="index" label="序号" width="55" align="center">
+                            <template slot-scope="scope">
+                                <span>{{ (pagination.pageNum - 1) * pagination.pageSize + scope.$index + 1 }}</span>
+                            </template>
+                        </el-table-column>
                         <el-table-column prop="metadataType" label="类型" width="220" sortable>
                             <template slot="header" slot-scope="scope">
                                 <div class="custom-header">
@@ -258,6 +258,13 @@
                             </template>
                         </el-table-column>
                     </el-table>
+                    <div class="pagination-container" style="margin-top: 15px; text-align: right;">
+                        <el-pagination background @size-change="handleSizeChange" @current-change="handleCurrentChange"
+                            :current-page.sync="pagination.pageNum" :page-sizes="[10, 20, 50, 100, 200, 500, 1000]"
+                            :page-size.sync="pagination.pageSize" layout="total, sizes, prev, pager, next, jumper"
+                            :total="pagination.total">
+                        </el-pagination>
+                    </div>
                 </el-tab-pane>
 
                 <el-tab-pane name="add">
@@ -433,7 +440,12 @@ export default {
                 }
             },
             isExplicitDisconnect: false, // 【新增】标记是否为显式断开
-            canceling: false
+            canceling: false,
+            pagination: {
+                pageNum: 1,
+                pageSize: 20, // 默认每页显示20条，减少渲染压力
+                total: 0
+            }
         };
     },
     computed: {
@@ -466,7 +478,7 @@ export default {
             const s = this.deployment.status;
             const activeStatuses = [
                 'Processing', 'Deploying', 'Validating',
-                'Pending', 'InProgress', 'Queued', 
+                'Pending', 'InProgress', 'Queued',
                 'Canceling' // 取消中 仍然算作处理中，禁止操作
             ];
             // 注意：这里没有 'Canceled'。
@@ -503,6 +515,21 @@ export default {
             if (!this.itemList || this.itemList.length === 0) return [];
             const statusSet = new Set(this.itemList.map(item => item.diffStatus).filter(s => s));
             return Array.from(statusSet).sort();
+        },
+        // 【修改】基于筛选结果，计算分页后的数据
+        pagedItemList() {
+            // 1. 获取经过筛选的总列表
+            const allFiltered = this.filteredItemList;
+
+            // 2. 更新总条数（用于分页组件显示）
+            this.pagination.total = allFiltered.length;
+
+            // 3. 计算切片索引
+            const start = (this.pagination.pageNum - 1) * this.pagination.pageSize;
+            const end = start + this.pagination.pageSize;
+
+            // 4. 返回当前页数据
+            return allFiltered.slice(start, end);
         },
         filteredItemList() {
             return this.itemList.filter(item => {
@@ -561,6 +588,13 @@ export default {
                 }
             },
             immediate: true
+        },
+        // 【新增】监听筛选条件变化，重置到第一页
+        columnFilters: {
+            handler() {
+                this.pagination.pageNum = 1;
+            },
+            deep: true
         }
     },
     created() {
@@ -584,7 +618,18 @@ export default {
             if (['Processing', 'Deploying', 'Validating', 'Pending', 'InProgress', 'Queued'].includes(status)) return 'warning';
             return 'info';
         },
+        // 【新增】分页大小改变
+        handleSizeChange(val) {
+            this.pagination.pageSize = val;
+            this.pagination.pageNum = 1; // 改变大小时重置到第一页
+        },
 
+        // 【新增】页码改变
+        handleCurrentChange(val) {
+            this.pagination.pageNum = val;
+            // 翻页后自动滚动到表格顶部（可选体验优化）
+            document.querySelector('.el-table__body-wrapper').scrollTop = 0; 
+        },
         initData() {
             this.loading = true;
             const p1 = listOrg({ pageNum: 1, pageSize: 100 }).then(res => {
@@ -642,7 +687,7 @@ export default {
             const token = getToken();
             const baseUrl = process.env.VUE_APP_BASE_API;
 
-            const url = `${protocol}://${host}${baseUrl}/websocket/deploy/${this.deploymentId}?token=${token}`;
+            const url = `${protocol}://${host}${baseUrl}/websocket/${this.deploymentId}?token=${token}`;
 
             this.websocket = new WebSocket(url);
             this.websocket.onopen = this.websocketOnOpen;
@@ -702,7 +747,7 @@ export default {
                     // 1. 强制停止前端的 loading 状态
                     this.resetButtonState();
                     this.isProcessing = false;
-                    
+
                     // 2. 只有第一次收到 done 时才弹窗，防止重复
                     if (!this.hasShownSuccess) {
                         this.hasShownSuccess = true;
@@ -835,7 +880,7 @@ export default {
         /**
          * 【新增】处理取消部署
          */
-         handleCancelDeploy() {
+        handleCancelDeploy() {
             // 二次确认，防止误触
             this.$confirm('确定要终止当前的 验证/部署 任务吗？<br/><span style="color:#F56C6C;font-size:12px">注意：Salesforce 可能需要几秒钟来处理取消请求，且部分已提交的更改可能无法回滚。</span>', '警告', {
                 confirmButtonText: '确定取消',

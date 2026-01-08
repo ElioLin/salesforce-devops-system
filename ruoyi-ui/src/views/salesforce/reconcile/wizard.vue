@@ -18,7 +18,7 @@
                         <el-form-item label="源环境" prop="sourceOrgId">
                             <el-select v-model="form.sourceOrgId" placeholder="选择Global Org" style="width:100%"
                                 @change="handleOrgChange">
-                                <el-option v-for="item in orgOptions" :key="item.id" :label="item.name"
+                                <el-option v-for="item in orgOptionsList" :key="item.id" :label="item.name"
                                     :value="item.id" />
                             </el-select>
                         </el-form-item>
@@ -27,7 +27,7 @@
                         <el-form-item label="目标环境" prop="targetOrgId">
                             <el-select v-model="form.targetOrgId" placeholder="选择阿里云 Org" style="width:100%"
                                 @change="handleOrgChange">
-                                <el-option v-for="item in orgOptions" :key="item.id" :label="item.name"
+                                <el-option v-for="item in orgOptionsList" :key="item.id" :label="item.name"
                                     :value="item.id" />
                             </el-select>
                         </el-form-item>
@@ -187,14 +187,16 @@
             <el-button @click="open = false">取消</el-button>
             <el-button v-if="activeStep > 0" @click="prevStep">上一步</el-button>
             <el-button v-if="activeStep < 2" type="primary" @click="nextStep">下一步</el-button>
-            <el-button v-if="activeStep === 2" type="primary" :loading="submitting" @click="submit">完成创建</el-button>
+            <el-button v-if="activeStep === 2" type="primary" :loading="submitting" @click="submit">完成配置</el-button>
         </div>
     </el-dialog>
 </template>
 
 <script>
+// 确保这些 API 路径正确，根据您的项目结构调整
 import { listOrg } from "@/api/salesforce/org";
-import { addJob, updateJob, batchSaveConfigs, getJob, listConfigs } from "@/api/salesforce/reconcile";
+import { addJob, updateJob, getJob } from "@/api/salesforce/dataJob";
+import { batchSaveConfigs, listConfigs } from "@/api/salesforce/dataObjConfig";
 import { listSObjects, getSObjectFields } from "@/api/salesforce/describe";
 
 export default {
@@ -211,6 +213,9 @@ export default {
             open: false,
             activeStep: 0,
             submitting: false,
+
+            // 内部维护的 Org 列表 (如果 prop 为空)
+            orgOptionsList: [],
 
             // Step 1 Data
             form: {
@@ -255,6 +260,15 @@ export default {
             }
         };
     },
+    watch: {
+        // 监听 Props 变化同步到内部列表
+        orgOptions: {
+            handler(val) {
+                if (val && val.length > 0) this.orgOptionsList = val;
+            },
+            immediate: true
+        }
+    },
     computed: {
         currentConfig() {
             if (this.configList.length === 0) return null;
@@ -271,27 +285,36 @@ export default {
         }
     },
     methods: {
-        openWizard(jobId) {
+        // === 核心修复：方法名改为 init，匹配 index.vue 的调用 ===
+        init(jobId) {
             this.reset();
             this.open = true;
+
             // 兜底获取Org列表
-            if (this.orgOptions.length === 0) {
-                listOrg().then(res => this.$emit('update:orgOptions', res.rows));
+            if (this.orgOptionsList.length === 0) {
+                listOrg().then(res => this.orgOptionsList = res.rows);
             }
 
             if (jobId) {
                 this.title = "编辑比对任务";
+                // 获取 Job 信息
                 getJob(jobId).then(res => {
                     this.form = res.data;
+                    // 获取 Config 信息
                     listConfigs(jobId).then(cRes => {
                         this.configList = cRes.data;
                         this.selectedObjects = this.configList.map(c => c.objectName);
+                        // 如果有对象，预加载 Step2 的列表，防止显示 Key 而不是 Label
+                        if (this.selectedObjects.length > 0) {
+                            this.loadAllObjects();
+                        }
                     });
                 });
             } else {
                 this.title = "创建比对任务";
             }
         },
+
         reset() {
             this.activeStep = 0;
             this.form = { id: undefined, jobName: '', sourceOrgId: undefined, targetOrgId: undefined, remark: '' };
@@ -390,15 +413,11 @@ export default {
         },
 
         // --- Helper: 获取对象显示名称 ---
-        // 【核心新增】
         getObjDisplayName(key) {
-            // 尝试从 allObjects 中查找
             const obj = this.allObjects.find(item => item.key === key);
             if (obj) {
                 return `${obj.label} - ${obj.key}`;
             }
-            // 如果 allObjects 为空（例如直接进入Step3编辑模式未加载Step2），则直接显示 Key
-            // 或者可以考虑在 init 的时候预加载 allObjects，但为了性能通常不这么做
             return key;
         },
 
@@ -491,10 +510,10 @@ export default {
             jobFunc(this.form).then(res => {
                 const jobId = this.form.id || res.data;
                 batchSaveConfigs(jobId, this.configList).then(() => {
-                    this.$modal.msgSuccess("保存成功");
+                    this.$modal.msgSuccess("配置已保存");
                     this.open = false;
                     this.submitting = false;
-                    this.$emit("success");
+                    this.$emit("ok"); // 关键修正：触发 ok 事件，index.vue 监听的是 @ok
                 });
             }).catch(() => {
                 this.submitting = false;

@@ -7,6 +7,7 @@ import lombok.Data;
 import java.io.Serializable;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -60,4 +61,8 @@ public class SfDataJob implements Serializable {
     @TableField(exist = false)
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<String, Object> params = new HashMap<>();
+
+    /** 任务包含的对象名称集合 (非数据库字段) */
+    @TableField(exist = false)
+    private List<String> objectNames;
 }

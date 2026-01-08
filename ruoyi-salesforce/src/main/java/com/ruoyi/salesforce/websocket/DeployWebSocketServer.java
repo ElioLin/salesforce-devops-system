@@ -12,8 +12,6 @@ import javax.websocket.*;
 import javax.websocket.server.PathParam;
 import javax.websocket.server.ServerEndpoint;
 import java.io.IOException;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 
@@ -21,7 +19,7 @@ import java.util.concurrent.CopyOnWriteArraySet;
  * 部署日志 WebSocket 服务
  * URL: /websocket/deploy/{deploymentId}
  */
-@ServerEndpoint("/websocket/deploy/{deploymentId}")
+@ServerEndpoint("/websocket/{sid}")
 @Component
 public class DeployWebSocketServer {
 
@@ -31,19 +29,19 @@ public class DeployWebSocketServer {
     private static ConcurrentHashMap<String, CopyOnWriteArraySet<Session>> sessionPool = new ConcurrentHashMap<>();
 
     @OnOpen
-    public void onOpen(Session session, @PathParam("deploymentId") String deploymentId) {
+    public void onOpen(Session session, @PathParam("sid") String sid) {
         try {
             // 【关键步骤】手动鉴权
             // 因为我们在 SecurityConfig 中放行了 /websocket/**，所以这里必须自己检查 Token
             if (!validateToken(session)) {
-                log.warn("WebSocket鉴权失败，强制关闭连接: deploymentId={}", deploymentId);
+                log.warn("WebSocket鉴权失败，强制关闭连接: deploymentId={}", sid);
                 session.close(new CloseReason(CloseReason.CloseCodes.CANNOT_ACCEPT, "Auth Failed"));
                 return;
             }
 
             // 鉴权通过，加入连接池
-            sessionPool.computeIfAbsent(deploymentId, k -> new CopyOnWriteArraySet<>()).add(session);
-            log.info("WebSocket连接建立: Id={}, 当前在线: {}", deploymentId, sessionPool.get(deploymentId).size());
+            sessionPool.computeIfAbsent(sid, k -> new CopyOnWriteArraySet<>()).add(session);
+            log.info("WebSocket连接建立: Id={}, 当前在线: {}", sid, sessionPool.get(sid).size());
 
         } catch (Exception e) {
             log.error("WebSocket连接异常", e);
@@ -51,31 +49,26 @@ public class DeployWebSocketServer {
     }
 
     /**
-     * 从 QueryString 中解析 Token 并校验
+     * 校验 Token
      */
     private boolean validateToken(Session session) {
         try {
-            // 获取 URL 参数部分 (例如: token=eyJhbG...)
             String queryString = session.getQueryString();
             if (StringUtils.isEmpty(queryString)) return false;
 
-            // 解析参数
             String token = null;
             String[] params = queryString.split("&");
             for (String param : params) {
                 if (param.startsWith("token=")) {
-                    token = param.substring(6); // 去掉 "token="
+                    token = param.substring(6);
                     break;
                 }
             }
 
             if (StringUtils.isEmpty(token)) return false;
 
-            // 使用若依的 TokenService 校验
-            // 注意：WebSocket 是非 Spring 管理的多例对象，需用 SpringUtils 获取 Bean
             TokenService tokenService = SpringUtils.getBean(TokenService.class);
             LoginUser loginUser = tokenService.getLoginUser(token);
-
             return loginUser != null;
         } catch (Exception e) {
             log.error("WS Token校验异常", e);
@@ -84,22 +77,21 @@ public class DeployWebSocketServer {
     }
 
     @OnClose
-    public void onClose(Session session, @PathParam("deploymentId") String deploymentId) {
-        CopyOnWriteArraySet<Session> sessions = sessionPool.get(deploymentId);
+    public void onClose(Session session, @PathParam("sid") String sid) {
+        CopyOnWriteArraySet<Session> sessions = sessionPool.get(sid);
         if (sessions != null) {
             sessions.remove(session);
             if (sessions.isEmpty()) {
-                sessionPool.remove(deploymentId);
+                sessionPool.remove(sid);
             }
         }
-        log.info("WebSocket连接断开: Id={}", deploymentId);
+        log.info("WebSocket连接断开: sid={}", sid);
     }
 
     @OnError
     public void onError(Session session, Throwable error) {
-        // 忽略正常的关闭错误
         if(error.getMessage() != null && error.getMessage().contains("Connection reset by peer")) {
-            return;
+            return; // 忽略常规断开
         }
         log.error("WebSocket发生错误", error);
     }

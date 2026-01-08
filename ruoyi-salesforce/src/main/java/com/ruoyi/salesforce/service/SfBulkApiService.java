@@ -1,6 +1,5 @@
 package com.ruoyi.salesforce.service;
 
-import cn.hutool.core.io.FileUtil;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
 import com.alibaba.fastjson2.JSONObject;
@@ -11,7 +10,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.io.FileOutputStream;
 
 @Slf4j
 @Service
@@ -26,109 +24,149 @@ public class SfBulkApiService {
     private static final String API_VERSION = "v58.0";
 
     /**
-     * 1. 提交查询任务
+     * 1. 提交查询任务 (支持自动 Token 续期)
      */
     public String submitQueryJob(Long orgId, String soql) {
-        SfOrg org = sfOrgService.selectSfOrgById(orgId);
-        String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query";
+        try {
+            // 使用 sfMetadataService 的重试机制包裹业务逻辑
+            return sfMetadataService.executeWithRetry(orgId, () -> {
+                // 每次重试都重新获取 Org (确保拿到最新的 Token)
+                SfOrg org = sfOrgService.selectSfOrgById(orgId);
+                String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query";
 
-        JSONObject body = new JSONObject();
-        body.put("operation", "query");
-        body.put("query", soql);
-        body.put("contentType", "CSV");
-        // 先不指定 lineEnding，看看 Salesforce 默认给什么，或者你可以尝试解开下面的注释强制指定
-        // body.put("lineEnding", "CRLF");
+                JSONObject body = new JSONObject();
+                body.put("operation", "query");
+                body.put("query", soql);
+                body.put("contentType", "CSV");
 
-        log.info(">>> [Step 1] 准备提交 Bulk Job, 请求参数: {}", body.toJSONString());
+                // 获取完整 Response 以检查状态码
+                HttpResponse response = HttpRequest.post(url)
+                        .header("Authorization", "Bearer " + org.getAccessToken())
+                        .header("Content-Type", "application/json; charset=UTF-8")
+                        .body(body.toJSONString())
+                        .execute();
 
-        String result = HttpRequest.post(url)
-                .header("Authorization", "Bearer " + org.getAccessToken())
-                .header("Content-Type", "application/json; charset=UTF-8")
-                .body(body.toJSONString())
-                .execute()
-                .body();
+                String result = response.body();
 
-        // 【关键调试点】打印 Salesforce 返回的 Job 详情，请检查日志中的 columnDelimiter 和 lineEnding
-        log.info(">>> [Step 2] Bulk Job 创建响应结果: {}", result);
+                // 【关键优化】主动检查 Token 失效，抛出特定异常触发重试
+                if(response.getStatus() == 401 || result.contains("INVALID_SESSION_ID")) {
+                    throw new Exception("INVALID_SESSION_ID: Session expired");
+                }
 
-        JSONObject json = JSONObject.parseObject(result);
-        if (json.containsKey("id")) {
-            return json.getString("id");
-        } else {
-            throw new ServiceException("创建 Bulk Job 失败: " + result);
+                // 检查其他错误
+                if(!response.isOk()) {
+                    // 如果返回的是错误数组 [{"message":"..."}]，直接抛出内容
+                    throw new Exception("Create Bulk Job Failed: " + result);
+                }
+
+                // 解析成功结果
+                JSONObject json = JSONObject.parseObject(result);
+                return json.getString("id");
+            });
+        } catch(Exception e) {
+            log.error("提交 Bulk Job 异常", e);
+            throw new ServiceException("提交比对任务失败: " + e.getMessage());
         }
-    }
-
-    public String checkJobStatus(Long orgId, String jobId) {
-        SfOrg org = sfOrgService.selectSfOrgById(orgId);
-        String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
-
-        String res = HttpRequest.get(url)
-                .header("Authorization", "Bearer " + org.getAccessToken())
-                .execute().body();
-
-        // 【关键调试点】轮询时再次确认 Job 的最终配置
-        log.info(">>> [Step 3] Job [{}] 状态详情: {}", jobId, res);
-
-        return JSONObject.parseObject(res).getString("state");
-    }
-
-    public String getErrorMessage(Long orgId, String jobId) {
-        SfOrg org = sfOrgService.selectSfOrgById(orgId);
-        String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
-
-        String res = HttpRequest.get(url)
-                .header("Authorization", "Bearer " + org.getAccessToken())
-                .execute().body();
-
-        return JSONObject.parseObject(res).getString("errorMessage");
     }
 
     /**
-     * 4. 下载结果
+     * 2. 检查任务状态 (支持自动 Token 续期)
      */
-    public File downloadResult(Long orgId, String jobId, String filePath) {
-        SfOrg org = sfOrgService.selectSfOrgById(orgId);
-        String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId + "/results";
+    public String checkJobStatus(Long orgId, String jobId) {
+        try {
+            return sfMetadataService.executeWithRetry(orgId, () -> {
+                SfOrg org = sfOrgService.selectSfOrgById(orgId);
+                String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
 
-        for (int i = 0; i < 3; i++) {
-            try {
-                HttpRequest request = HttpRequest.get(url)
+                HttpResponse response = HttpRequest.get(url)
                         .header("Authorization", "Bearer " + org.getAccessToken())
-                        .header("Accept", "text/csv")
-                        .timeout(60000);
+                        .execute();
 
-                // 使用异步方法获取 Response 对象
-                HttpResponse response = request.executeAsync();
+                String result = response.body();
 
-                if (response.getStatus() == 401) {
-                    try { sfMetadataService.refreshMetadataCache(orgId, "ApexClass"); } catch (Exception e) {}
-                    org = sfOrgService.selectSfOrgById(orgId);
-                    continue;
+                if(response.getStatus() == 401 || result.contains("INVALID_SESSION_ID")) {
+                    throw new Exception("INVALID_SESSION_ID");
                 }
 
-                if (!response.isOk()) {
-                    throw new ServiceException("下载失败 [" + response.getStatus() + "]");
+                if(!response.isOk()) {
+                    throw new Exception("Get Job Status Failed: " + result);
+                }
+
+                return JSONObject.parseObject(result).getString("state");
+            });
+        } catch(Exception e) {
+            // 这里不抛出 ServiceException，允许返回 null 或 error 状态供调用方判断
+            log.error("获取 Job 状态异常", e);
+            return "Failed";
+        }
+    }
+
+    /**
+     * 3. 获取错误信息 (支持自动 Token 续期)
+     */
+    public String getErrorMessage(Long orgId, String jobId) {
+        try {
+            return sfMetadataService.executeWithRetry(orgId, () -> {
+                SfOrg org = sfOrgService.selectSfOrgById(orgId);
+                String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
+
+                HttpResponse response = HttpRequest.get(url)
+                        .header("Authorization", "Bearer " + org.getAccessToken())
+                        .execute();
+
+                String result = response.body();
+                if(response.getStatus() == 401 || result.contains("INVALID_SESSION_ID")) {
+                    throw new Exception("INVALID_SESSION_ID");
+                }
+                return JSONObject.parseObject(result).getString("errorMessage");
+            });
+        } catch(Exception e) {
+            return e.getMessage();
+        }
+    }
+
+    /**
+     * 4. 下载结果 (支持自动 Token 续期)
+     */
+    public File downloadResult(Long orgId, String jobId, String filePath) {
+        try {
+            return sfMetadataService.executeWithRetry(orgId, () -> {
+                SfOrg org = sfOrgService.selectSfOrgById(orgId);
+                String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId + "/results";
+
+                // 使用 executeAsync 获取流，但也需要检查状态
+                HttpResponse response = HttpRequest.get(url)
+                        .header("Authorization", "Bearer " + org.getAccessToken())
+                        .header("Accept", "text/csv")
+                        .timeout(60000) // 1分钟超时
+                        .executeAsync();
+
+                if(response.getStatus() == 401) {
+                    throw new Exception("INVALID_SESSION_ID");
+                }
+
+                if(!response.isOk()) {
+                    // 读取错误体
+                    String err = response.body(); // 注意：流被读取后可能无法再次读取，但这里是错误情况无所谓
+                    if(err.contains("INVALID_SESSION_ID")) {
+                        throw new Exception("INVALID_SESSION_ID");
+                    }
+                    throw new Exception("下载失败 Code: " + response.getStatus());
                 }
 
                 File file = new File(filePath);
-                // 确保父目录存在
-                if (!file.getParentFile().exists()) {
+                if(!file.getParentFile().exists()) {
                     file.getParentFile().mkdirs();
                 }
 
-                // 【核心修复】直接将网络流 pipe 到文件，不经过 byte[] 转换
-                // 这样能保证 Salesforce 给什么，文件里就是什么（包括换行符）
+                // 流式写入文件
                 long size = response.writeBody(file, null);
-
-                log.info("文件下载成功: {}, 大小: {} bytes", file.getName(), size);
+                log.info("Bulk 结果下载成功: {}, 大小: {} bytes", file.getName(), size);
                 return file;
-
-            } catch (Exception e) {
-                log.error("下载尝试 {} 失败: {}", (i + 1), e.getMessage());
-                if (i == 2) throw new ServiceException("下载重试失败: " + e.getMessage());
-            }
+            });
+        } catch(Exception e) {
+            log.error("下载结果文件异常", e);
+            throw new ServiceException("下载结果失败: " + e.getMessage());
         }
-        return null;
     }
 }
