@@ -169,4 +169,30 @@ public class SfBulkApiService {
             throw new ServiceException("下载结果失败: " + e.getMessage());
         }
     }
+
+    /**
+     * 5. 获取任务处理的记录数 (用于计算进度)
+     */
+    public int getJobRecordCount(Long orgId, String jobId) {
+        try {
+            return sfMetadataService.executeWithRetry(orgId, () -> {
+                SfOrg org = sfOrgService.selectSfOrgById(orgId);
+                String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
+
+                HttpResponse response = HttpRequest.get(url)
+                        .header("Authorization", "Bearer " + org.getAccessToken())
+                        .execute();
+
+                if(response.isOk()) {
+                    JSONObject json = JSONObject.parseObject(response.body());
+                    // Bulk API V2 返回 numberRecordsProcessed
+                    return json.getIntValue("numberRecordsProcessed");
+                }
+                return 0;
+            });
+        } catch(Exception e) {
+            log.warn("获取Job行数失败，进度条可能不准确: {}", e.getMessage());
+            return 0;
+        }
+    }
 }

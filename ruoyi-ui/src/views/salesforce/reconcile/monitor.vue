@@ -108,6 +108,7 @@
 import { getJobMonitor, downloadObjUrl, retryObjLog } from "@/api/salesforce/dataRunObjLog";
 import PreviewResult from './preview';
 import { getToken } from "@/utils/auth"; // 必须引入 Token
+import request from '@/utils/request';
 
 export default {
   name: "JobMonitor",
@@ -127,12 +128,27 @@ export default {
   },
   computed: {
     // ... (保持不变)
+    // 【优化】计算总进度：基于所有对象的进度均值
     calcTotalProgress() {
-      if (!this.objList.length) return 0;
-      const finishedCount = this.objList.filter(i =>
-        i.status === 'FINISHED' || i.status === 'FAILED'
-      ).length;
-      return Math.floor((finishedCount / this.objList.length) * 100);
+      const totalCount = this.objList.length;
+      if (totalCount === 0) return 0;
+
+      // 累加所有对象的 progress 字段
+      // 如果对象是 FINISHED 或 FAILED，视为 100%
+      // 如果是 WAITING，视为 0%
+      // 如果是 RUNNING，取实际 progress
+      const sumProgress = this.objList.reduce((sum, item) => {
+        let p = 0;
+        if (item.status === 'FINISHED' || item.status === 'FAILED') {
+          p = 100;
+        } else if (item.status === 'RUNNING') {
+          p = item.progress || 0;
+        }
+        return sum + p;
+      }, 0);
+
+      // 计算平均值
+      return Math.floor(sumProgress / totalCount);
     },
     statusTagType() {
       if (this.overallStatus === 'RUNNING') return '';
@@ -171,39 +187,62 @@ export default {
           this.objList = newData;
         } else {
           newData.forEach(newItem => {
+            // 使用 String 转换确保 ID 类型匹配
             const index = this.objList.findIndex(i => String(i.id) === String(newItem.id));
             if (index !== -1) {
               const oldItem = this.objList[index];
-              if (oldItem.status !== newItem.status || oldItem.progress !== newItem.progress || oldItem.diffCount !== newItem.diffCount) {
-                this.$set(this.objList, index, { ...oldItem, ...newItem });
+
+              // --- 核心修复：防止进度回跳 (Jitter Fix) ---
+              // 只有当新数据的进度 >= 旧进度，或者状态发生了变更（如从 RUNNING 变为了 FINISHED）时，才更新
+              // 这样可以防止轮询到的“旧数据”覆盖掉 WebSocket 推送的“新数据”
+              let shouldUpdate = false;
+
+              // 1. 状态变了，必须更新
+              if (newItem.status !== oldItem.status) {
+                shouldUpdate = true;
+              }
+              // 2. 状态没变，但进度前进了，更新
+              else if (newItem.progress > oldItem.progress) {
+                shouldUpdate = true;
+              }
+              // 3. 差异数变了，更新
+              else if (newItem.diffCount !== oldItem.diffCount) {
+                shouldUpdate = true;
+              }
+
+              // 如果需要更新，或者强制覆盖其他字段（如 label）
+              if (shouldUpdate) {
+                // 注意：这里我们保留 oldItem 中可能存在的 currentMsg (实时消息)，
+                // 因为接口通常不返回实时的 currentMsg，只返回 errorMsg
+                const mergedItem = {
+                  ...oldItem,
+                  ...newItem,
+                  // 保护 progress 不被回滚：取最大值
+                  progress: Math.max(oldItem.progress || 0, newItem.progress || 0)
+                };
+                this.$set(this.objList, index, mergedItem);
               }
             } else {
               this.objList.push(newItem);
             }
           });
         }
-        
-        // 更新整体状态
+
         this.updateOverallStatus();
 
-        // 【核心优化点】智能连接控制
-        // 只有当状态为 RUNNING 或 WAITING 时，才尝试连接 WebSocket
+        // 智能连接 WebSocket
         if (this.overallStatus === 'RUNNING' || this.overallStatus === 'WAITING') {
-             // initWebSocket 内部有防止重复连接的判断，所以可以放心调用
-             this.initWebSocket();
+          this.initWebSocket();
         } else {
-             // 如果任务是 FINISHED 或 FAILED，并且 socket 是连接状态，则断开
-             // 这样进入已完成的历史任务页面时，不会建立 WS 连接
-             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-                 this.disconnectSocket();
-             }
+          if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.disconnectSocket();
+          }
         }
 
       }).catch(err => {
         console.error("获取监控数据失败", err);
       });
     },
-
     updateOverallStatus() {
       if (this.objList.length === 0) {
         this.overallStatus = 'WAITING';
@@ -331,9 +370,56 @@ export default {
       }
       this.$refs.previewRef.init(row.id, row.objectName);
     },
+    // 下载比对结果 (修复 401 认证失败问题)
     handleDownload(row) {
-      const url = downloadObjUrl(row.id);
-      window.open(url);
+      const fileName = `reconcile_result_${row.objectName}.csv`;
+
+      // 显示加载遮罩
+      const loading = this.$loading({
+        lock: true,
+        text: '正在下载结果文件...',
+        spinner: 'el-icon-loading',
+        background: 'rgba(0, 0, 0, 0.7)'
+      });
+
+      request({
+        url: '/salesforce/dataRunObjLog/downloadObj/' + row.id,
+        method: 'get',
+        responseType: 'blob', // 【关键】必须指定响应类型为 blob
+        timeout: 60000 // 防止大文件下载超时
+      }).then(async (res) => {
+        loading.close();
+
+        // 检查是否返回了 JSON 格式的错误信息 (例如文件不存在)
+        if (res.type === 'application/json') {
+          const text = await res.text();
+          const json = JSON.parse(text);
+          this.$modal.msgError(json.msg || "下载失败，文件可能不存在");
+          return;
+        }
+
+        // 处理文件流下载
+        const blob = new Blob([res]);
+        if ('download' in document.createElement('a')) {
+          // 非 IE 下载
+          const elink = document.createElement('a');
+          elink.download = fileName;
+          elink.style.display = 'none';
+          elink.href = URL.createObjectURL(blob);
+          document.body.appendChild(elink);
+          elink.click();
+          URL.revokeObjectURL(elink.href); // 释放 URL 对象
+          document.body.removeChild(elink);
+        } else {
+          // IE10+ 下载
+          navigator.msSaveBlob(blob, fileName);
+        }
+        this.$message.success("下载已开始");
+      }).catch(err => {
+        loading.close();
+        console.error("下载出错", err);
+        this.$message.error("下载失败，请联系管理员");
+      });
     },
     handleGoBack() {
       this.$router.push('/salesforce/reconcile');
@@ -346,8 +432,8 @@ export default {
       }).then(() => {
         // 如果断开了，尝试立即重连
         if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-            console.log("重试触发，主动建立连接...");
-            this.initWebSocket();
+          console.log("重试触发，主动建立连接...");
+          this.initWebSocket();
         }
 
         // 乐观更新

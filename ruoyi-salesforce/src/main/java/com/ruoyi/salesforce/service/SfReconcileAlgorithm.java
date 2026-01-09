@@ -4,11 +4,13 @@ import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.text.csv.*;
 import cn.hutool.core.util.NumberUtil;
 import cn.hutool.core.util.StrUtil;
+import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.SfDataObjConfig;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -16,11 +18,13 @@ import java.io.OutputStreamWriter;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
- * Salesforce 数据比对核心算法引擎
- * (已确认：支持单对象独立结果文件生成，保留横向写入修复)
+ * Salesforce 数据比对核心算法引擎 (流式优化最终修复版)
+ * 适配 Hutool stream() 无参调用
  */
 @Slf4j
 @Component
@@ -35,164 +39,127 @@ public class SfReconcileAlgorithm {
         private int diffCount = 0;
         private int missingTarget = 0;
         private int missingSource = 0;
-        private List<Map<String, String>> previewList = new ArrayList<>();
     }
 
-    public ReconcileStats execute(File sourceFile, File targetFile, File resultFile, SfDataObjConfig config) {
-        log.info("开始执行算法比对，对象: {}", config.getObjectName());
-
-        // 1. 外部排序
-        File sortedSource = externalSort(sourceFile, config.getSourceKeyField());
-        File sortedTarget = externalSort(targetFile, config.getTargetKeyField());
-
+    public ReconcileStats execute(File sourceFile, File targetFile, File resultFile, SfDataObjConfig config, int totalRows, Consumer<Integer> progressCallback) {
+        log.info("开始执行流式比对，对象: {}", config.getObjectName());
         ReconcileStats stats = new ReconcileStats();
-        try {
-            // 2. 核心比对
-            doCompare(sortedSource, sortedTarget, resultFile, config, stats);
-        } catch(Exception e) {
-            log.error("比对过程发生异常", e);
-            throw new RuntimeException(e);
-        } finally {
-            // 清理排序临时文件
-            FileUtil.del(sortedSource);
-            FileUtil.del(sortedTarget);
-        }
-        return stats;
-    }
 
-    private File externalSort(File inputFile, String keyField) {
-        List<CsvRow> rows = readCsvRobust(inputFile);
-        if(rows.isEmpty()) return inputFile;
+        // 基础进度从 40% 开始 (前 40% 留给下载)
+        final int BASE_PROGRESS = 40;
+        final int MAX_ALGO_PROGRESS = 60; // 算法占 60% 的权重 (40-100)
 
-        CsvRow header = rows.get(0);
-        int keyIndex = findColIndex(header, keyField);
+        long processedCount = 0; // 已处理行数计数器
+        int lastReportedProgress = BASE_PROGRESS;
 
-        if(keyIndex == -1) {
-            log.error("排序失败：文件 [{}] 未找到主键 [{}]", inputFile.getName(), keyField);
-            return inputFile;
-        }
+        String srcKeyField = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
+        String tgtKeyField = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
 
-        List<CsvRow> dataRows = new ArrayList<>(rows.subList(1, rows.size()));
-        dataRows.sort((r1, r2) -> {
-            String k1 = getNormalizedKey(r1, keyIndex);
-            String k2 = getNormalizedKey(r2, keyIndex);
-            if(k1 == null) return 1;
-            if(k2 == null) return -1;
-            return k1.compareTo(k2);
-        });
+        // 1. 准备配置
+        CsvReadConfig csvConfig = CsvReadConfig.defaultConfig();
+        csvConfig.setFieldSeparator(',');
+        csvConfig.setTextDelimiter('\"');
 
-        File sortedFile = new File(inputFile.getParent(), "sorted_" + inputFile.getName());
-        writeCsvRobust(sortedFile, header, dataRows);
-        return sortedFile;
-    }
+        // 使用 try-with-resources 确保所有流（写入流 + 读取流）被关闭
+        try(
+                // 结果写入流
+                FileOutputStream fos = new FileOutputStream(resultFile);
+                BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8));
 
-    private void doCompare(File srcFile, File tgtFile, File resultFile, SfDataObjConfig config, ReconcileStats stats) throws Exception {
-        List<CsvRow> srcRows = readCsvRobust(srcFile);
-        List<CsvRow> tgtRows = readCsvRobust(tgtFile);
-
-        Iterator<CsvRow> srcIter = srcRows.iterator();
-        Iterator<CsvRow> tgtIter = tgtRows.iterator();
-
-        CsvRow srcHeader = srcIter.hasNext() ? srcIter.next() : null;
-        CsvRow tgtHeader = tgtIter.hasNext() ? tgtIter.next() : null;
-
-        if(srcHeader == null || tgtHeader == null) return;
-
-        try(FileOutputStream fos = new FileOutputStream(resultFile);
-            BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8))) {
-
-            fos.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+                // 【核心修复】先创建 BufferedReader，确保文件句柄可被关闭
+                BufferedReader srcBr = FileUtil.getReader(sourceFile, StandardCharsets.UTF_8);
+                BufferedReader tgtBr = FileUtil.getReader(targetFile, StandardCharsets.UTF_8);
+        ) {
+            // 初始化写入器
+            fos.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF}); // BOM
             CsvWriter writer = CsvUtil.getWriter(bw);
-            // 写入表头
             writer.write(new String[]{"Source_Key", "Target_Key", "Diff_Type", "Field_Name", "Source_Value", "Target_Value"});
 
-            int srcKeyIdx = findColIndex(srcHeader, config.getSourceKeyField());
-            int tgtKeyIdx = findColIndex(tgtHeader, config.getTargetKeyField());
+            // 【核心修复】绑定 Reader 到 CsvReader
+            CsvReader srcReader = CsvUtil.getReader(srcBr, csvConfig);
+            CsvReader tgtReader = CsvUtil.getReader(tgtBr, csvConfig);
 
-            if(srcKeyIdx == -1) return;
+            // 【核心修复】调用无参 stream()
+            try(Stream<CsvRow> srcStream = srcReader.stream();
+                Stream<CsvRow> tgtStream = tgtReader.stream()) {
 
-            CsvRow srcRow = srcIter.hasNext() ? srcIter.next() : null;
-            CsvRow tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
+                Iterator<CsvRow> srcIter = srcStream.iterator();
+                Iterator<CsvRow> tgtIter = tgtStream.iterator();
 
-            while(srcRow != null || tgtRow != null) {
-                String srcKey = getNormalizedKey(srcRow, srcKeyIdx);
-                String tgtKey = getNormalizedKey(tgtRow, tgtKeyIdx);
-
-                int compare;
-                if(srcKey == null && tgtKey == null) compare = 0;
-                else if(srcKey == null) compare = 1;
-                else if(tgtKey == null) compare = -1;
-                else compare = srcKey.compareTo(tgtKey);
-
-                if(compare == 0) {
-                    stats.setTotalSource(stats.getTotalSource() + 1);
-                    stats.setTotalTarget(stats.getTotalTarget() + 1);
-                    boolean hasDiff = compareFields(srcRow, tgtRow, srcHeader, tgtHeader, writer, config, stats, srcKey, tgtKey);
-                    if(hasDiff) stats.setDiffCount(stats.getDiffCount() + 1);
-                    srcRow = srcIter.hasNext() ? srcIter.next() : null;
-                    tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
-                } else if(compare < 0) {
-                    stats.setTotalSource(stats.getTotalSource() + 1);
-                    stats.setMissingTarget(stats.getMissingTarget() + 1);
-                    stats.setDiffCount(stats.getDiffCount() + 1);
-                    writeDiff(writer, srcKey, "", "MISSING_IN_TARGET", "-", "Row Exists", "Row Missing", stats);
-                    srcRow = srcIter.hasNext() ? srcIter.next() : null;
-                } else {
-                    stats.setTotalTarget(stats.getTotalTarget() + 1);
-                    stats.setMissingSource(stats.getMissingSource() + 1);
-                    stats.setDiffCount(stats.getDiffCount() + 1);
-                    writeDiff(writer, "", tgtKey, "MISSING_IN_SOURCE", "-", "Row Missing", "Row Exists", stats);
-                    tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
+                if(!srcIter.hasNext() || !tgtIter.hasNext()) {
+                    log.warn("源文件或目标文件为空");
+                    return stats;
                 }
-            }
-            writer.flush();
-        }
-    }
 
-    private void writeCsvRobust(File file, CsvRow header, List<CsvRow> rows) {
-        try(FileOutputStream fos = new FileOutputStream(file);
-            BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8))) {
+                CsvRow srcHeader = srcIter.next();
+                CsvRow tgtHeader = tgtIter.next();
 
-            fos.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
-            CsvWriter writer = CsvUtil.getWriter(bw);
+                int srcKeyIdx = findColIndex(srcHeader, srcKeyField);
+                int tgtKeyIdx = findColIndex(tgtHeader, tgtKeyField);
 
-            // 确保使用 toArray 转为数组写入
-            writer.write(header.getRawList().toArray(new String[0]));
-            for(CsvRow row : rows) {
-                writer.write(row.getRawList().toArray(new String[0]));
-            }
-            writer.flush();
-        } catch(Exception e) {
-            log.error("写入CSV异常", e);
-        }
-    }
+                if(srcKeyIdx == -1) throw new RuntimeException("源文件未找到主键列: " + srcKeyField);
+                if(tgtKeyIdx == -1) throw new RuntimeException("目标文件未找到主键列: " + tgtKeyField);
 
-    // ... (readCsvRobust, cleanHeader, findColIndex, compareFields, findSmartColIndex, getNormalizedKey, isVisuallyEqual, writeDiff 保持不变)
-    // 为了节省篇幅，这里未重复列出所有辅助方法，请保留您原有文件中的这些方法，它们是正确的。
+                CsvRow srcRow = srcIter.hasNext() ? srcIter.next() : null;
+                CsvRow tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
 
-    private List<CsvRow> readCsvRobust(File file) {
-        try {
-            CsvReadConfig config = CsvReadConfig.defaultConfig();
-            config.setFieldSeparator(',');
-            config.setTextDelimiter('\"');
-            List<CsvRow> allRows = CsvUtil.getReader(config).read(FileUtil.getReader(file, StandardCharsets.UTF_8)).getRows();
-            List<CsvRow> validRows = new ArrayList<>();
-            for(CsvRow row : allRows) {
-                if(row != null && row.size() > 0) {
-                    if(row.size() == 1 && StrUtil.isBlank(row.get(0))) continue;
-                    validRows.add(row);
+                // 双指针比对循环
+                while(srcRow != null || tgtRow != null) {
+                    // 1. 进度计算与防抖
+                    processedCount++;
+                    // 防止除以0
+                    int safeTotal = totalRows > 0 ? totalRows : 1;
+
+                    // 计算当前算法阶段的进度 (0-60)
+                    int currentAlgoStep = (int) Math.min(MAX_ALGO_PROGRESS, (processedCount * MAX_ALGO_PROGRESS) / safeTotal);
+                    int totalProgress = BASE_PROGRESS + currentAlgoStep;
+
+                    // 只有进度前进至少 1% 或者是最后一条时，才回调
+                    // 也可以加上时间判断，比如 System.currentTimeMillis()，每秒最多一次
+                    if(totalProgress > lastReportedProgress && totalProgress < 100) {
+                        progressCallback.accept(totalProgress);
+                        lastReportedProgress = totalProgress;
+                    }
+
+                    String sKey = getNormalizedKey(srcRow, srcKeyIdx);
+                    String tKey = getNormalizedKey(tgtRow, tgtKeyIdx);
+
+                    int compare;
+                    if(sKey == null && tKey == null) compare = 0;
+                    else if(sKey == null) compare = 1;
+                    else if(tKey == null) compare = -1;
+                    else compare = sKey.compareTo(tKey);
+
+                    if(compare == 0) {
+                        stats.setTotalSource(stats.getTotalSource() + 1);
+                        stats.setTotalTarget(stats.getTotalTarget() + 1);
+                        boolean hasDiff = compareFields(srcRow, tgtRow, srcHeader, tgtHeader, writer, config, stats, sKey, tKey);
+                        if(hasDiff) stats.setDiffCount(stats.getDiffCount() + 1);
+                        srcRow = srcIter.hasNext() ? srcIter.next() : null;
+                        tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
+                    } else if(compare < 0) {
+                        stats.setTotalSource(stats.getTotalSource() + 1);
+                        stats.setMissingTarget(stats.getMissingTarget() + 1);
+                        stats.setDiffCount(stats.getDiffCount() + 1);
+                        writeDiff(writer, sKey, "", "MISSING_IN_TARGET", "-", "Row Exists", "Row Missing", stats);
+                        srcRow = srcIter.hasNext() ? srcIter.next() : null;
+                    } else {
+                        stats.setTotalTarget(stats.getTotalTarget() + 1);
+                        stats.setMissingSource(stats.getMissingSource() + 1);
+                        stats.setDiffCount(stats.getDiffCount() + 1);
+                        writeDiff(writer, "", tKey, "MISSING_IN_SOURCE", "-", "Row Missing", "Row Exists", stats);
+                        tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
+                    }
                 }
+                writer.flush();
+                // 确保最后是 100% (或者由 Service 层设置 FINISHED 状态来覆盖)
+                progressCallback.accept(99);
             }
-            return validRows;
         } catch(Exception e) {
-            log.error("读取CSV异常", e);
-            return new ArrayList<>();
+            log.error("比对异常", e);
+            throw new RuntimeException("比对失败: " + e.getMessage(), e);
         }
-    }
-
-    private String cleanHeader(String header) {
-        if(header == null) return "";
-        return header.replace("\uFEFF", "").replace("\"", "").trim();
+        return stats;
     }
 
     private int findColIndex(CsvRow header, String colName) {
@@ -204,19 +171,36 @@ public class SfReconcileAlgorithm {
         return -1;
     }
 
+    private String cleanHeader(String header) {
+        if(header == null) return "";
+        return header.replace("\uFEFF", "").replace("\"", "").trim();
+    }
+
+    private String getNormalizedKey(CsvRow row, int index) {
+        if(row == null || index == -1 || index >= row.size()) return null;
+        String val = row.get(index);
+        if(val == null) return null;
+        val = StrUtil.trim(val);
+        if(val.length() == 18 && val.startsWith("00")) return val.substring(0, 15);
+        return val;
+    }
+
     private boolean compareFields(CsvRow src, CsvRow tgt, CsvRow srcHeader, CsvRow tgtHeader,
                                   CsvWriter writer, SfDataObjConfig config, ReconcileStats stats,
                                   String srcKey, String tgtKey) {
         boolean hasDiff = false;
-        if(srcHeader == null || tgtHeader == null) return false;
+        String srcKeyName = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
+
         for(int i = 0; i < srcHeader.size(); i++) {
-            if(srcHeader.get(i) == null) continue;
             String fieldName = cleanHeader(srcHeader.get(i));
-            if(fieldName.equalsIgnoreCase(config.getSourceKeyField())) continue;
+            if(fieldName.equalsIgnoreCase(srcKeyName)) continue;
+
             int tgtIdx = findSmartColIndex(tgtHeader, fieldName, config.getTargetKeyField());
+
             if(tgtIdx != -1) {
                 String sVal = src.get(i);
-                String tVal = tgt.get(tgtIdx);
+                String tVal = tgt.size() > tgtIdx ? tgt.get(tgtIdx) : "";
+
                 if(!isVisuallyEqual(sVal, tVal)) {
                     writeDiff(writer, srcKey, tgtKey, "VALUE_DIFF", fieldName, sVal, tVal, stats);
                     hasDiff = true;
@@ -229,26 +213,17 @@ public class SfReconcileAlgorithm {
     private int findSmartColIndex(CsvRow header, String colName, String targetKeyField) {
         int idx = findColIndex(header, colName);
         if(idx != -1) return idx;
-        if(targetKeyField == null) targetKeyField = "Source_Org_Id__c";
         if(colName.endsWith("Id") || colName.endsWith("__c")) {
             String relName = null;
             if(colName.endsWith("__c")) relName = colName.substring(0, colName.length() - 3) + "__r";
             else if(colName.endsWith("Id")) relName = colName.substring(0, colName.length() - 2);
+
             if(relName != null) {
-                String targetColName = relName + "." + targetKeyField;
+                String targetColName = relName + ".Source_Org_Id__c";
                 idx = findColIndex(header, targetColName);
             }
         }
         return idx;
-    }
-
-    private String getNormalizedKey(CsvRow row, int index) {
-        if(index == -1 || row == null) return null;
-        String val = row.get(index);
-        if(val == null) return null;
-        val = StrUtil.trim(val);
-        if(val.length() == 18 && val.startsWith("00")) return val.substring(0, 15);
-        return val;
     }
 
     private boolean isVisuallyEqual(String v1, String v2) {
@@ -273,8 +248,8 @@ public class SfReconcileAlgorithm {
     }
 
     private void writeDiff(CsvWriter writer, String sKey, String tKey, String type, String field, String sVal, String tVal, ReconcileStats stats) {
-        String safeS = sVal == null ? "" : StrUtil.sub(sVal, 0, 2000);
-        String safeT = tVal == null ? "" : StrUtil.sub(tVal, 0, 2000);
+        String safeS = sVal == null ? "" : StrUtil.sub(sVal, 0, 3000);
+        String safeT = tVal == null ? "" : StrUtil.sub(tVal, 0, 3000);
         String safeField = field == null ? "" : field;
         writer.write(new String[]{sKey, tKey, type, safeField, safeS, safeT});
     }

@@ -1,15 +1,11 @@
 package com.ruoyi.salesforce.service.impl;
 
 import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.text.csv.CsvReadConfig;
-import cn.hutool.core.text.csv.CsvRow;
-import cn.hutool.core.text.csv.CsvUtil;
 import cn.hutool.core.util.IdUtil;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.TypeReference;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.*;
 import com.ruoyi.salesforce.mapper.*;
@@ -21,14 +17,16 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 /**
- * Salesforce 数据比对核心执行引擎 (最终修正版)
- * 逻辑：Waiting队列 -> 逐个执行 -> 动态字段获取(含排除逻辑) -> 独立结果文件
+ * Salesforce 数据比对核心执行引擎 (多线程并发完整版)
+ * 特性：
+ * 1. 支持通过 job.concurrentLimit 控制并发数
+ * 2. 线程安全的任务分发与状态汇总
+ * 3. 细粒度的停止检查
  */
 @Slf4j
 @Service
@@ -50,7 +48,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     @Autowired
     private ISfDescribeApiService describeApiService;
 
-    // 运行标志位 (JobId -> Boolean)
+    // 运行标志位 (JobId -> Boolean)，用于控制停止
     private static final Map<Long, Boolean> runningFlags = new ConcurrentHashMap<>();
 
     @Override
@@ -62,7 +60,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     }
 
     /**
-     * 核心入口：异步执行比对任务
+     * 核心入口：异步执行比对任务 (多线程调度)
      */
     @Async
     @Override
@@ -77,7 +75,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         runLog.setStatus("RUNNING");
         runLogMapper.insert(runLog);
 
-        // 2. 获取所有启用的对象配置
+        // 2. 获取配置
         List<SfDataObjConfig> configs = configMapper.selectList(new LambdaQueryWrapper<SfDataObjConfig>()
                 .eq(SfDataObjConfig::getJobId, jobId)
                 .eq(SfDataObjConfig::getIsActive, "Y"));
@@ -87,7 +85,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             return;
         }
 
-        // 3. 预生成所有对象的 WAITING 日志
+        // 3. 预生成所有 WAITING 日志
         List<SfDataRunObjLog> queue = new ArrayList<>();
         for(SfDataObjConfig config : configs) {
             SfDataRunObjLog objLog = new SfDataRunObjLog();
@@ -101,76 +99,166 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             queue.add(objLog);
         }
 
-        // 标记任务开始
+        // 标记开始
         runningFlags.put(jobId, true);
         job.setStatus("RUNNING");
         jobMapper.updateById(job);
-        publishProgress(jobId, null, "INIT", "任务已启动，等待执行...", 0);
+        publishProgress(jobId, null, "INIT", "任务启动，准备并发执行...", 0);
+
+        // 4. --- 多线程执行核心逻辑 Start ---
+
+        // 获取并发数，默认为 3，最大防爆设为 10
+        int threads = job.getConcurrentLimit() != null && job.getConcurrentLimit() > 0 ? job.getConcurrentLimit() : 3;
+        if(threads > 10) threads = 10;
+
+        log.info("任务 [{}] 启动并发执行，线程池大小: {}", jobId, threads);
+
+        // 创建线程池
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
 
         try {
-            // 4. 顺序执行每个对象
-            for(SfDataRunObjLog objLog : queue) {
-                // 检查停止标志
-                if(!runningFlags.containsKey(jobId)) {
-                    updateObjLogStatus(objLog, "ABORTED", "用户手动停止", 0);
-                    continue;
-                }
+            // 使用 CountDownLatch 等待所有子任务完成
+            CountDownLatch latch = new CountDownLatch(queue.size());
 
-                // 执行核心逻辑
-                executeObjectLog(job, objLog);
+            for(SfDataRunObjLog objLog : queue) {
+                // 提交任务到线程池
+                executor.submit(() -> {
+                    try {
+                        // 双重检查停止标志
+                        if(!isRunning(jobId)) {
+                            updateObjLogStatus(objLog, "ABORTED", "用户手动停止", 0);
+                        } else {
+                            executeObjectLog(job, objLog);
+                        }
+                    } catch(Exception e) {
+                        log.error("子线程执行异常", e);
+                        updateObjLogStatus(objLog, "FAILED", "系统异常: " + e.getMessage(), 0);
+                    } finally {
+                        latch.countDown(); // 无论成功失败，计数器减一
+                    }
+                });
             }
 
-            // 5. 汇总结果
-            Long failedCount = objLogMapper.selectCount(new LambdaQueryWrapper<SfDataRunObjLog>()
-                    .eq(SfDataRunObjLog::getRunLogId, runLog.getId())
-                    .eq(SfDataRunObjLog::getStatus, "FAILED"));
+            // 主线程在此阻塞，直到所有子任务完成
+            latch.await();
 
-            String finalStatus = failedCount > 0 ? "PARTIAL_SUCCESS" : "FINISHED";
-            finishRunLog(runLog, job, finalStatus, null);
-
-        } catch(Exception e) {
-            log.error("任务执行发生未捕获异常", e);
-            finishRunLog(runLog, job, "FAILED", e.getMessage());
+        } catch(InterruptedException e) {
+            log.error("主线程被中断", e);
+            Thread.currentThread().interrupt();
         } finally {
-            runningFlags.remove(jobId);
+            // 关闭线程池
+            executor.shutdown();
+            runningFlags.remove(jobId); // 清理标志位
         }
+        // --- 多线程执行核心逻辑 End ---
+
+        // 5. 汇总结果
+        Long failedCount = objLogMapper.selectCount(new LambdaQueryWrapper<SfDataRunObjLog>()
+                .eq(SfDataRunObjLog::getRunLogId, runLog.getId())
+                .eq(SfDataRunObjLog::getStatus, "FAILED"));
+
+        Long abortedCount = objLogMapper.selectCount(new LambdaQueryWrapper<SfDataRunObjLog>()
+                .eq(SfDataRunObjLog::getRunLogId, runLog.getId())
+                .eq(SfDataRunObjLog::getStatus, "ABORTED"));
+
+        String finalStatus = "FINISHED";
+        if(failedCount > 0) finalStatus = "PARTIAL_SUCCESS";
+        if(abortedCount > 0 && failedCount == 0) finalStatus = "FINISHED"; // 停止也算完成的一种
+
+        finishRunLog(runLog, job, finalStatus, null);
     }
 
     /**
-     * 单个对象的执行逻辑
+     * 单个对象的执行逻辑 (增加停止检查点)
      */
     private void executeObjectLog(SfDataJob job, SfDataRunObjLog objLog) {
         try {
             updateObjLogStatus(objLog, "RUNNING", "正在初始化...", 5);
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "初始化配置...", 5);
 
+            if(!isRunning(job.getId())) {
+                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
+                return;
+            }
+
             SfDataObjConfig config = configMapper.selectById(objLog.getObjConfigId());
 
-            // 1. 动态构建 SOQL (核心：全量字段 - 排除字段 + 关联映射)
-            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config);
-            // 目标环境目前假设结构相同，或者根据需求传入 targetOrgId
-            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config);
+            // 1. 构建 SOQL (含 ORDER BY)
+            String srcKey = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
+            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey); // 传入 Key
+
+            String tgtKey = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
+            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey); // 传入 Key
+
+            if(!isRunning(job.getId())) {
+                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
+                return;
+            }
 
             // 2. 下载源数据
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "下载源数据...", 20);
             String srcJobId = bulkApiService.submitQueryJob(job.getSourceOrgId(), srcSoql);
             waitForJob(job.getSourceOrgId(), srcJobId);
+
+            // 【新增】获取源数据行数
+            int srcRows = bulkApiService.getJobRecordCount(job.getSourceOrgId(), srcJobId);
+
+            // 再次检查停止 (避免下载大文件浪费时间)
+            if(!isRunning(job.getId())) {
+                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
+                return;
+            }
+
             String srcPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_src.csv";
             File srcFile = bulkApiService.downloadResult(job.getSourceOrgId(), srcJobId, srcPath);
 
             // 3. 下载目标数据
-            publishProgress(job.getId(), objLog.getId(), "RUNNING", "下载目标数据...", 40);
+            publishProgress(job.getId(), objLog.getId(), "RUNNING", "下载目标数据...", 25);
             String tgtJobId = bulkApiService.submitQueryJob(job.getTargetOrgId(), tgtSoql);
             waitForJob(job.getTargetOrgId(), tgtJobId);
+
+            // 【新增】获取目标数据行数
+            int tgtRows = bulkApiService.getJobRecordCount(job.getTargetOrgId(), tgtJobId);
+
+            if(!isRunning(job.getId())) {
+                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
+                return;
+            }
+
             String tgtPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_tgt.csv";
             File tgtFile = bulkApiService.downloadResult(job.getTargetOrgId(), tgtJobId, tgtPath);
 
-            // 4. 执行比对算法
+            // 4. 执行比对
+            if(!isRunning(job.getId())) {
+                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
+                return;
+            }
+
+            // 计算总预估行数 (算法里会用这个作为分母)
+            int totalEstimatedRows = srcRows + tgtRows;
+
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "执行比对算法...", 70);
             String resPath = "/tmp/sf_reconcile/res_" + objLog.getId() + ".csv";
             File resFile = new File(resPath);
 
-            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resFile, config);
+            // 【核心修改】定义进度回调函数
+            // 使用 synchronized 或者 Atomic 变量并不是必须的，因为 executeObjectLog 是单线程跑一个对象
+            // 但是为了防止数据库写入太频繁，我们可以在这里做二层防抖（或者 Algorithm 里做）
+            // Algorithm 里已经做了 1% 的阈值判断，这里直接处理即可
+            java.util.function.Consumer<Integer> progressCallback = (pct) -> {
+                // 只有还在运行才推送
+                if (isRunning(job.getId())) {
+                    // 更新数据库 (可选：如果觉得太频繁，可以只推 WebSocket，不更 DB)
+                     objLog.setProgress(pct);
+                     objLogMapper.updateById(objLog);
+
+                    // 推送 WebSocket (这是给用户看的，必须实时)
+                    publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在比对中...", pct);
+                }
+            };
+
+            // 传入 totalRows 和 callback
+            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resFile, config, totalEstimatedRows, progressCallback);
 
             // 5. 保存结果
             objLog.setTotalSource(stats.getTotalSource());
@@ -192,21 +280,18 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         }
     }
 
+    // 辅助方法：检查任务是否还在运行
+    private boolean isRunning(Long jobId) {
+        return runningFlags.containsKey(jobId);
+    }
+
     /**
-     * 动态构建 SOQL
-     * 逻辑：
-     * 1. 调接口获取该对象所有字段。
-     * 2. 解析 excludedFields，剔除黑名单字段。
-     * 3. 解析 mappingConfig (JSON)，处理关联字段映射。
-     * 4. 拼接 SELECT 语句。
+     * 动态构建 SOQL (含排序)
      */
-    /**
-     * 动态构建 SOQL
-     */
-    private String buildDynamicSoql(Long orgId, SfDataObjConfig config) {
+    private String buildDynamicSoql(Long orgId, SfDataObjConfig config, String keyField) {
         String objectName = config.getObjectName();
 
-        // A. 获取元数据
+        // 获取元数据
         List<Map<String, Object>> fieldsMeta;
         try {
             fieldsMeta = describeApiService.getSObjectFields(orgId, objectName);
@@ -214,31 +299,25 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             throw new RuntimeException("获取元数据失败: " + e.getMessage());
         }
 
-        // B. 解析 excludedFields
         Set<String> excludedSet = new HashSet<>();
         if(StringUtils.isNotEmpty(config.getExcludedFields())) {
             excludedSet.addAll(Arrays.asList(config.getExcludedFields().split(",")));
         }
 
-        // C. 解析 mappingConfig (核心修复点)
-        // 前端存的是: {"OwnerId": {"targetPath": "Owner.Source_Org_Id__c", ...}}
-        // 所以这里要解析成 Map<String, JSONObject>
         Map<String, JSONObject> relationMap = new HashMap<>();
         if(StringUtils.isNotEmpty(config.getMappingConfig())) {
             try {
-                // 【修复】使用 JSONObject 接收复杂结构
                 relationMap = JSON.parseObject(config.getMappingConfig(), new TypeReference<Map<String, JSONObject>>() {
                 });
             } catch(Exception e) {
-                log.warn("MappingConfig 解析失败: {}", config.getMappingConfig());
             }
         }
 
-        // D. 构建查询字段
         Set<String> queryFields = new LinkedHashSet<>();
 
-        String keyField = StringUtils.isEmpty(config.getSourceKeyField()) ? "Id" : config.getSourceKeyField();
-        queryFields.add(keyField);
+        // 确保 KeyField 存在
+        String effectiveKeyField = StringUtils.isEmpty(keyField) ? "Id" : keyField;
+        queryFields.add(effectiveKeyField);
 
         for(Map<String, Object> field : fieldsMeta) {
             String apiName = (String) field.get("name");
@@ -247,25 +326,19 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             if(excludedSet.contains(apiName)) continue;
             if("base64".equalsIgnoreCase(type) || "address".equalsIgnoreCase(type)) continue;
 
-            // 处理关联字段
             if("reference".equalsIgnoreCase(type) && relationMap.containsKey(apiName)) {
-                // 【修复】从 JSONObject 中提取 targetPath
                 JSONObject mappingObj = relationMap.get(apiName);
                 if(mappingObj != null && mappingObj.containsKey("targetPath")) {
-                    // 前端存的 targetPath 已经是完整路径 (例如 Owner.Source_Org_Id__c)
-                    // 所以这里直接添加，不需要再拼 relationshipName
                     String targetPath = mappingObj.getString("targetPath");
                     queryFields.add(targetPath);
                 } else {
-                    queryFields.add(apiName); // 降级处理
+                    queryFields.add(apiName);
                 }
             } else {
                 queryFields.add(apiName);
             }
         }
 
-        // E. 拼接 SQL
-        // 【建议】打印一下生成的 SQL 以便调试
         StringBuilder sb = new StringBuilder("SELECT ");
         sb.append(String.join(", ", queryFields));
         sb.append(" FROM ").append(objectName);
@@ -273,9 +346,14 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             sb.append(" WHERE ").append(config.getSyncFilterLogic());
         }
 
-        String finalSoql = sb.toString();
-        log.info("生成对象 [{}] 的 SOQL: {}", objectName, finalSoql); // 添加日志方便排查
+        // 强制排序：ORDER BY Key ASC, Id ASC
+        sb.append(" ORDER BY ").append(effectiveKeyField).append(" ASC");
+        if(!"Id".equalsIgnoreCase(effectiveKeyField)) {
+            sb.append(", Id ASC");
+        }
 
+        String finalSoql = sb.toString();
+        log.info("生成对象 [{}] 的 SOQL: {}", objectName, finalSoql);
         return finalSoql;
     }
 
@@ -301,17 +379,30 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         publishProgress(job.getId(), null, "ALL_FINISHED", "任务结束", 100);
     }
 
+    /**
+     * 等待 Bulk Job 完成 (详细实现)
+     */
     private void waitForJob(Long orgId, String jobId) throws InterruptedException {
-        for(int i = 0; i < 180; i++) { // 最多等 6分钟
+        // 轮询 180 次，每次 2 秒，共 6 分钟
+        for(int i = 0; i < 180; i++) {
             String state = bulkApiService.checkJobStatus(orgId, jobId);
-            if("JobComplete".equals(state)) return;
+
+            // 成功
+            if("JobComplete".equals(state)) {
+                return;
+            }
+
+            // 失败或终止
             if("Failed".equals(state) || "Aborted".equals(state)) {
                 String error = bulkApiService.getErrorMessage(orgId, jobId);
                 throw new RuntimeException("Bulk Job Error: " + error);
             }
+
+            // 等待下一次轮询
             Thread.sleep(2000);
         }
-        throw new RuntimeException("Bulk Job Timeout");
+        // 超时抛出异常
+        throw new RuntimeException("Bulk Job Timeout (6 min limit)");
     }
 
     private void publishProgress(Long jobId, Long objLogId, String status, String msg, int percent) {
@@ -322,14 +413,11 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         json.put("status", status);
         json.put("message", msg);
         json.put("percent", percent);
-
-        // 关键：Key 必须是 "reconcile_" + jobId
-        // 确保 jobId 转为 String，否则可能拼接出错
         DeployWebSocketServer.sendMessage("reconcile_" + jobId, json.toJSONString());
     }
 
     /**
-     * 新增：重试单个对象
+     * 重试单个对象 (完整实现)
      */
     @Async
     @Override
@@ -356,11 +444,13 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         // 2. 立即推送 "WAITING" 状态 (确保 JobId 正确)
         publishProgress(job.getId(), objLog.getId(), "WAITING", "进入重试队列...", 0);
 
-        // 3. 设置运行标志 (防止被拦截)
+        // 3. 设置运行标志 (防止被 executeObjectLog 中的 isRunning 拦截)
         runningFlags.put(job.getId(), true);
 
         try {
+            // 稍作停顿确保前端收到 WAITING 消息
             Thread.sleep(100);
+
             // 4. 执行核心逻辑
             // executeObjectLog 内部会推送 RUNNING (5%) -> ... -> FINISHED (100%)
             executeObjectLog(job, objLog);
@@ -371,5 +461,4 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             publishProgress(job.getId(), objLog.getId(), "FAILED", "执行异常", 0);
         }
     }
-
 }
