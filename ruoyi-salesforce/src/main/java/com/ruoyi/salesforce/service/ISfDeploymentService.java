@@ -65,4 +65,6 @@ public interface ISfDeploymentService extends IService<SfDeployment> {
      * 【新增】取消部署任务
      */
     void cancelDeploymentTask(Long deploymentId);
+
+    void executeRollback(Long originalHistoryId);
 }

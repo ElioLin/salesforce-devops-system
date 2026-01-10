@@ -126,3 +126,30 @@ export function cancelDeployment(deploymentId) {
     method: 'post'
   })
 }
+
+// 【新增】获取部署历史列表
+export function listDeploymentHistory(deploymentId) {
+  return request({
+    url: '/salesforce/deployment/history/list/' + deploymentId,
+    method: 'get'
+  })
+}
+
+// 【新增】获取某次历史的变更明细
+export function getDeploymentHistoryDetails(historyId) {
+  return request({
+    url: '/salesforce/deployment/history/' + historyId + '/details',
+    method: 'get'
+  })
+}
+
+// 【新增】执行回滚
+export function rollbackDeployment(historyId) {
+  return request({
+    url: '/salesforce/deployment/rollback/' + historyId,
+    method: 'post'
+  })
+}
+
+// 【新增】下载备份文件 (通用下载方法通常直接用 axios 或 request 配置 responseType)
+// 这里我们复用通用的下载逻辑，但在 methods 里调用

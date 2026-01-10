@@ -93,7 +93,7 @@
                         <span class="title">
                             <i class="el-icon-collection"></i> 元数据处理
                             <el-tag size="mini" effect="plain" class="ml-10" v-if="compStateText">{{ compStateText
-                            }}</el-tag>
+                                }}</el-tag>
                         </span>
                         <span class="count" v-if="compTotal > 0">{{ compDone }} / {{ compTotal }}</span>
                     </div>
@@ -138,7 +138,7 @@
         </el-card>
 
         <el-card shadow="never" class="tabs-card">
-            <el-tabs v-model="activeTab" type="card">
+            <el-tabs v-model="activeTab" type="card" @tab-click="handleTabClick">
                 <el-tab-pane name="selected">
                     <span slot="label">
                         <i class="el-icon-folder-checked"></i> 已添加元数据
@@ -149,7 +149,8 @@
                     <div class="list-header clearfix mb-10">
                         <div class="left-panel">
                             <el-tag size="small" type="info" effect="plain" class="count-tag">
-                                当前筛选总条数: <b class="text-primary">{{ filteredItemList.length }}</b> / 总共: {{ itemList.length
+                                当前筛选总条数: <b class="text-primary">{{ filteredItemList.length }}</b> / 总共: {{
+                                    itemList.length
                                 }}
                             </el-tag>
                         </div>
@@ -275,6 +276,64 @@
                         @auto-action="handleBrowserAction" @view-code="handleBrowserViewCode"
                         @diff-code="handleBrowserDiffCode" />
                 </el-tab-pane>
+
+                <el-tab-pane name="history">
+                    <span slot="label"><i class="el-icon-time"></i> 部署历史 & 审计</span>
+
+                    <div class="mb-10 text-right">
+                        <el-button icon="el-icon-refresh" size="mini" @click="getHistoryList">刷新日志</el-button>
+                    </div>
+
+                    <el-table v-loading="historyLoading" :data="historyList" border stripe style="width: 100%">
+                        <el-table-column prop="startTime" label="执行时间" width="160" align="center">
+                            <template slot-scope="scope">
+                                {{ parseTime(scope.row.startTime) }}
+                            </template>
+                        </el-table-column>
+                        <el-table-column prop="startTime" label="结束时间" width="160" align="center">
+                            <template slot-scope="scope">
+                                {{ parseTime(scope.row.endTime) }}
+                            </template>
+                        </el-table-column>
+                        <el-table-column prop="type" label="操作类型" width="100" align="center">
+                            <template slot-scope="scope">
+                                <el-tag v-if="scope.row.type === 'Validate'" type="warning" effect="plain">仅验证</el-tag>
+                                <el-tag v-else-if="scope.row.type === 'Deploy'" type="primary"
+                                    effect="plain">完整部署</el-tag>
+                                <el-tag v-else-if="scope.row.type === 'Quick'" type="success"
+                                    effect="plain">快速部署</el-tag>
+                                <el-tag v-else-if="scope.row.type === 'Rollback'" type="danger"
+                                    effect="dark">回滚操作</el-tag>
+                                <span v-else>{{ scope.row.type }}</span>
+                            </template>
+                        </el-table-column>
+
+                        <el-table-column prop="status" label="最终状态" width="100" align="center">
+                            <template slot-scope="scope">
+                                <el-tag :type="statusType(scope.row.status)" size="small">{{ scope.row.status
+                                }}</el-tag>
+                            </template>
+                        </el-table-column>
+
+                        <el-table-column prop="createBy" label="执行人" width="120" align="center" />
+
+                        <el-table-column prop="errorMsg" label="结果/备注" show-overflow-tooltip min-width="200" />
+
+                        <el-table-column label="操作" width="220" align="center" fixed="right">
+                            <template slot-scope="scope">
+                                <el-button size="mini" type="text" icon="el-icon-document"
+                                    @click="handleViewHistoryDetail(scope.row)">明细</el-button>
+
+                                <el-button size="mini" type="text" icon="el-icon-download" v-if="scope.row.backupPath"
+                                    @click="handleDownloadBackup(scope.row)">下载备份</el-button>
+
+                                <el-button size="mini" type="text" icon="el-icon-refresh-left" class="text-danger"
+                                    v-if="canRollback(scope.row)" :disabled="isProcessing"
+                                    @click="handleRollback(scope.row)">回滚</el-button>
+                            </template>
+                        </el-table-column>
+                    </el-table>
+                </el-tab-pane>
             </el-tabs>
         </el-card>
 
@@ -324,6 +383,22 @@
             </div>
         </el-dialog>
 
+        <el-dialog title="部署变更明细" :visible.sync="historyDetailDialog.open" width="70%" append-to-body>
+            <el-table :data="historyDetailDialog.list" border stripe height="500">
+                <el-table-column prop="metadataType" label="元数据类型" width="180" />
+                <el-table-column prop="memberName" label="名称" />
+                <el-table-column prop="action" label="变更动作" width="120" align="center">
+                    <template slot-scope="scope">
+                        <el-tag v-if="scope.row.action === 'CREATE'" type="success">新增 (Create)</el-tag>
+                        <el-tag v-else-if="scope.row.action === 'UPDATE'" type="warning">修改 (Update)</el-tag>
+                        <el-tag v-else type="info">无变更</el-tag>
+                    </template>
+                </el-table-column>
+            </el-table>
+            <div slot="footer" class="dialog-footer">
+                <el-button @click="historyDetailDialog.open = false">关 闭</el-button>
+            </div>
+        </el-dialog>
     </div>
 </template>
 
@@ -339,7 +414,10 @@ import {
     checkDiffStatus,
     updateDeployment,
     previewDeploymentPackage,
-    cancelDeployment
+    cancelDeployment,
+    listDeploymentHistory,     
+    getDeploymentHistoryDetails, 
+    rollbackDeployment,        
 } from "@/api/salesforce/deployment";
 import { listOrg } from "@/api/salesforce/org";
 import MetadataBrowser from "@/views/salesforce/org/MetadataBrowser";
@@ -445,6 +523,12 @@ export default {
                 pageNum: 1,
                 pageSize: 20, // 默认每页显示20条，减少渲染压力
                 total: 0
+            },
+            historyList: [],
+            historyLoading: false,
+            historyDetailDialog: {
+                open: false,
+                list: []
             }
         };
     },
@@ -628,7 +712,7 @@ export default {
         handleCurrentChange(val) {
             this.pagination.pageNum = val;
             // 翻页后自动滚动到表格顶部（可选体验优化）
-            document.querySelector('.el-table__body-wrapper').scrollTop = 0; 
+            document.querySelector('.el-table__body-wrapper').scrollTop = 0;
         },
         initData() {
             this.loading = true;
@@ -1260,6 +1344,118 @@ export default {
                 status: ''
             };
             this.$modal.msgSuccess("筛选条件已重置");
+        },
+        /**
+         * 【新增】获取部署历史
+         */
+         getHistoryList() {
+            if (!this.deploymentId) return;
+            this.historyLoading = true;
+            listDeploymentHistory(this.deploymentId).then(res => {
+                this.historyList = res.data || [];
+                this.historyLoading = false;
+            }).catch(() => {
+                this.historyLoading = false;
+            });
+        },
+
+        /**
+         * 【新增】监听 Tab 切换，点到历史 Tab 时自动加载
+         * 需要在 <el-tabs> 上加 @tab-click="handleTabClick"
+         */
+        // 注意：请去 template 里的 el-tabs 标签加上 @tab-click="handleTabClick"
+        handleTabClick(tab) {
+            if (tab.name === 'history') {
+                this.getHistoryList();
+            }
+        },
+
+        /**
+         * 【新增】判断是否可以回滚
+         * 规则：必须是 Deploy/Quick/Rollback 类型，且状态是 Succeeded，且有备份路径
+         */
+        canRollback(row) {
+            const validTypes = ['Deploy', 'Quick', 'Rollback'];
+            return validTypes.includes(row.type) && 
+                   row.status === 'Succeeded' && 
+                   row.backupPath;
+        },
+
+        /**
+         * 【新增】查看历史明细
+         */
+        handleViewHistoryDetail(row) {
+            this.historyDetailDialog.open = true;
+            this.historyDetailDialog.list = [];
+            getDeploymentHistoryDetails(row.id).then(res => {
+                this.historyDetailDialog.list = res.data || [];
+            });
+        },
+
+        /**
+         * 【新增】下载备份文件
+         */
+        handleDownloadBackup(row) {
+            const fileName = `backup_${this.deploymentId}_${row.id}.zip`;
+            this.$modal.msgSuccess("正在请求下载备份文件...");
+            
+            // 使用通用下载 request，注意 URL 需要后端对应 Controller 支持
+            // 假设后端接口为 /salesforce/deployment/history/download/{historyId}
+            request({
+                url: '/salesforce/deployment/history/download/' + row.id,
+                method: 'post',
+                responseType: 'blob'
+            }).then((res) => {
+                const blob = new Blob([res]);
+                const link = document.createElement('a');
+                link.href = window.URL.createObjectURL(blob);
+                link.download = fileName;
+                link.click();
+            }).catch(error => {
+                this.$modal.msgError("下载备份失败");
+            });
+        },
+
+        /**
+         * 【新增】执行回滚操作
+         */
+        handleRollback(row) {
+            const confirmMsg = `
+                <p>确定要回滚这条部署记录吗？</p>
+                <ul style="text-align:left;color:#606266;font-size:13px">
+                    <li>执行时间：${this.parseTime(row.startTime)}</li>
+                    <li>操作类型：${row.type}</li>
+                </ul>
+                <p style="color:#F56C6C;font-weight:bold">警告：</p>
+                <p style="color:#F56C6C;font-size:12px">
+                    1. 将使用备份文件还原所有被修改(UPDATE)的元数据。<br/>
+                    2. 将永久删除本次部署新增(CREATE)的元数据。<br/>
+                    3. 此操作不可逆！
+                </p>
+            `;
+
+            this.$confirm(confirmMsg, '危险操作：回滚', {
+                confirmButtonText: '确定回滚',
+                cancelButtonText: '取消',
+                type: 'warning',
+                dangerouslyUseHTMLString: true,
+                confirmButtonClass: 'el-button--danger'
+            }).then(() => {
+                this.deploying = true; // 复用部署中的 loading 状态
+                this.resetProgress();
+                this.compStateText = "正在准备回滚包...";
+                
+                rollbackDeployment(row.id).then(res => {
+                    this.$modal.msgSuccess("回滚请求已发送，开始执行...");
+                    // 重新连接 Socket 进行监控，因为回滚本质上是一个新的部署任务
+                    this.initWebSocket();
+                    // 切换回详情 Tab 看进度
+                    // this.activeTab = 'selected'; // 可选：是否跳回主页看进度条
+                }).catch(err => {
+                    this.deploying = false;
+                    this.$modal.msgError("回滚启动失败: " + err.msg);
+                });
+            });
         }
     }
 };

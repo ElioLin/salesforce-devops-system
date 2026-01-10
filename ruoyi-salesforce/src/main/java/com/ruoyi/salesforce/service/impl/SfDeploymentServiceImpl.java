@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.SfDeployment;
+import com.ruoyi.salesforce.domain.SfDeploymentHistory;
 import com.ruoyi.salesforce.domain.SfDeploymentItem;
 import com.ruoyi.salesforce.mapper.SfDeploymentItemMapper;
 import com.ruoyi.salesforce.mapper.SfDeploymentMapper;
@@ -49,6 +50,14 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
     @Autowired
     private ISfMetadataService sfMetadataService;
+
+    @Autowired
+    private SfBackupService backupService;
+    @Autowired
+    private SfHistoryService historyService;
+
+    @Autowired
+    private SfRollbackService rollbackService;
 
     // ================== 基础 CRUD ==================
 
@@ -239,52 +248,110 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         });
     }
 
+    // =================================================================
+    // 【优化】统一部署入口：普通部署调用此方法
+    // =================================================================
     private void processAsyncDeployment(SfDeployment deployment, List<SfDeploymentItem> items, boolean checkOnly) {
-        // 定义变量以便在 catch 块中访问
+        // 调用重载的核心方法，rollbackFromHistoryId 传 null
+        processAsyncDeploymentCore(deployment, items, checkOnly, null);
+    }
+
+    // =================================================================
+    // 【核心重构】通用的异步部署处理方法 (支持 普通部署、验证、回滚)
+    // =================================================================
+    private void processAsyncDeploymentCore(SfDeployment deployment, List<SfDeploymentItem> items,
+                                            boolean checkOnly, Long rollbackFromHistoryId) {
+
+        // 标记变量
+        boolean isRollback = (rollbackFromHistoryId != null);
+        String deployType = isRollback ? "Rollback" : (checkOnly ? "Validate" : "Deploy");
+
+        // 1. 初始化历史记录
+        SfDeploymentHistory history = historyService.initHistory(deployment.getId(), deployment.getTargetOrgId(), deployType);
+
+        SfBackupService.BackupResult backupResult = null;
         String newAsyncId = null;
+
         try {
+            // [检查点]
             checkInterrupted(deployment.getId());
 
-            // 推送 WS 消息：开始准备
-            DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在提取代码..."));
-            com.sforce.soap.metadata.Package manifest = generateManifestObject(items);
+            byte[] zipBytes = null;
 
-            // 【检查点 2】 在去 Salesforce 提取代码之前
-            checkInterrupted(deployment.getId());
+            // =========================================================
+            // 分支 A：回滚模式 (生成混合包)
+            // =========================================================
+            if(isRollback) {
+                DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在构建回滚包(混合破坏性变更)..."));
+                log.info("正在生成回滚包，基于历史ID: {}", rollbackFromHistoryId);
+                zipBytes = rollbackService.generateRollbackPackage(rollbackFromHistoryId);
+            }
+            // =========================================================
+            // 分支 B：普通/验证模式 (从源环境拉取)
+            // =========================================================
+            else {
+                // 1. 提取
+                DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在提取代码..."));
+                com.sforce.soap.metadata.Package manifest = generateManifestObject(items);
 
-            log.info("开始提取代码，Org: {}", deployment.getSourceOrgId());
-            byte[] zipBytes = sfMetadataService.retrieveZipByManifest(deployment.getSourceOrgId(), manifest);
+                checkInterrupted(deployment.getId());
 
-            // 【检查点 3】 清洗元数据之前
-            checkInterrupted(deployment.getId());
+                log.info("开始提取代码，Org: {}", deployment.getSourceOrgId());
+                zipBytes = sfMetadataService.retrieveZipByManifest(deployment.getSourceOrgId(), manifest);
 
-            if(zipBytes == null || zipBytes.length == 0) {
-                throw new RuntimeException("提取代码失败：返回的ZIP包为空");
+                checkInterrupted(deployment.getId());
+
+                if(zipBytes == null || zipBytes.length == 0) {
+                    throw new RuntimeException("提取代码失败：返回的ZIP包为空");
+                }
+
+                // 2. 清洗
+                DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在清洗元数据..."));
+                zipBytes = MetadataCleaner.clean(zipBytes, items);
+
+                // 3. 备份 (仅当 不是验证 且 不是回滚 时执行)
+                // 回滚操作本身不应再次触发备份，防止覆盖原有备份或产生脏备份
+                if(!checkOnly) {
+                    try {
+                        DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在备份目标环境..."));
+                        backupResult = backupService.performBackup(deployment.getTargetOrgId(), items);
+                        log.info("备份成功，路径: {}", backupResult.getBackupFilePath());
+                    } catch(Exception e) {
+                        log.error("备份失败", e);
+                        throw new ServiceException("备份失败，为保证安全已终止部署: " + e.getMessage());
+                    }
+                }
             }
 
-            // 清洗元数据
-            log.info("开始清洗元数据...");
-            DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在清洗元数据..."));
-            zipBytes = MetadataCleaner.clean(zipBytes, items);
-            log.info("元数据清洗完成，ZIP大小: {} bytes", zipBytes.length);
-
-            // 【检查点 4】 最关键的一步：在上传到目标环境之前！
-            // 如果此时用户点了取消，我们绝对不应该调用 deploy 方法
+            // [检查点] 上传前最后检查
             checkInterrupted(deployment.getId());
 
-            // 部署
-            log.info("开始部署，Org: {}", deployment.getTargetOrgId());
-            DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在上传至目标环境..."));
+            // =========================================================
+            // 统一上传与部署
+            // =========================================================
+            String actionText = isRollback ? "正在上传回滚包..." : "正在上传至目标环境...";
+            DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", actionText));
+
             MetadataConnection targetConn = sfMetadataService.getMetadataConnection(deployment.getTargetOrgId());
 
             DeployOptions deployOptions = new DeployOptions();
             deployOptions.setPerformRetrieve(false);
-            deployOptions.setRollbackOnError(true);
             deployOptions.setCheckOnly(checkOnly);
 
+            // 如果是回滚，通常建议忽略警告并在出错时回滚
+            if(isRollback) {
+                deployOptions.setRollbackOnError(true);
+                deployOptions.setIgnoreWarnings(true);
+            } else {
+                deployOptions.setRollbackOnError(true);
+                // 普通部署是否忽略警告可根据业务需求，这里保持默认
+            }
+
+            // 处理测试级别 (逻辑通用)
+            // 回滚时也需要遵循原部署包的测试策略 (如生产环境必须跑测试)
             if("RunSpecifiedTests".equals(deployment.getTestLevel())) {
                 deployOptions.setTestLevel(TestLevel.RunSpecifiedTests);
-                if(deployment.getSpecifiedTests() != null) {
+                if(StringUtils.isNotEmpty(deployment.getSpecifiedTests())) {
                     deployOptions.setRunTests(deployment.getSpecifiedTests().split(","));
                 }
             } else if("RunLocalTests".equals(deployment.getTestLevel())) {
@@ -293,38 +360,41 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 deployOptions.setTestLevel(TestLevel.NoTestRun);
             }
 
+            log.info("执行部署/回滚，Org: {}, Option: CheckOnly={}", deployment.getTargetOrgId(), checkOnly);
             AsyncResult deployAsync = targetConn.deploy(zipBytes, deployOptions);
-            newAsyncId = deployAsync.getId(); // 拿到新 ID
+            newAsyncId = deployAsync.getId();
 
-            // 万一在 conn.deploy() 执行的那几秒钟网络 IO 期间，用户点了取消：
-            // 此时 DB 状态变成了 Canceling，但是任务已经提交成功了。
-            // 我们必须立刻检查，如果发现被取消了，马上把刚提交的任务撤回！
+            // [Race Condition Check]
             SfDeployment currentCheck = sfDeploymentMapper.selectById(deployment.getId());
             if("Canceling".equals(currentCheck.getStatus()) || "Canceled".equals(currentCheck.getStatus())) {
-                log.warn("检测到任务在提交期间被取消，立即执行远程撤回: {}", newAsyncId);
+                log.warn("检测到任务在提交期间被取消，立即撤回: {}", newAsyncId);
                 sfMetadataService.cancelDeploy(deployment.getTargetOrgId(), newAsyncId);
                 throw new InterruptedException("任务在提交后立即被取消");
             }
 
+            // 更新历史记录
+            historyService.updateAsyncId(history.getId(), newAsyncId);
+
+            // 更新部署包状态
             SfDeployment update = new SfDeployment();
             update.setId(deployment.getId());
             update.setStatus(checkOnly ? "Validating" : "Deploying");
-            update.setLastAsyncId(deployAsync.getId());
+            update.setLastAsyncId(newAsyncId);
             sfDeploymentMapper.updateById(update);
 
-            log.info("部署请求已提交，AsyncId: {}", deployAsync.getId());
-
-            // 【关键】启动后台监控线程，轮询 SF 状态并推送 WS
-            startMonitoring(deployment.getId(), deployment.getTargetOrgId(), deployAsync.getId());
+            // 启动监控 (传入 rollbackFromHistoryId)
+            startMonitoring(deployment.getId(), deployment.getTargetOrgId(), newAsyncId,
+                    history.getId(), backupResult, items, rollbackFromHistoryId);
 
         } catch(InterruptedException e) {
             log.info("任务被中断: {}", e.getMessage());
-            // 处理本地取消的收尾工作
             handleDeploymentLocalCancel(deployment.getId());
+            historyService.finishHistory(history.getId(), "Canceled", "用户取消");
         } catch(Exception e) {
-            log.error("部署流程处理失败", e);
+            log.error("部署/回滚流程异常", e);
             handleDeploymentError(deployment.getId(), "流程异常: " + e.getMessage());
             DeployWebSocketServer.sendMessage(deployment.getId(), buildErrorJson(e.getMessage()));
+            historyService.finishHistory(history.getId(), "Failed", e.getMessage());
         }
     }
 
@@ -365,30 +435,73 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             throw new ServiceException("只有【验证成功】的部署包才能使用快速部署");
         }
 
+        // 1. 初始化历史记录 (类型为 Quick)
+        SfDeploymentHistory history = historyService.initHistory(deployment.getId(), deployment.getTargetOrgId(), "Quick");
+
         deployment.setStatus("Deploying");
         deployment.setErrorMsg("");
         sfDeploymentMapper.updateById(deployment);
 
         CompletableFuture.runAsync(() -> {
+            // 临时变量存储备份结果
+            SfBackupService.BackupResult backupResult = null;
+            // 获取部署条目 (用于备份和记录明细)
+            List<SfDeploymentItem> items = selectItems(deploymentId);
+
             try {
+                // 【检查点 1】
+                checkInterrupted(deployment.getId());
+
                 DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在启动快速部署..."));
+
+                // =================================================================
+                // 2. 执行备份 (核心优化)
+                // 即使是快速部署，也会覆盖目标环境的元数据，所以必须备份，否则无法回滚
+                // =================================================================
+                try {
+                    if(items != null && !items.isEmpty()) {
+                        DeployWebSocketServer.sendMessage(deployment.getId(), buildProgressJson("Processing", "正在备份目标环境..."));
+                        backupResult = backupService.performBackup(deployment.getTargetOrgId(), items);
+                        log.info("快速部署备份成功，路径: {}", backupResult.getBackupFilePath());
+                    }
+                } catch(Exception e) {
+                    log.error("快速部署备份失败", e);
+                    throw new ServiceException("备份失败，为保证安全已终止部署: " + e.getMessage());
+                }
+
+                // 【检查点 2】
+                checkInterrupted(deployment.getId());
+
                 log.info("开始快速部署, Org: {}, ValidationId: {}", deployment.getTargetOrgId(), deployment.getLastAsyncId());
+
+                // 3. 调用 Salesforce 快速部署接口
                 String newProcessId = sfMetadataService.deployRecentValidation(
                         deployment.getTargetOrgId(),
                         deployment.getLastAsyncId()
                 );
+
+                // 4. 更新历史记录的 AsyncId
+                historyService.updateAsyncId(history.getId(), newProcessId);
+
                 SfDeployment update = new SfDeployment();
                 update.setId(deployment.getId());
                 update.setLastAsyncId(newProcessId);
                 sfDeploymentMapper.updateById(update);
 
-                // 【关键】启动监控
-                startMonitoring(deployment.getId(), deployment.getTargetOrgId(), newProcessId);
+                // 5. 启动监控 (传入 historyId 和 backupResult，确保结束后能正确记录审计和备份明细)
+                startMonitoring(deployment.getId(), deployment.getTargetOrgId(), newProcessId, history.getId(), backupResult, items);
 
+            } catch(InterruptedException e) {
+                log.info("快速部署被用户中断: {}", e.getMessage());
+                handleDeploymentLocalCancel(deployment.getId());
+                // 记录历史为已取消
+                historyService.finishHistory(history.getId(), "Canceled", "用户取消");
             } catch(Exception e) {
                 log.error("快速部署失败", e);
                 handleDeploymentError(deployment.getId(), "快速部署异常: " + e.getMessage());
                 DeployWebSocketServer.sendMessage(deployment.getId(), buildErrorJson(e.getMessage()));
+                // 记录历史为失败
+                historyService.finishHistory(history.getId(), "Failed", e.getMessage());
             }
         });
     }
@@ -397,7 +510,10 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
      * 【新增】后台监控线程
      * 轮询 Salesforce 状态并推送 WebSocket，直到完成
      */
-    private void startMonitoring(Long deploymentId, Long targetOrgId, String processId) {
+    private void startMonitoring(Long deploymentId, Long targetOrgId, String processId,
+                                 Long historyId, SfBackupService.BackupResult backupResult,
+                                 List<SfDeploymentItem> items,
+                                 Long originalHistoryId) {
         CompletableFuture.runAsync(() -> {
             boolean done = false;
             long startTime = System.currentTimeMillis();
@@ -407,10 +523,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     // 超时保护 (1小时)
                     if(System.currentTimeMillis() - startTime > 3600 * 1000) {
                         log.error("部署监控超时，停止轮询: {}", processId);
+                        // 超时也记录历史
+                        historyService.finishHistory(historyId, "Failed", "系统轮询超时，请去Salesforce后台查看最终状态。");
                         break;
                     }
 
                     // 1. 调用 sfMetadataService 获取状态 (返回的是安全 JSON 字符串)
+                    // 注意：checkDeployStatus 内部已经调用了 extractErrorMessage 生成了详细的 errorMessage
                     String statusJson = checkDeployStatus(targetOrgId, processId);
 
                     // 2. 推送消息给前端
@@ -422,6 +541,44 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
                     if(isDone) {
                         done = true;
+
+                        // =========================================================
+                        // 【核心优化】监控结束，解析详细错误信息并写入历史表
+                        // =========================================================
+                        String finalStatus = json.getString("status");
+
+                        // 优先获取 errorMessage (这里包含了组件错误、测试失败、覆盖率警告等详细信息)
+                        String errorMsg = json.getString("errorMessage");
+                        // 如果 errorMessage 为空，尝试获取 errorMsg (兼容性)
+                        if(StringUtils.isEmpty(errorMsg)) {
+                            errorMsg = json.getString("errorMsg");
+                        }
+
+                        // 调用优化后的 finishHistory，传入详细错误信息
+                        historyService.finishHistory(historyId, finalStatus, errorMsg);
+
+                        // 如果部署成功(Succeeded)，且有备份，则保存备份明细
+                        // 2. 保存备份明细 (只要部署成功 且 有备份结果，就应该保存)
+                        // 修复：去掉了 && originalHistoryId != null 的条件
+                        if("Succeeded".equals(finalStatus) && backupResult != null) {
+                            try {
+                                historyService.saveBackupAndDetails(historyId, backupResult.getBackupFilePath(),
+                                        backupResult.getActionMap(), items);
+                                log.info("历史记录 [{}] 备份路径及明细已保存", historyId);
+                            } catch(Exception e) {
+                                log.error("保存历史明细失败", e);
+                            }
+                        }
+
+                        // 3. 如果是回滚操作成功，标记原历史记录为已回滚
+                        if("Succeeded".equals(finalStatus) && originalHistoryId != null) {
+                            try {
+                                log.info("回滚成功，标记原历史记录 [{}] 为已回滚", originalHistoryId);
+                                historyService.updateStatus(originalHistoryId, "RolledBack");
+                            } catch(Exception e) {
+                                log.error("更新原记录状态失败", e);
+                            }
+                        }
                         log.info("部署任务结束: {}", processId);
                     } else {
                         // 未结束，等待 2 秒
@@ -437,6 +594,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 }
             }
         });
+    }
+
+    // 为了兼容旧代码，提供一个重载方法 (普通部署调用这个)
+    private void startMonitoring(Long deploymentId, Long targetOrgId, String processId,
+                                 Long historyId, SfBackupService.BackupResult backupResult,
+                                 List<SfDeploymentItem> items) {
+        startMonitoring(deploymentId, targetOrgId, processId, historyId, backupResult, items, null);
     }
 
     private String buildProgressJson(String status, String detail) {
@@ -977,5 +1141,30 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             // 这里不需要做其他操作了，因为上面已经 setStatus("Canceling")
             // 异步线程 processAsyncDeployment 中的 checkInterrupted() 会捕获到这个变化并自动停止
         }
+    }
+
+    @Override
+    public void executeRollback(Long originalHistoryId) {
+        // 1. 查出原历史记录和部署包
+        SfDeploymentHistory originalHistory = historyService.getById(originalHistoryId);
+        if(originalHistory == null) throw new ServiceException("历史记录不存在");
+
+        SfDeployment deployment = selectSfDeploymentById(originalHistory.getDeploymentId());
+
+        // 2. 更新状态为 Deploying
+        deployment.setStatus("Deploying");
+        deployment.setErrorMsg("");
+        sfDeploymentMapper.updateById(deployment);
+
+        // 3. 异步调用核心流程 (items 传 null，因为回滚包是基于历史生成的，不需要实时 items)
+        CompletableFuture.runAsync(() -> {
+            try {
+                processAsyncDeploymentCore(deployment, null, false, originalHistoryId);
+            } catch(Exception e) {
+                // 兜底异常处理（虽然 Core 里面也有 try-catch，但这层是为了防止 invoke 本身出错）
+                log.error("回滚启动失败", e);
+                handleDeploymentError(deployment.getId(), "回滚启动异常: " + e.getMessage());
+            }
+        });
     }
 }
