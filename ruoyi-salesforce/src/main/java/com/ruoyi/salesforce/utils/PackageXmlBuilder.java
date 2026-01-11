@@ -161,4 +161,75 @@ public class PackageXmlBuilder {
 
         return sb.toString();
     }
+
+    /**
+     * 【新增】解析 ZIP 包用于前端预览 (提取文件列表和文本内容)
+     * 逻辑源自 SfDeploymentServiceImpl.previewPackage
+     */
+    public static Map<String, Object> parseZipForPreview(byte[] zipBytes) throws IOException {
+        List<String> fileList = new ArrayList<>();
+        Map<String, String> fileContents = new HashMap<>();
+        String packageXmlContent = "";
+
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (!entry.isDirectory()) {
+                    fileList.add(name);
+
+                    // 判断是否为文本文件
+                    if (isPreviewableTextFile(name)) {
+                        // 读取流 (限制大小 1MB，防止浏览器崩溃)
+                        byte[] contentBytes = readStream(zis);
+                        if (contentBytes.length < 1024 * 1024) {
+                            String content = new String(contentBytes, StandardCharsets.UTF_8);
+                            fileContents.put(name, content);
+                            if (name.endsWith("package.xml")) {
+                                packageXmlContent = content;
+                            }
+                        } else {
+                            fileContents.put(name, "(文件过大 >1MB，请下载查看)");
+                        }
+                    } else {
+                        fileContents.put(name, "(二进制文件或不支持的格式，不支持在线预览)");
+                    }
+                }
+            }
+        }
+
+        // 排序
+        Collections.sort(fileList);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("files", fileList);
+        result.put("fileContents", fileContents);
+        result.put("packageXml", packageXmlContent);
+        result.put("size", zipBytes.length);
+        return result;
+    }
+
+    /**
+     * 辅助方法：判断文件后缀
+     */
+    private static boolean isPreviewableTextFile(String name) {
+        String n = name.toLowerCase();
+        return n.endsWith(".xml") || n.endsWith(".cls") || n.endsWith(".trigger") ||
+                n.endsWith(".page") || n.endsWith(".component") || n.endsWith(".object") ||
+                n.endsWith(".field") || n.endsWith(".layout") || n.endsWith(".profile") ||
+                n.endsWith(".permissionset") || n.endsWith(".js") || n.endsWith(".css") ||
+                n.endsWith(".html") || n.endsWith(".txt") || n.endsWith(".json") ||
+                n.endsWith(".labels") || n.endsWith(".workflow") || n.endsWith(".flow");
+    }
+
+    /**
+     * 辅助方法：读取流防止关闭
+     */
+    private static byte[] readStream(java.io.InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int len;
+        while ((len = in.read(buffer)) > 0) out.write(buffer, 0, len);
+        return out.toByteArray();
+    }
 }

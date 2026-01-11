@@ -129,4 +129,37 @@ public class SfHistoryService {
     public SfDeploymentHistory getById(Long id) {
         return historyMapper.selectById(id);
     }
+
+    @Transactional
+    public void saveBackupAndDetails(Long historyId, String backupPath,
+                                     Map<String, String> actionMap,
+                                     Map<String, String> diffMap, // <--- 新增参数
+                                     List<SfDeploymentItem> items) {
+
+        // 1. 更新主表备份路径
+        SfDeploymentHistory history = new SfDeploymentHistory();
+        history.setId(historyId);
+        history.setBackupPath(backupPath);
+        historyMapper.updateById(history);
+
+        // 2. 插入明细
+        if(items != null) {
+            for(SfDeploymentItem item : items) {
+                String key = item.getMetadataType() + "|" + item.getMemberName();
+                String action = actionMap != null ? actionMap.getOrDefault(key, "UPDATE") : "UPDATE";
+
+                // 获取 Diff
+                String diff = diffMap != null ? diffMap.get(key) : null;
+
+                SfDeploymentHistoryDetail detail = new SfDeploymentHistoryDetail();
+                detail.setHistoryId(historyId);
+                detail.setMetadataType(item.getMetadataType());
+                detail.setMemberName(item.getMemberName());
+                detail.setAction(action);
+                detail.setDiffContent(diff); // <--- 保存 Diff
+
+                detailMapper.insert(detail);
+            }
+        }
+    }
 }

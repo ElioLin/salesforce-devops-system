@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.salesforce.mapper.SfDeploymentHistoryMapper">
+
+    <resultMap id="AuditResult" type="com.ruoyi.salesforce.domain.vo.SfAuditVo">
+        <result property="historyId" column="history_id"/>
+        <result property="deploymentId" column="deployment_id"/>
+        <result property="type" column="type"/>
+        <result property="status" column="status"/>
+        <result property="createBy" column="create_by"/>
+        <result property="startTime" column="start_time"/>
+        <result property="backupPath" column="backup_path"/>
+        <result property="metadataType" column="metadata_type"/>
+        <result property="memberName" column="member_name"/>
+        <result property="action" column="action"/>
+        <result property="diffContent" column="diff_content"/>
+    </resultMap>
+
+    <select id="selectAuditList" resultMap="AuditResult">
+        SELECT
+        h.id as history_id,
+        h.deployment_id,
+        h.type,
+        h.status,
+        h.create_by,
+        h.start_time,
+        h.backup_path,
+        d.metadata_type,
+        d.member_name,
+        d.action,
+        d.diff_content
+        FROM sf_deployment_history_detail d
+        LEFT JOIN sf_deployment_history h ON d.history_id = h.id
+        <where>
+            <if test="type != null and type != ''">
+                AND d.metadata_type = #{type}
+            </if>
+            <if test="name != null and name != ''">
+                AND d.member_name LIKE concat('%', #{name}, '%')
+            </if>
+        </where>
+        ORDER BY h.start_time DESC
+    </select>
+
+</mapper>

@@ -37,6 +37,7 @@ public class SfBackupService {
     public static class BackupResult {
         private String backupFilePath;          // 备份文件落盘路径
         private Map<String, String> actionMap;  // Key: Type|Name, Value: UPDATE/CREATE
+        private byte[] zipData;                 // 【新增】备份的原始 ZIP 字节数组 (用于 Diff 计算)
     }
 
     /**
@@ -56,7 +57,7 @@ public class SfBackupService {
 
         if (targetZipBytes == null || targetZipBytes.length == 0) {
             // 目标环境拉不到任何东西，说明所有东西都是新增的
-            return new BackupResult(null, generateAllCreateAction(items));
+            return new BackupResult(null, generateAllCreateAction(items), null);
         }
 
         // 3. 分析 ZIP 包，确定哪些文件是存在的 (UPDATE)，哪些是不存在的 (CREATE)
@@ -65,7 +66,7 @@ public class SfBackupService {
         // 4. 将备份 ZIP 落盘存储 (保存到 profile/backup 目录下)
         String backupPath = saveBackupFile(targetZipBytes, targetOrgId);
 
-        return new BackupResult(backupPath, actionMap);
+        return new BackupResult(backupPath, actionMap, targetZipBytes);
     }
 
     /**
