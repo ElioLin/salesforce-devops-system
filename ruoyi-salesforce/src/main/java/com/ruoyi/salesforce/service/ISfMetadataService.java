@@ -74,10 +74,6 @@ public interface ISfMetadataService {
      */
     void clearCacheForOrg(Long orgId);
 
-    void refreshAccessToken(SfOrg sfOrg);
-
-    <T> T executeWithRetry(Long orgId, SfMetadataServiceImpl.SfOperation<T> operation) throws Exception;
-
     void preloadMetadata(Long orgId, List<SfDeploymentItem> items);
 
     /**

@@ -6,6 +6,7 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.core.redis.RedisCache; // 确保引入 RuoYi 的 Redis 工具类
 import com.ruoyi.salesforce.domain.SfOrg;
+import com.ruoyi.salesforce.service.ISfAuthService;
 import com.ruoyi.salesforce.service.ISfDescribeApiService;
 import com.ruoyi.salesforce.service.ISfMetadataService;
 import com.ruoyi.salesforce.service.ISfOrgService;
@@ -19,7 +20,7 @@ import java.util.concurrent.TimeUnit;
 public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
 
     @Autowired
-    private ISfMetadataService sfMetadataService;
+    private ISfAuthService sfAuthService;
 
     @Autowired
     private ISfOrgService sfOrgService;
@@ -45,7 +46,7 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
         }
 
         // 2. Redis 没有，查 Salesforce API
-        return sfMetadataService.executeWithRetry(orgId, () -> {
+        return sfAuthService.executeWithRetry(orgId, () -> {
             SfOrg org = sfOrgService.selectSfOrgById(orgId);
             String url = org.getInstanceUrl() + "/services/data/v58.0/sobjects/";
 
@@ -94,7 +95,7 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
         }
 
         // 2. Redis 没有，查 Salesforce API
-        return sfMetadataService.executeWithRetry(orgId, () -> {
+        return sfAuthService.executeWithRetry(orgId, () -> {
             SfOrg org = sfOrgService.selectSfOrgById(orgId);
             String url = org.getInstanceUrl() + "/services/data/v58.0/sobjects/" + objectName + "/describe";
 

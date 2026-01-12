@@ -18,8 +18,7 @@ public class SfBulkApiService {
     @Autowired
     private ISfOrgService sfOrgService;
 
-    @Autowired
-    private ISfMetadataService sfMetadataService;
+    @Autowired private ISfAuthService sfAuthService;
 
     private static final String API_VERSION = "v58.0";
 
@@ -29,7 +28,7 @@ public class SfBulkApiService {
     public String submitQueryJob(Long orgId, String soql) {
         try {
             // 使用 sfMetadataService 的重试机制包裹业务逻辑
-            return sfMetadataService.executeWithRetry(orgId, () -> {
+            return sfAuthService.executeWithRetry(orgId, () -> {
                 // 每次重试都重新获取 Org (确保拿到最新的 Token)
                 SfOrg org = sfOrgService.selectSfOrgById(orgId);
                 String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query";
@@ -74,7 +73,7 @@ public class SfBulkApiService {
      */
     public String checkJobStatus(Long orgId, String jobId) {
         try {
-            return sfMetadataService.executeWithRetry(orgId, () -> {
+            return sfAuthService.executeWithRetry(orgId, () -> {
                 SfOrg org = sfOrgService.selectSfOrgById(orgId);
                 String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
 
@@ -106,7 +105,7 @@ public class SfBulkApiService {
      */
     public String getErrorMessage(Long orgId, String jobId) {
         try {
-            return sfMetadataService.executeWithRetry(orgId, () -> {
+            return sfAuthService.executeWithRetry(orgId, () -> {
                 SfOrg org = sfOrgService.selectSfOrgById(orgId);
                 String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
 
@@ -130,7 +129,7 @@ public class SfBulkApiService {
      */
     public File downloadResult(Long orgId, String jobId, String filePath) {
         try {
-            return sfMetadataService.executeWithRetry(orgId, () -> {
+            return sfAuthService.executeWithRetry(orgId, () -> {
                 SfOrg org = sfOrgService.selectSfOrgById(orgId);
                 String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId + "/results";
 
@@ -175,7 +174,7 @@ public class SfBulkApiService {
      */
     public int getJobRecordCount(Long orgId, String jobId) {
         try {
-            return sfMetadataService.executeWithRetry(orgId, () -> {
+            return sfAuthService.executeWithRetry(orgId, () -> {
                 SfOrg org = sfOrgService.selectSfOrgById(orgId);
                 String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId;
 

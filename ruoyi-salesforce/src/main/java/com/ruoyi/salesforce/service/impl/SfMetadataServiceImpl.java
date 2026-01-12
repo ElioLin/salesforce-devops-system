@@ -1,17 +1,16 @@
 package com.ruoyi.salesforce.service.impl;
 
-import cn.hutool.http.HttpRequest;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.core.domain.entity.SysDictData;
 import com.ruoyi.common.core.domain.entity.SysDictType;
 import com.ruoyi.common.core.redis.RedisCache;
-import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.SfDeploymentItem;
 import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.domain.vo.SfDiffVo;
+import com.ruoyi.salesforce.service.ISfAuthService;
 import com.ruoyi.salesforce.service.ISfMetadataService;
 import com.ruoyi.salesforce.service.ISfOrgService;
 import com.ruoyi.system.service.ISysDictDataService;
@@ -24,13 +23,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.PostConstruct;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -43,6 +39,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     private static final Logger log = LoggerFactory.getLogger(SfMetadataServiceImpl.class);
 
+    @Autowired private ISfAuthService sfAuthService;
     @Autowired
     private ISfOrgService sfOrgService;
     @Autowired
@@ -78,31 +75,6 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         T execute() throws Exception;
     }
 
-    /**
-     * 【核心修复】通用重试包装器
-     * 自动捕获 INVALID_SESSION_ID，刷新 Token 后重试
-     */
-    @Override
-    public <T> T executeWithRetry(Long orgId, SfOperation<T> operation) throws Exception {
-        try {
-            return operation.execute();
-        } catch(Exception e) {
-            // 判断是否为 Session 过期
-            if(isSessionExpired(e) || (e.getCause() instanceof Exception && isSessionExpired((Exception) e.getCause()))) {
-                log.warn("Org [{}] Session 已过期，触发自动续期并重试...", orgId);
-
-                // 【修复】加锁防止并发刷新导致 Token 互相覆盖
-                synchronized(this) {
-                    SfOrg org = sfOrgService.selectSfOrgById(orgId);
-                    refreshAccessToken(org);
-                }
-
-                // 刷新后重试一次
-                return operation.execute();
-            }
-            throw e; // 其他异常直接抛出
-        }
-    }
 
     @Override
     public MetadataConnection getMetadataConnection(Long orgId) throws ConnectionException {
@@ -120,46 +92,6 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         return new MetadataConnection(config);
     }
 
-    // 增加更多 Session 失效的错误特征
-    private boolean isSessionExpired(Exception e) {
-        String msg = e.getMessage();
-        if(msg == null) return false;
-        return msg.contains("INVALID_SESSION_ID")
-                || msg.contains("Session expired")
-                || msg.contains("Session not found")
-                || msg.contains("Full authentication is required")
-                || msg.contains("missing session hash");
-    }
-
-    // 【修复】刷新 Token 方法加锁，或者是被调用处加锁
-    @Override
-    public void refreshAccessToken(SfOrg org) {
-        String instance = "Sandbox".equalsIgnoreCase(org.getOrgType()) ? "https://test.salesforce.com" : "https://login.salesforce.com";
-        String tokenUrl = instance + "/services/oauth2/token";
-
-        try {
-            String result = HttpRequest.post(tokenUrl)
-                    .form("grant_type", "refresh_token")
-                    .form("client_id", org.getClientId())
-                    .form("client_secret", org.getClientSecret())
-                    .form("refresh_token", org.getRefreshToken())
-                    .timeout(20000) // 设置 HTTP 请求超时
-                    .execute().body();
-
-            JSONObject json = JSON.parseObject(result);
-            if(json.getString("access_token") != null) {
-                org.setAccessToken(json.getString("access_token"));
-                if(json.getString("instance_url") != null) org.setInstanceUrl(json.getString("instance_url"));
-                sfOrgService.updateSfOrg(org);
-                log.info("Org [{}] Token 刷新成功", org.getId());
-            } else {
-                throw new ServiceException("刷新失败: " + json.getString("error") + " - " + json.getString("error_description"));
-            }
-        } catch(Exception e) {
-            log.error("刷新 Token 异常", e);
-            throw new ServiceException("自动续期失败: " + e.getMessage());
-        }
-    }
 
     // =========================================================================
     // 2. 业务功能实现 (全部接入 executeWithRetry)
@@ -197,7 +129,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         }
 
         // 【应用重试机制】
-        String content = executeWithRetry(orgId, () -> {
+        String content = sfAuthService.executeWithRetry(orgId, () -> {
             return doRetrieveMetadata(orgId, type, memberName);
         });
 
@@ -272,7 +204,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Override
     public List<FileProperties> refreshMetadataCache(Long orgId, String type) throws Exception {
         // 【应用重试机制】
-        List<FileProperties> list = executeWithRetry(orgId, () -> {
+        List<FileProperties> list = sfAuthService.executeWithRetry(orgId, () -> {
             MetadataConnection conn = getMetadataConnection(orgId);
             ListMetadataQuery q = new ListMetadataQuery();
             q.setType(type);
@@ -300,7 +232,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Override
     public byte[] retrieveZipByManifest(Long orgId, com.sforce.soap.metadata.Package manifest) throws Exception {
         // 【应用重试机制】
-        return executeWithRetry(orgId, () -> {
+        return sfAuthService.executeWithRetry(orgId, () -> {
             MetadataConnection conn = getMetadataConnection(orgId);
             RetrieveRequest req = new RetrieveRequest();
             req.setApiVersion(58.0);
@@ -315,7 +247,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Override
     public AsyncResult deployZip(Long orgId, byte[] zipData, DeployOptions options) throws Exception {
         // 【应用重试机制】
-        return executeWithRetry(orgId, () -> {
+        return sfAuthService.executeWithRetry(orgId, () -> {
             return getMetadataConnection(orgId).deploy(zipData, options);
         });
     }
@@ -323,7 +255,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Override
     public String checkDeployStatus(Long orgId, String processId) throws Exception {
         // 【应用重试机制】
-        return executeWithRetry(orgId, () -> {
+        return sfAuthService.executeWithRetry(orgId, () -> {
             return doCheckDeployStatus(orgId, processId);
         });
     }
@@ -417,7 +349,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             }
             return json.toString();
         } catch(Throwable t) {
-            if(t instanceof Exception && isSessionExpired((Exception) t)) {
+            if(t instanceof Exception && sfAuthService.isSessionExpired((Exception) t)) {
                 throw (Exception) t;
             }
             JSONObject errorJson = new JSONObject();
@@ -442,14 +374,14 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     // ... (deployRecentValidation, getAllMetadataTypes, syncMetadataToDict 等保持原样，但也建议加上 executeWithRetry) ...
     @Override
     public String deployRecentValidation(Long orgId, String validationId) throws Exception {
-        return executeWithRetry(orgId, () -> {
+        return sfAuthService.executeWithRetry(orgId, () -> {
             return getMetadataConnection(orgId).deployRecentValidation(validationId);
         });
     }
 
     @Override
     public List<String> getAllMetadataTypes(Long orgId) throws Exception {
-        return executeWithRetry(orgId, () -> {
+        return sfAuthService.executeWithRetry(orgId, () -> {
             MetadataConnection conn = getMetadataConnection(orgId);
             Set<String> typeSet = new HashSet<>();
             try {
@@ -563,7 +495,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     @Override
     public void cancelDeploy(Long orgId, String processId) throws Exception {
-        executeWithRetry(orgId, () -> {
+        sfAuthService.executeWithRetry(orgId, () -> {
             MetadataConnection connection = getMetadataConnection(orgId);
             // 调用 Salesforce 原生取消接口
             connection.cancelDeploy(processId);
