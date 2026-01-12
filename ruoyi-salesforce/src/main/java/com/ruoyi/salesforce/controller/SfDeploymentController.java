@@ -55,7 +55,16 @@ public class SfDeploymentController extends BaseController {
     @PostMapping
     public AjaxResult add(@RequestBody SfDeployment sfDeployment) {
         sfDeployment.setCreateBy(getUsername());
-        return toAjax(sfDeploymentService.insertSfDeployment(sfDeployment));
+
+        // 执行插入，MyBatis 会自动将生成的 ID 回填到 sfDeployment 对象中
+        int rows = sfDeploymentService.insertSfDeployment(sfDeployment);
+
+        // 如果插入成功，返回 ID 给前端用于跳转
+        if(rows > 0) {
+            // AjaxResult.success(Object data) 会将数据放入 'data' 字段
+            return AjaxResult.success(sfDeployment.getId());
+        }
+        return AjaxResult.error();
     }
 
     /**
@@ -124,7 +133,7 @@ public class SfDeploymentController extends BaseController {
             // 调用之前写好的异步 Service 方法
             sfDeploymentService.deployPackage(id, checkOnly);
             return AjaxResult.success("请求已提交，正在后台处理");
-        } catch (Exception e) {
+        } catch(Exception e) {
             return AjaxResult.error(e.getMessage());
         }
     }
@@ -139,7 +148,7 @@ public class SfDeploymentController extends BaseController {
             String statusJson = sfDeploymentService.checkDeployStatus(targetOrgId, processId);
             // 这里返回 msg 字段给前端解析，或者直接放在 data 里
             return AjaxResult.success(statusJson);
-        } catch (Exception e) {
+        } catch(Exception e) {
             return AjaxResult.error("查询状态失败: " + e.getMessage());
         }
     }
@@ -153,7 +162,7 @@ public class SfDeploymentController extends BaseController {
         try {
             sfDeploymentService.quickDeploy(id);
             return AjaxResult.success("快速部署请求已提交");
-        } catch (Exception e) {
+        } catch(Exception e) {
             return AjaxResult.error(e.getMessage());
         }
     }
@@ -175,7 +184,7 @@ public class SfDeploymentController extends BaseController {
         try {
             Map<String, Object> result = sfDeploymentService.previewPackage(id);
             return AjaxResult.success(result);
-        } catch (Exception e) {
+        } catch(Exception e) {
             return AjaxResult.error(e.getMessage());
         }
     }

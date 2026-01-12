@@ -25,9 +25,11 @@
       <right-toolbar :showSearch.sync="showSearch" @queryTable="getList"></right-toolbar>
     </el-row>
 
-    <el-table v-loading="loading" :data="deploymentList" @selection-change="handleSelectionChange" border>
+    <el-table ref="table" v-loading="loading" :data="deploymentList" @selection-change="handleSelectionChange" border
+      :default-sort="defaultSort" @sort-change="handleSortChange">
       <el-table-column type="selection" width="55" align="center" />
-      <el-table-column label="标题" prop="title" show-overflow-tooltip />
+
+      <el-table-column label="标题" prop="title" show-overflow-tooltip sortable="custom" />
 
       <el-table-column label="源环境" prop="sourceOrgId" width="150" align="center">
         <template slot-scope="scope">
@@ -48,7 +50,9 @@
       </el-table-column>
 
       <el-table-column label="创建者" prop="createBy" width="100" align="center" />
-      <el-table-column label="创建时间" prop="createTime" width="160" align="center" />
+
+      <el-table-column label="创建时间" prop="createTime" width="160" align="center" sortable="custom" />
+
       <el-table-column label="操作" align="center" class-name="small-padding fixed-width">
         <template slot-scope="scope">
           <el-button size="mini" type="text" icon="el-icon-s-operation"
@@ -119,36 +123,31 @@ export default {
   name: "Deployment",
   data() {
     return {
-      // 遮罩层
       loading: true,
-      // 选中数组
       ids: [],
-      // 非单个禁用
       single: true,
-      // 非多个禁用
       multiple: true,
-      // 显示搜索条件
       showSearch: true,
-      // 总条数
       total: 0,
-      // 部署包表格数据
       deploymentList: [],
-      // 弹出层标题
       title: "",
-      // 是否显示弹出层
       open: false,
-      // 环境选项
       orgOptions: [],
-      // 查询参数
+
+      // 【优化 3】定义默认排序，用于 UI 显示箭头
+      defaultSort: { prop: 'createTime', order: 'descending' },
+
       queryParams: {
         pageNum: 1,
         pageSize: 10,
-        title: null
+        title: null,
+        // 【优化 4】设置默认查询参数为按创建时间降序
+        orderByColumn: 'create_time',
+        isAsc: 'desc'
       },
-      // 表单参数
       form: {},
-      // 表单校验
       rules: {
+        // ... rules 保持不变
         title: [{ required: true, message: "标题不能为空", trigger: "blur" }],
         sourceOrgId: [{ required: true, message: "请选择源环境", trigger: "change" }],
         targetOrgId: [{ required: true, message: "请选择目标环境", trigger: "change" }],
@@ -161,7 +160,6 @@ export default {
     this.getOrgList();
   },
   methods: {
-    /** 查询列表 */
     getList() {
       this.loading = true;
       listDeployment(this.queryParams).then(response => {
@@ -170,32 +168,49 @@ export default {
         this.loading = false;
       });
     },
-    /** 获取Org列表 */
     getOrgList() {
-      // 注意：这里默认取前100个环境，如果你的环境数量非常多，建议后端提供不分页的全部列表接口
       listOrg({ pageNum: 1, pageSize: 100 }).then(res => this.orgOptions = res.rows);
     },
-    /** 【修改点 3】新增格式化环境名称的方法 */
     formatOrgName(orgId) {
       if (!orgId) return '';
-      // 在 orgOptions 数组里查找 ID 匹配的项
       const org = this.orgOptions.find(item => item.id === orgId);
-      // 找到了返回名字，没找到（可能还没加载完）返回 ID
       return org ? org.name : orgId;
     },
-    /** 状态显示样式 */
     statusType(status) {
       if (status === 'Succeeded') return 'success';
       if (status === 'Failed') return 'danger';
       if (status === 'Deploying' || status === 'Validating') return 'warning';
       return 'info';
     },
-    /** 搜索按钮操作 */
     handleQuery() {
       this.queryParams.pageNum = 1;
       this.getList();
     },
-    /** 重置按钮操作 */
+
+    /** 【优化 5】处理排序变更 */
+    handleSortChange({ column, prop, order }) {
+      // 1. 设置排序字段
+      // 如果前端属性名是驼峰 (createTime)，需要转为数据库下划线 (create_time)
+      // 若依后端通常通过 orderByColumn 接收
+      if (prop === 'createTime') {
+        this.queryParams.orderByColumn = 'create_time';
+      } else {
+        this.queryParams.orderByColumn = prop; // 其他字段假设一致
+      }
+
+      // 2. 设置排序顺序
+      this.queryParams.isAsc = order === 'ascending' ? 'asc' : 'desc';
+
+      // 3. 如果取消了排序 (order 为 null)，恢复默认排序
+      if (order === null) {
+        this.queryParams.orderByColumn = 'create_time';
+        this.queryParams.isAsc = 'desc';
+      }
+
+      this.getList();
+    },
+
+    /** 【优化 6】重置按钮需重置排序 */
     resetQuery() {
       this.form = {
         id: null,
@@ -206,40 +221,44 @@ export default {
         testLevel: null,
         createTime: null,
         updateTime: null
-      }
-      this.resetForm("form")
+      };
+      this.resetForm("form");
       this.queryParams.title = null;
+
+      // 重置为默认排序
+      this.queryParams.orderByColumn = 'create_time';
+      this.queryParams.isAsc = 'desc';
+      // 清除表格 UI 上的排序状态
+      if (this.$refs.table) {
+        this.$refs.table.clearSort();
+      }
+
       this.handleQuery();
     },
-    /** 多选框选中数据 */
+
     handleSelectionChange(selection) {
       this.ids = selection.map(item => item.id)
       this.single = selection.length !== 1
       this.multiple = !selection.length
     },
-    /** 新增按钮操作 */
     handleAdd() {
-      this.form = { testLevel: 'NoTestRun' }; // 默认值
+      this.form = { testLevel: 'NoTestRun' };
       this.open = true;
       this.title = "新建部署包";
     },
-    /** 修改按钮操作 */
     handleUpdate(row) {
-      this.form = {}; // 先重置表单
+      this.form = {};
       const id = row.id || this.ids;
-
       if (!id) {
         this.$modal.msgError("请选择要修改的数据");
         return;
       }
-
       getDeployment(id).then(response => {
         this.form = response.data;
         this.open = true;
         this.title = "修改部署包";
       });
     },
-    /** 提交按钮 */
     submitForm() {
       this.$refs["form"].validate(valid => {
         if (valid) {
@@ -248,24 +267,35 @@ export default {
               this.$modal.msgSuccess("修改成功");
               this.open = false;
               this.getList();
-            }).catch(() => {
-            });
+            }).catch(() => { });
           } else {
             addDeployment(this.form).then(response => {
               this.$modal.msgSuccess("创建成功");
               this.open = false;
-              this.getList();
+
+              // 【修复与优化】
+              // 后端返回结构为: { msg: "...", code: 200, data: "ID字符串" }
+              // 取出 data 中的 ID 进行跳转
+              const newId = response.data;
+
+              if (newId) {
+                this.$router.push({
+                  path: "/salesforce/deploymentDetail",
+                  query: { id: newId }
+                });
+              } else {
+                // 兜底逻辑：万一后端没返回ID，则回退到刷新列表
+                this.getList();
+              }
             });
           }
         }
       });
     },
-    // 取消按钮
     cancel() {
       this.open = false
       this.reset()
     },
-    /** 删除按钮操作 */
     handleDelete(row) {
       const ids = row.id || this.ids;
       this.$modal.confirm('是否确认删除部署包编号为"' + ids + '"的数据项？').then(function () {
@@ -275,7 +305,6 @@ export default {
         this.$modal.msgSuccess("删除成功");
       }).catch(() => { });
     },
-    /** 进入详情页 */
     handleEnterDetail(row) {
       this.$router.push({
         path: "/salesforce/deploymentDetail",

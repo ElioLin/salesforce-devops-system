@@ -93,7 +93,7 @@
                         <span class="title">
                             <i class="el-icon-collection"></i> 元数据处理
                             <el-tag size="mini" effect="plain" class="ml-10" v-if="compStateText">{{ compStateText
-                                }}</el-tag>
+                            }}</el-tag>
                         </span>
                         <span class="count" v-if="compTotal > 0">{{ compDone }} / {{ compTotal }}</span>
                     </div>
@@ -311,7 +311,7 @@
                         <el-table-column prop="status" label="最终状态" width="100" align="center">
                             <template slot-scope="scope">
                                 <el-tag :type="statusType(scope.row.status)" size="small">{{ scope.row.status
-                                }}</el-tag>
+                                    }}</el-tag>
                             </template>
                         </el-table-column>
 
@@ -354,16 +354,30 @@
                             <el-button type="text" size="mini" icon="el-icon-download"
                                 @click="handleDownloadPackage">下载ZIP</el-button>
                         </div>
+
+                        <div style="margin-bottom: 10px; padding: 0 2px;">
+                            <el-input v-model="previewSearchQuery" placeholder="搜索文件..." prefix-icon="el-icon-search"
+                                size="small" clearable>
+                            </el-input>
+                        </div>
+
                         <div class="file-list-container">
                             <ul class="file-ul">
                                 <li class="file-li" :class="{ active: previewDialog.currentFile === 'package.xml' }"
-                                    @click="selectPreviewFile('package.xml')">
+                                    @click="selectPreviewFile('package.xml')"
+                                    v-if="'package.xml'.includes(previewSearchQuery.toLowerCase()) || !previewSearchQuery">
                                     <i class="el-icon-s-cooperation" style="color:#E6A23C;"></i> package.xml
                                 </li>
-                                <li v-for="(file, index) in previewDialog.files" :key="index" class="file-li"
+
+                                <li v-for="(file, index) in filteredPreviewFiles" :key="index" class="file-li"
                                     :class="{ active: previewDialog.currentFile === file }"
                                     @click="selectPreviewFile(file)">
                                     <i class="el-icon-document" style="color:#909399;"></i> {{ file }}
+                                </li>
+
+                                <li v-if="filteredPreviewFiles.length === 0 && previewSearchQuery"
+                                    style="text-align:center; color:#909399; padding: 20px; font-size:12px">
+                                    无匹配文件
                                 </li>
                             </ul>
                         </div>
@@ -415,9 +429,9 @@ import {
     updateDeployment,
     previewDeploymentPackage,
     cancelDeployment,
-    listDeploymentHistory,     
-    getDeploymentHistoryDetails, 
-    rollbackDeployment,        
+    listDeploymentHistory,
+    getDeploymentHistoryDetails,
+    rollbackDeployment,
 } from "@/api/salesforce/deployment";
 import { listOrg } from "@/api/salesforce/org";
 import MetadataBrowser from "@/views/salesforce/org/MetadataBrowser";
@@ -529,7 +543,8 @@ export default {
             historyDetailDialog: {
                 open: false,
                 list: []
-            }
+            },
+            previewSearchQuery: ''
         };
     },
     computed: {
@@ -660,6 +675,17 @@ export default {
             if (this.progressStatus === 'exception') return 'exception';
             if (this.testPercent === 100) return 'success';
             return null;
+        },
+        //过滤计算属性
+        filteredPreviewFiles() {
+            if (!this.previewSearchQuery) {
+                // 排除 package.xml，模板中已手动处理
+                return this.previewDialog.files.filter(f => f !== 'package.xml');
+            }
+            const query = this.previewSearchQuery.toLowerCase();
+            return this.previewDialog.files.filter(file => 
+                file !== 'package.xml' && file.toLowerCase().includes(query)
+            );
         }
     },
     watch: {
@@ -987,6 +1013,7 @@ export default {
         },
 
         handlePreviewPackage() {
+            this.previewSearchQuery = '';
             this.previewDialog.open = true;
             this.previewDialog.loading = true;
             this.previewDialog.files = [];
@@ -1348,7 +1375,7 @@ export default {
         /**
          * 【新增】获取部署历史
          */
-         getHistoryList() {
+        getHistoryList() {
             if (!this.deploymentId) return;
             this.historyLoading = true;
             listDeploymentHistory(this.deploymentId).then(res => {
@@ -1376,9 +1403,9 @@ export default {
          */
         canRollback(row) {
             const validTypes = ['Deploy', 'Quick', 'Rollback'];
-            return validTypes.includes(row.type) && 
-                   row.status === 'Succeeded' && 
-                   row.backupPath;
+            return validTypes.includes(row.type) &&
+                row.status === 'Succeeded' &&
+                row.backupPath;
         },
 
         /**
@@ -1398,7 +1425,7 @@ export default {
         handleDownloadBackup(row) {
             const fileName = `backup_${this.deploymentId}_${row.id}.zip`;
             this.$modal.msgSuccess("正在请求下载备份文件...");
-            
+
             // 使用通用下载 request，注意 URL 需要后端对应 Controller 支持
             // 假设后端接口为 /salesforce/deployment/history/download/{historyId}
             request({
@@ -1444,7 +1471,7 @@ export default {
                 this.deploying = true; // 复用部署中的 loading 状态
                 this.resetProgress();
                 this.compStateText = "正在准备回滚包...";
-                
+
                 rollbackDeployment(row.id).then(res => {
                     this.$modal.msgSuccess("回滚请求已发送，开始执行...");
                     // 重新连接 Socket 进行监控，因为回滚本质上是一个新的部署任务
@@ -1589,7 +1616,8 @@ export default {
     border-radius: 4px;
     overflow-y: auto;
     background: #fff;
-    height: calc(100% - 45px);
+    /* height: calc(100% - 45px); <-- 【删除】 */
+    height: 0; /* 【新增】关键：让 flex 容器内的滚动生效 */
 }
 
 .file-ul {
