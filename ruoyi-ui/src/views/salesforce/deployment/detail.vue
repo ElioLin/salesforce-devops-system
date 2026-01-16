@@ -5,7 +5,7 @@
                 <span class="card-title">{{ deployment.title || '部署包详情' }}</span>
 
                 <el-tag size="medium" :type="statusType(deployment.status)" effect="dark" style="margin-left: 10px">
-                    {{ calculatedStatusLabel }}
+                    {{ getDictLabelByValue(deployment.status) }}
                 </el-tag>
 
                 <el-tag v-if="isSocketConnected" type="success" size="mini" effect="plain" style="margin-left: 10px">
@@ -41,13 +41,13 @@
             </div>
 
             <el-row :gutter="20" class="info-row">
-                <el-col :span="6">
+                <el-col :span="8">
                     <span class="label">源环境:</span> <span class="val">{{ sourceOrgName }}</span>
                 </el-col>
-                <el-col :span="6">
+                <el-col :span="8">
                     <span class="label">目标环境:</span> <span class="val">{{ targetOrgName }}</span>
                 </el-col>
-                <el-col :span="12" style="text-align: right">
+                <el-col :span="8" style="text-align: right">
                     <el-button-group>
                         <el-button type="info" plain icon="el-icon-download" size="small" :disabled="isProcessing"
                             @click="handleDownloadPackage">下载</el-button>
@@ -93,7 +93,7 @@
                         <span class="title">
                             <i class="el-icon-collection"></i> 元数据处理
                             <el-tag size="mini" effect="plain" class="ml-10" v-if="compStateText">{{ compStateText
-                            }}</el-tag>
+                                }}</el-tag>
                         </span>
                         <span class="count" v-if="compTotal > 0">{{ compDone }} / {{ compTotal }}</span>
                     </div>
@@ -309,9 +309,12 @@
                         </el-table-column>
 
                         <el-table-column prop="status" label="最终状态" width="100" align="center">
-                            <template slot-scope="scope">
+                            <!-- <template slot-scope="scope">
                                 <el-tag :type="statusType(scope.row.status)" size="small">{{ scope.row.status
                                     }}</el-tag>
+                            </template> -->
+                            <template slot-scope="scope">
+                                <dict-tag :options="dict.type.sys_salesforce_deploy_status" :value="scope.row.status" />
                             </template>
                         </el-table-column>
 
@@ -551,12 +554,12 @@ export default {
         sourceOrgName() {
             if (!this.deployment || !this.deployment.sourceOrgId) return '-';
             const org = this.orgMap[this.deployment.sourceOrgId];
-            return org ? org.name : this.deployment.sourceOrgId;
+            return org ? org.name + ' (' + org.username + ')' : this.deployment.sourceOrgId;
         },
         targetOrgName() {
             if (!this.deployment || !this.deployment.targetOrgId) return '-';
             const org = this.orgMap[this.deployment.targetOrgId];
-            return org ? org.name : this.deployment.targetOrgId;
+            return org ? org.name + ' (' + org.username + ')' : this.deployment.targetOrgId;
         },
         /**
          * 【新增】计算 Salesforce 部署监控页面的 URL
@@ -583,24 +586,6 @@ export default {
             // 注意：这里没有 'Canceled'。
             // 当状态变为 'Canceled' 时，isProcessing 为 false，用户可以重新编辑和部署。
             return activeStatuses.includes(s) || this.validating || this.deploying;
-        },
-        calculatedStatusLabel() {
-            const status = this.deployment.status;
-            const isCheck = this.localCheckOnly;
-
-            if (status === 'Succeeded') return isCheck ? '验证成功' : '部署成功';
-            if (status === 'Failed') return isCheck ? '验证失败' : '部署失败';
-            if (status === 'Canceled') return '已取消';
-            if (status === 'Canceling') return '取消中...';
-
-            if (status === 'Pending' || status === 'Queued') return '排队中...';
-            if (status === 'InProgress') return isCheck ? '正在验证...' : '正在部署...';
-
-            if (this.validating || status === 'Validating') return '正在验证...';
-            if (this.deploying || status === 'Deploying') return '正在部署...';
-            if (status === 'Processing') return '准备中...';
-
-            return status || '未知';
         },
         isPolling() {
             return this.isSocketConnected;
@@ -683,7 +668,7 @@ export default {
                 return this.previewDialog.files.filter(f => f !== 'package.xml');
             }
             const query = this.previewSearchQuery.toLowerCase();
-            return this.previewDialog.files.filter(file => 
+            return this.previewDialog.files.filter(file =>
                 file !== 'package.xml' && file.toLowerCase().includes(query)
             );
         }
@@ -720,13 +705,32 @@ export default {
         if (this.statusTimer) clearInterval(this.statusTimer);
     },
     methods: {
-        statusType(status) {
-            if (status === 'Succeeded') return 'success';
-            if (status === 'Failed') return 'danger';
-            if (status === 'Canceled') return 'info'; // 已取消用灰色
-            if (status === 'Canceling') return 'warning'; // 取消中用黄色
-            if (['Processing', 'Deploying', 'Validating', 'Pending', 'InProgress', 'Queued'].includes(status)) return 'warning';
+        getDictLabelByValue(value) {
+            if (!value) return '未知状态';
+            const datas = this.dict.type.sys_salesforce_deploy_status;
+            if (datas) {
+                const found = datas.find(item => item.value === value);
+                if (found) return found.label;
+            }
+            return value; // 没找到则显示原始英文
+        },
+        getStatusTagType(value) {
+            if (!value) return 'info';
+            const datas = this.dict.type.sys_salesforce_deploy_status;
+            if (datas) {
+                const found = datas.find(item => item.value === value);
+                // 若依的 listClass 通常是: default, primary, success, info, warning, danger
+                // el-tag 的 type 是: '', success, info, warning, danger
+                if (found && found.listClass) {
+                    if (found.listClass === 'default') return 'info';
+                    if (found.listClass === 'primary') return ''; // el-tag 默认就是蓝色
+                    return found.listClass;
+                }
+            }
             return 'info';
+        },
+        statusType(status) {
+            return this.getStatusTagType(status);
         },
         // 【新增】分页大小改变
         handleSizeChange(val) {
@@ -1617,7 +1621,8 @@ export default {
     overflow-y: auto;
     background: #fff;
     /* height: calc(100% - 45px); <-- 【删除】 */
-    height: 0; /* 【新增】关键：让 flex 容器内的滚动生效 */
+    height: 0;
+    /* 【新增】关键：让 flex 容器内的滚动生效 */
 }
 
 .file-ul {
@@ -1676,15 +1681,30 @@ export default {
     border: 1px solid #e1f3d8;
 }
 
-/* 【关键调整】让 el-tabs__header 吸顶 */
-/* ::v-deep .el-tabs__header {
-    position: -webkit-sticky;
-    position: sticky;
-    top: 84px;
-    z-index: 10;
-    background-color: #fff;
-    margin-bottom: 0;
-    padding-top: 10px;
-    box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.05);
-} */
+.env-col {
+    display: flex;
+    align-items: center;
+    overflow: hidden; /* 防止溢出 */
+}
+.text-truncate {
+    display: inline-block;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+}
+.label {
+    color: #909399;
+    margin-right: 8px;
+    font-weight: 500;
+    white-space: nowrap;
+    flex-shrink: 0; /* 防止 label 被压缩 */
+}
+
+.val {
+    color: #303133;
+    font-weight: 600;
+    flex: 1; /* 让值占据剩余空间 */
+}
 </style>

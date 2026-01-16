@@ -34,10 +34,28 @@ public class SfDeployment {
     private String specifiedTests;
     private String description;
     private String delFlag;
-    /** Salesforce异步处理ID */
+    /**
+     * Salesforce异步处理ID
+     */
     private String lastAsyncId;
 
-    /** 错误信息 */
+    @TableField(exist = false)
+    private Map<String, Object> params = new HashMap<>();
+
+    public Map<String, Object> getParams() {
+        if(params == null) {
+            params = new HashMap<>();
+        }
+        return params;
+    }
+
+    public void setParams(Map<String, Object> params) {
+        this.params = params;
+    }
+
+    /**
+     * 错误信息
+     */
     private String errorMsg;
 
     public String getLastAsyncId() {

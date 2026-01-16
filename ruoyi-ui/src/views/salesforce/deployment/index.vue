@@ -2,8 +2,25 @@
   <div class="app-container">
     <el-form :model="queryParams" ref="queryForm" size="small" :inline="true" v-show="showSearch" label-width="68px">
       <el-form-item label="标题" prop="title">
-        <el-input v-model="queryParams.title" placeholder="请输入部署包标题" clearable @keyup.enter.native="getList" />
+        <el-input v-model="queryParams.title" placeholder="请输入部署包标题" clearable @keyup.enter.native="handleQuery" />
       </el-form-item>
+
+      <el-form-item label="状态" prop="status">
+        <el-select v-model="queryParams.status" placeholder="请选择状态" clearable style="width: 200px">
+          <el-option v-for="dict in dict.type.sys_salesforce_deploy_status" :key="dict.value" :label="dict.label"
+            :value="dict.value" />
+        </el-select>
+      </el-form-item>
+
+      <el-form-item label="创建者" prop="createBy">
+        <el-input v-model="queryParams.createBy" placeholder="请输入创建者账号" clearable @keyup.enter.native="handleQuery" />
+      </el-form-item>
+
+      <el-form-item label="创建时间">
+        <el-date-picker v-model="dateRange" style="width: 240px" value-format="yyyy-MM-dd" type="daterange"
+          range-separator="-" start-placeholder="开始日期" end-placeholder="结束日期"></el-date-picker>
+      </el-form-item>
+
       <el-form-item>
         <el-button type="primary" icon="el-icon-search" size="mini" @click="handleQuery">搜索</el-button>
         <el-button icon="el-icon-refresh" size="mini" @click="resetQuery">重置</el-button>
@@ -45,7 +62,7 @@
 
       <el-table-column label="状态" prop="status" width="120" align="center">
         <template slot-scope="scope">
-          <el-tag :type="statusType(scope.row.status)">{{ scope.row.status }}</el-tag>
+          <dict-tag :options="dict.type.sys_salesforce_deploy_status" :value="scope.row.status" />
         </template>
       </el-table-column>
 
@@ -64,7 +81,7 @@
     </el-table>
 
     <pagination v-show="total > 0" :total="total" :page.sync="queryParams.pageNum" :limit.sync="queryParams.pageSize"
-      @pagination="getList" />
+      :page-sizes="[50, 100, 150, 200]" @pagination="getList" />
 
     <el-dialog :title="title" :visible.sync="open" width="600px" append-to-body :close-on-click-modal="false">
       <el-form ref="form" :model="form" :rules="rules" label-width="100px">
@@ -121,6 +138,7 @@ import request from '@/utils/request';
 
 export default {
   name: "Deployment",
+  dicts: ['sys_salesforce_deploy_status'],
   data() {
     return {
       loading: true,
@@ -133,14 +151,17 @@ export default {
       title: "",
       open: false,
       orgOptions: [],
+      dateRange: [],
 
       // 【优化 3】定义默认排序，用于 UI 显示箭头
       defaultSort: { prop: 'createTime', order: 'descending' },
 
       queryParams: {
         pageNum: 1,
-        pageSize: 10,
+        pageSize: 50,
         title: null,
+        status: null,   // 【新增】
+        createBy: null, // 【新增】
         // 【优化 4】设置默认查询参数为按创建时间降序
         orderByColumn: 'create_time',
         isAsc: 'desc'
@@ -162,7 +183,7 @@ export default {
   methods: {
     getList() {
       this.loading = true;
-      listDeployment(this.queryParams).then(response => {
+      listDeployment(this.addDateRange(this.queryParams, this.dateRange)).then(response => {
         this.deploymentList = response.rows;
         this.total = response.total;
         this.loading = false;
@@ -220,9 +241,10 @@ export default {
         status: null,
         testLevel: null,
         createTime: null,
-        updateTime: null
+        updateTime: null,
       };
-      this.resetForm("form");
+      this.dateRange = [];
+      this.resetForm("queryForm");
       this.queryParams.title = null;
 
       // 重置为默认排序

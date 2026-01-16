@@ -163,7 +163,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     public SfDiffVo compareMetadata(Long sId, Long tId, String type, String name) throws Exception {
         CompletableFuture<String> sourceFuture = CompletableFuture.supplyAsync(() -> {
             try {
-                return retrieveMetadataInternal(sId, type, name, false);
+                return retrieveMetadataInternal(sId, type, name, true);
             } catch(Exception e) {
                 log.error("源环境获取失败: {}", e.getMessage());
                 return "Error: " + e.getMessage();

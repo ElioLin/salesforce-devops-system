@@ -15,14 +15,35 @@
         <result property="createTime"     column="create_time"    />
     </resultMap>
 
+<!--    <select id="selectSfDeploymentList" parameterType="com.ruoyi.salesforce.domain.SfDeployment" resultMap="SfDeploymentResult">-->
+<!--        select id, title, source_org_id, target_org_id, status, create_time, create_by-->
+<!--        from sf_deployment-->
+<!--        <where>-->
+<!--            <if test="title != null and title != ''"> and title like concat('%', #{title}, '%')</if>-->
+<!--            <if test="status != null and status != ''"> and status = #{status}</if>-->
+<!--            and del_flag = '0'-->
+<!--        </where>-->
+<!--    </select>-->
+
     <select id="selectSfDeploymentList" parameterType="com.ruoyi.salesforce.domain.SfDeployment" resultMap="SfDeploymentResult">
         select id, title, source_org_id, target_org_id, status, create_time, create_by
         from sf_deployment
         <where>
-            <if test="title != null and title != ''"> and title like concat('%', #{title}, '%')</if>
-            <if test="status != null and status != ''"> and status = #{status}</if>
+            <if test="title != null  and title != ''"> and title like concat('%', #{title}, '%')</if>
+
+            <if test="status != null  and status != ''"> and status = #{status}</if>
+
+            <if test="createBy != null  and createBy != ''"> and create_by like concat('%', #{createBy}, '%')</if>
+
+            <if test="params.beginTime != null and params.beginTime != ''">
+                and date_format(create_time,'%y%m%d') &gt;= date_format(#{params.beginTime},'%y%m%d')
+            </if>
+            <if test="params.endTime != null and params.endTime != ''">
+                and date_format(create_time,'%y%m%d') &lt;= date_format(#{params.endTime},'%y%m%d')
+            </if>
             and del_flag = '0'
         </where>
+        order by create_time desc
     </select>
 
     <select id="selectSfDeploymentById" parameterType="Long" resultMap="SfDeploymentResult">
