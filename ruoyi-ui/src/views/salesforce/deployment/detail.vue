@@ -1065,17 +1065,23 @@ export default {
         },
         handleBrowserAction(event) {
             if (event.action === 'add') {
-                const itemToAdd = [{ metadataType: event.type, memberName: event.name }];
+                const itemToAdd = [{ metadataType: event.type, memberName: event.name, diffStatus: event.diffStatus || 'Unknown' }];
                 addDeploymentItems(this.deploymentId, itemToAdd).then(res => {
                     this.refreshBrowserMap(event);
+                    // 【优化】移除 this.startStatusPolling(); 
+                    // 因为现在状态是直接带进去的，不需要后台异步计算，也不需要前端轮询
+                    // this.$modal.msgSuccess("已添加");
                 });
             } else if (event.action === 'batch-add') {
                 const itemsPayload = event.items.map(i => ({
                     metadataType: i.type,
-                    memberName: i.name
+                    memberName: i.name,
+                    diffStatus: i.diffStatus || 'Unknown'
                 }));
                 addDeploymentItems(this.deploymentId, itemsPayload).then(res => {
                     this.refreshBrowserMap(event, true);
+                    // 【修复】批量添加后也开启轮询
+                    // this.startStatusPolling();
                 });
             } else if (event.action === 'remove') {
                 removeDeploymentItems(event.id).then(() => {
@@ -1684,8 +1690,10 @@ export default {
 .env-col {
     display: flex;
     align-items: center;
-    overflow: hidden; /* 防止溢出 */
+    overflow: hidden;
+    /* 防止溢出 */
 }
+
 .text-truncate {
     display: inline-block;
     max-width: 100%;
@@ -1694,17 +1702,20 @@ export default {
     text-overflow: ellipsis;
     vertical-align: bottom;
 }
+
 .label {
     color: #909399;
     margin-right: 8px;
     font-weight: 500;
     white-space: nowrap;
-    flex-shrink: 0; /* 防止 label 被压缩 */
+    flex-shrink: 0;
+    /* 防止 label 被压缩 */
 }
 
 .val {
     color: #303133;
     font-weight: 600;
-    flex: 1; /* 让值占据剩余空间 */
+    flex: 1;
+    /* 让值占据剩余空间 */
 }
 </style>

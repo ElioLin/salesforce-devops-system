@@ -101,21 +101,44 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             item.setDeploymentId(deploymentId);
             item.setCreateTime(new Date());
             item.setAction("Add");
-            item.setDiffStatus("Comparing");
+
+            // 【核心优化】不再强制设为 "Comparing"，而是使用前端传入的状态
+            if(StringUtils.isEmpty(item.getDiffStatus())) {
+                item.setDiffStatus("Unknown"); // 兜底
+            }
+            // 如果前端传了 "New"/"Changed"/"Same"，就直接存入数据库
+
             sfDeploymentItemMapper.insert(item);
         }
 
-        // 3. 【新增】触发异步预取内容 (Pre-fetching)
-        // 这样当用户之后点击“比对”时，源环境的内容已经躺在 Redis 里了，秒开
+        // 3. 触发异步预取内容
         try {
-            // 需要强转一下或者在接口定义里加这个方法
             sfMetadataService.preloadMetadata(deployment.getSourceOrgId(), items);
         } catch(Exception e) {
             log.warn("触发预取任务失败: {}", e.getMessage());
         }
 
-        // 4. 触发比对状态计算 (Hash比对)
-        checkDiffStatus(deploymentId);
+        // 4. 【核心优化】触发增量比对 (仅计算当前新增的 items)
+        // 原代码: checkDiffStatus(deploymentId); // 这会触发全量比对
+        // 新代码: 只针对 items 进行比对
+        /*if(deployment.getTargetOrgId() != null) {
+            // 为了线程安全，复制一份列表引用传入异步线程
+            List<SfDeploymentItem> deltaItems = new ArrayList<>(items);
+
+            CompletableFuture.runAsync(() -> {
+                try {
+                    // 复用现有的核心比对逻辑，但只传入新增的列表
+                    doCalculateDiff(deployment, deltaItems);
+                } catch(Exception e) {
+                    log.error("增量比对失败", e);
+                    // 异常处理：标记为未知状态
+                    for(SfDeploymentItem item : deltaItems) {
+                        item.setDiffStatus("Unknown");
+                        sfDeploymentItemMapper.updateById(item);
+                    }
+                }
+            });
+        }*/
     }
 
     /**

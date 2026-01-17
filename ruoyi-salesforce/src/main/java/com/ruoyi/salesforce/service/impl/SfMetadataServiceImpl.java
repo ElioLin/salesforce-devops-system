@@ -39,7 +39,8 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     private static final Logger log = LoggerFactory.getLogger(SfMetadataServiceImpl.class);
 
-    @Autowired private ISfAuthService sfAuthService;
+    @Autowired
+    private ISfAuthService sfAuthService;
     @Autowired
     private ISfOrgService sfOrgService;
     @Autowired
@@ -192,12 +193,17 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                 if(!rawList.isEmpty()) {
                     String jsonString = JSON.toJSONString(rawList);
                     List<FileProperties> convertedList = JSON.parseArray(jsonString, FileProperties.class);
-                    if(!convertedList.isEmpty() && convertedList.get(0).getFullName() != null) return convertedList;
+                    // 简单校验缓存有效性
+                    if(!convertedList.isEmpty() && convertedList.get(0).getFullName() != null) {
+                        return convertedList;
+                    }
                 }
             }
         } catch(Exception e) {
+            // 缓存反序列化失败，忽略，直接走实时查询
         }
 
+        // 缓存未命中或为空，强制刷新一次
         return refreshMetadataCache(orgId, type);
     }
 

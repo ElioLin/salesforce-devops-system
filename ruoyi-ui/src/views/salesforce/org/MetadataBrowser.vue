@@ -255,6 +255,9 @@ export default {
     targetOrgId: {
       handler(val) {
         this.localTargetOrgId = val;
+        if (this.sourceOrgId) {
+          this.fetchList();
+        }
       },
       immediate: true
     },
@@ -393,18 +396,22 @@ export default {
     fetchList() {
       if (!this.queryParams.orgId) return;
       this.loading = true;
+
+      // 1. 获取源环境列表
       const pSource = request({
         url: '/system/sf/meta/list',
         method: 'get',
         params: this.queryParams
       });
+
+      // 2. 获取目标环境列表 (如果选择了)
       let pTarget = Promise.resolve({ rows: [] });
       if (this.localTargetOrgId) {
         const targetParams = {
           orgId: this.localTargetOrgId,
           type: this.queryParams.type,
           pageNum: 1,
-          pageSize: 10000,
+          pageSize: 10000, // 尝试拉取全量用于比对
           keyword: this.queryParams.keyword
         };
         pTarget = request({
@@ -413,34 +420,48 @@ export default {
           params: targetParams
         });
       }
+
       Promise.all([pSource, pTarget]).then(([resSource, resTarget]) => {
         const sourceList = resSource.rows || [];
         const targetList = resTarget.rows || [];
         this.total = resSource.total;
+
+        // 3. 构建目标环境 Map (Key转小写以忽略大小写差异)
         const targetMap = new Map();
         targetList.forEach(item => {
           if (item.fullName) {
             targetMap.set(item.fullName.toLowerCase(), item.lastModifiedDate);
           }
         });
+
+        // 4. 【核心优化】智能差异算法
         this.list = sourceList.map(item => {
           let status = '';
+
           if (this.localTargetOrgId) {
-            const targetDateStr = targetMap.get(item.fullName.toLowerCase());
+            const itemKey = item.fullName.toLowerCase();
+            const targetDateStr = targetMap.get(itemKey);
+
             if (!targetDateStr) {
+              // 目标环境没有 -> 新增
               status = 'New';
             } else {
               const sourceTime = new Date(item.lastModifiedDate).getTime();
               const targetTime = new Date(targetDateStr).getTime();
-              if (Math.abs(sourceTime - targetTime) < 2000) {
-                status = 'Same';
-              } else {
+
+              // 算法：
+              // 如果 源时间 > 目标时间 -> 说明我有新修改 -> Changed
+              // 如果 源时间 <= 目标时间 -> 说明目标是新的(通常是因为刚部署过) -> Same
+              if (sourceTime > targetTime) {
                 status = 'Changed';
+              } else {
+                status = 'Same';
               }
             }
           }
           return { ...item, diffStatus: status };
         });
+
         this.loading = false;
         this.$nextTick(() => {
           this.checkExistingRows();
@@ -453,7 +474,7 @@ export default {
         this.list = [];
         this.total = 0;
         console.error("Fetch list error:", err);
-        this.$modal.msgError("元数据加载失败，请尝试刷新或检查网络");
+        this.$modal.msgError("元数据加载失败，请尝试点击【刷新列表】重试");
       });
     },
     getDiffTagType(status) {
@@ -481,7 +502,7 @@ export default {
       if (isChecked) {
         this.existMap.set(key, 'PENDING');
         this.mapUpdateTrigger++;
-        this.$emit('auto-action', { action: 'add', type: currentType, name: row.fullName, key: key });
+        this.$emit('auto-action', { action: 'add', type: currentType, name: row.fullName, key: key, diffStatus: row.diffStatus });
       } else {
         const itemId = this.existMap.get(key);
         if (itemId) {
@@ -500,7 +521,7 @@ export default {
         selection.forEach(row => {
           const key = currentType + ':' + row.fullName;
           if (!this.existMap.has(key)) {
-            batchItems.push({ type: currentType, name: row.fullName, key: key });
+            batchItems.push({ type: currentType, name: row.fullName, key: key, diffStatus: row.diffStatus });
             this.existMap.set(key, 'PENDING');
           }
         });
