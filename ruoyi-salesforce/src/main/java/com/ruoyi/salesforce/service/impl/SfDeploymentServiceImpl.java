@@ -354,6 +354,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
             // 处理测试级别 (逻辑通用)
             // 回滚时也需要遵循原部署包的测试策略 (如生产环境必须跑测试)
+            // 1. 沙盒环境 -> 默认为 NoTestRun
+            // 2. 生产环境(含Apex) -> 默认为 RunLocalTests
+            // 3. 生产环境(无Apex) -> 默认为 不运行测试
             if("RunSpecifiedTests".equals(deployment.getTestLevel())) {
                 deployOptions.setTestLevel(TestLevel.RunSpecifiedTests);
                 if(StringUtils.isNotEmpty(deployment.getSpecifiedTests())) {
@@ -362,7 +365,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             } else if("RunLocalTests".equals(deployment.getTestLevel())) {
                 deployOptions.setTestLevel(TestLevel.RunLocalTests);
             } else {
-                deployOptions.setTestLevel(TestLevel.NoTestRun);
+//                deployOptions.setTestLevel(TestLevel.NoTestRun);
             }
 
             log.info("执行部署/回滚，Org: {}, Option: CheckOnly={}", deployment.getTargetOrgId(), checkOnly);
