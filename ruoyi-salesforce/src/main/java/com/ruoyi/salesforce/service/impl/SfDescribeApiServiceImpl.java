@@ -4,6 +4,7 @@ import cn.hutool.http.HttpRequest;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.ruoyi.common.constant.CacheConstants;
 import com.ruoyi.common.core.redis.RedisCache; // 确保引入 RuoYi 的 Redis 工具类
 import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.service.ISfAuthService;
@@ -28,17 +29,13 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
     @Autowired
     private RedisCache redisCache; // 注入 Redis 缓存工具
 
-    // 缓存前缀定义
-    private static final String CACHE_KEY_OBJS = "sf:meta:objs:";
-    private static final String CACHE_KEY_FIELDS = "sf:meta:fields:";
-    // 缓存时间：24小时 (根据需求调整)
     private static final long CACHE_TIME = 24;
     private static final TimeUnit CACHE_UNIT = TimeUnit.HOURS;
 
     @Override
     public List<Map<String, String>> getSObjectList(Long orgId) throws Exception {
         // 1. 先查 Redis
-        String cacheKey = CACHE_KEY_OBJS + orgId;
+        String cacheKey = CacheConstants.CACHE_KEY_OBJS + "orgId_" + orgId;
         List<Map<String, String>> cachedList = redisCache.getCacheList(cacheKey);
 
         if(cachedList != null && !cachedList.isEmpty()) {
@@ -87,7 +84,7 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
     @Override
     public List<Map<String, Object>> getSObjectFields(Long orgId, String objectName) throws Exception {
         // 1. 先查 Redis
-        String cacheKey = CACHE_KEY_FIELDS + orgId + ":" + objectName;
+        String cacheKey = CacheConstants.CACHE_KEY_FIELDS + "orgId_" + orgId + ":" + objectName;
         List<Map<String, Object>> cachedFields = redisCache.getCacheList(cacheKey);
 
         if(cachedFields != null && !cachedFields.isEmpty()) {

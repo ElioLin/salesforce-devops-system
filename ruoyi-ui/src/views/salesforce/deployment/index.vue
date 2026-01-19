@@ -46,8 +46,13 @@
       :default-sort="defaultSort" @sort-change="handleSortChange">
       <el-table-column type="selection" width="55" align="center" />
 
-      <el-table-column label="标题" prop="title" show-overflow-tooltip sortable="custom" />
-
+      <el-table-column label="标题" prop="title" show-overflow-tooltip sortable="custom" min-width="200">
+        <template slot-scope="scope">
+          <el-link type="primary" :underline="false" @click="handleEnterDetail(scope.row)">
+            {{ scope.row.title }}
+          </el-link>
+        </template>
+      </el-table-column>
       <el-table-column label="源环境" prop="sourceOrgId" width="150" align="center">
         <template slot-scope="scope">
           {{ formatOrgName(scope.row.sourceOrgId) }}

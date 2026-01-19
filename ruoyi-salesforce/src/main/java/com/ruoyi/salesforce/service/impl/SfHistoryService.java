@@ -135,31 +135,45 @@ public class SfHistoryService {
                                      Map<String, String> actionMap,
                                      Map<String, String> diffMap, // <--- 新增参数
                                      List<SfDeploymentItem> items) {
+        try {
+            // 1. 更新主表备份路径
+            SfDeploymentHistory history = new SfDeploymentHistory();
+            history.setId(historyId);
+            history.setBackupPath(backupPath);
+            historyMapper.updateById(history);
 
-        // 1. 更新主表备份路径
-        SfDeploymentHistory history = new SfDeploymentHistory();
-        history.setId(historyId);
-        history.setBackupPath(backupPath);
-        historyMapper.updateById(history);
+            // 2. 插入明细
+            if(items != null) {
+                for(SfDeploymentItem item : items) {
+                    String key = item.getMetadataType() + "|" + item.getMemberName();
+                    String action = actionMap != null ? actionMap.getOrDefault(key, "UPDATE") : "UPDATE";
 
-        // 2. 插入明细
-        if(items != null) {
-            for(SfDeploymentItem item : items) {
-                String key = item.getMetadataType() + "|" + item.getMemberName();
-                String action = actionMap != null ? actionMap.getOrDefault(key, "UPDATE") : "UPDATE";
+                    // 获取 Diff
+                    String diff = diffMap != null ? diffMap.get(key) : null;
 
-                // 获取 Diff
-                String diff = diffMap != null ? diffMap.get(key) : null;
+                    // 【核心优化 1】超长文本防御性截断
+                    // 设定阈值：1000000 字符 (约 1MB - 2MB，视编码而定)，远小于 MySQL 默认 Packet 限制
+                    // 这样既能保存绝大多数文件的完整差异，又能防止极端大文件搞挂数据库连接
+                    if(diff != null && diff.length() > 1000000) {
+                        diff = diff.substring(0, 1000000) + "\n\n... (Diff content too large, truncated for safety) ...";
+                    }
 
-                SfDeploymentHistoryDetail detail = new SfDeploymentHistoryDetail();
-                detail.setHistoryId(historyId);
-                detail.setMetadataType(item.getMetadataType());
-                detail.setMemberName(item.getMemberName());
-                detail.setAction(action);
-                detail.setDiffContent(diff); // <--- 保存 Diff
+                    SfDeploymentHistoryDetail detail = new SfDeploymentHistoryDetail();
+                    detail.setHistoryId(historyId);
+                    detail.setMetadataType(item.getMetadataType());
+                    detail.setMemberName(item.getMemberName());
+                    detail.setAction(action);
+                    detail.setDiffContent(diff); // <--- 保存 Diff
 
-                detailMapper.insert(detail);
+                    detailMapper.insert(detail);
+                }
             }
+        } catch(Exception e) {
+            // 【核心优化 2】异常隔离
+            // 仅仅是保存历史明细失败，绝对不能抛出异常去影响主部署流程的状态更新
+            // 这里只打印日志，吞掉异常
+            System.err.println("保存部署历史明细/Diff失败 (非关键错误): " + e.getMessage());
+            e.printStackTrace();
         }
     }
 }

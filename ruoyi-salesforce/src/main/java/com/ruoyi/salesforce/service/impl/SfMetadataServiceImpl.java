@@ -3,6 +3,7 @@ package com.ruoyi.salesforce.service.impl;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.ruoyi.common.constant.CacheConstants;
 import com.ruoyi.common.core.domain.entity.SysDictData;
 import com.ruoyi.common.core.domain.entity.SysDictType;
 import com.ruoyi.common.core.redis.RedisCache;
@@ -21,15 +22,16 @@ import com.sforce.ws.ConnectorConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -50,19 +52,15 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Autowired
     private RedisCache redisCache;
 
-    // 内容缓存 Key 前缀
-    private static final String REDIS_CONTENT_KEY_PREFIX = "sf:content:";
+    @Autowired
+    @Qualifier("metaTaskExecutor")
+    private Executor metaExecutor;
+
     // 内容缓存时间：24小时 (Integer 类型适配 RuoYi RedisUtil)
     private static final Integer CONTENT_CACHE_TTL = 24;
 
-    private static final String REDIS_META_KEY_PREFIX = "sf:meta:v3:";
     private static final long CACHE_TTL_MINUTES = 30;
     private static final String DICT_TYPE_KEY = "sys_salesforce_metadata_type";
-
-    @PostConstruct
-    public void init() {
-        log.info(">>> SfMetadataServiceImpl (Retry & Lock Fixed) 已加载 <<<");
-    }
 
     // =========================================================================
     // 1. 核心连接与重试机制 (修复重点)
@@ -99,19 +97,23 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     // =========================================================================
 
     @Override
-    @Async
+    @Async("metaTaskExecutor")
     public void preloadMetadata(Long orgId, List<SfDeploymentItem> items) {
         if(items == null || items.isEmpty()) return;
         log.info("开始预加载元数据内容，OrgId: {}, 数量: {}", orgId, items.size());
 
-        items.parallelStream().forEach(item -> {
-            try {
-                // 强制刷新缓存
-                retrieveMetadataInternal(orgId, item.getMetadataType(), item.getMemberName(), true);
-            } catch(Exception e) {
-                log.warn("预加载失败: {} - {}", item.getMemberName(), e.getMessage());
-            }
-        });
+        // 【优化】不再使用 parallelStream (它使用全局ForkJoinPool)，改为提交到我们的专用池
+        // 虽然方法上有 @Async，但为了更细粒度的控制，这里显式提交子任务
+        List<CompletableFuture<Void>> futures = items.stream()
+                .map(item -> CompletableFuture.runAsync(() -> {
+                    try {
+                        retrieveMetadataInternal(orgId, item.getMetadataType(), item.getMemberName(), true);
+                    } catch(Exception e) {
+                        log.warn("预加载失败: {} - {}", item.getMemberName(), e.getMessage());
+                    }
+                }, metaExecutor)) // 使用专用池
+                .collect(java.util.stream.Collectors.toList());
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
     }
 
     @Override
@@ -120,7 +122,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     }
 
     private String retrieveMetadataInternal(Long orgId, String type, String memberName, boolean forceRefresh) throws Exception {
-        String cacheKey = REDIS_CONTENT_KEY_PREFIX + orgId + ":" + type + ":" + memberName;
+        String cacheKey = CacheConstants.REDIS_CONTENT_KEY_PREFIX + orgId + ":" + type + ":" + memberName;
 
         if(!forceRefresh) {
             String cachedContent = redisCache.getCacheObject(cacheKey);
@@ -162,6 +164,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     @Override
     public SfDiffVo compareMetadata(Long sId, Long tId, String type, String name) throws Exception {
+        // 使用 metaExecutor
         CompletableFuture<String> sourceFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return retrieveMetadataInternal(sId, type, name, true);
@@ -169,15 +172,16 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
                 log.error("源环境获取失败: {}", e.getMessage());
                 return "Error: " + e.getMessage();
             }
-        });
+        }, metaExecutor); // <--- 指定线程池
 
+        // 【修改】使用 metaExecutor
         CompletableFuture<String> targetFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return retrieveMetadataInternal(tId, type, name, true);
             } catch(Exception e) {
                 return "";
             }
-        });
+        }, metaExecutor); // <--- 指定线程池
 
         CompletableFuture.allOf(sourceFuture, targetFuture).join();
         return new SfDiffVo(sourceFuture.get(), targetFuture.get());
@@ -185,7 +189,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     @Override
     public List<FileProperties> listMetadata(Long orgId, String type) throws Exception {
-        String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
+        String cacheKey = CacheConstants.REDIS_META_KEY_PREFIX + orgId + ":" + type;
         try {
             Object cacheObj = redisCache.getCacheList(cacheKey);
             if(cacheObj instanceof List) {
@@ -227,7 +231,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
         });
 
         if(!list.isEmpty()) {
-            String cacheKey = REDIS_META_KEY_PREFIX + orgId + ":" + type;
+            String cacheKey = CacheConstants.REDIS_META_KEY_PREFIX + orgId + ":" + type;
             redisCache.deleteObject(cacheKey);
             redisCache.setCacheList(cacheKey, list);
             redisCache.expire(cacheKey, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
@@ -443,7 +447,7 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
     @Override
     public void clearCacheForOrg(Long orgId) {
         if(orgId == null) return;
-        Collection<String> keys = redisCache.keys(REDIS_META_KEY_PREFIX + orgId + ":*");
+        Collection<String> keys = redisCache.keys(CacheConstants.REDIS_META_KEY_PREFIX + orgId + ":*");
         if(keys != null && !keys.isEmpty()) redisCache.deleteObject(keys);
     }
 

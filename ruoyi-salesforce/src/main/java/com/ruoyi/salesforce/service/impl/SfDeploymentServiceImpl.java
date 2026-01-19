@@ -22,6 +22,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,6 +34,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -59,7 +61,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     @Autowired
     private SfRollbackService rollbackService;
 
-    // ================== 基础 CRUD ==================
+    @Autowired
+    @Qualifier("deployTaskExecutor")
+    private Executor deployExecutor;
 
     @Override
     public List<SfDeployment> selectSfDeploymentList(SfDeployment sfDeployment) {
@@ -117,28 +121,6 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         } catch(Exception e) {
             log.warn("触发预取任务失败: {}", e.getMessage());
         }
-
-        // 4. 【核心优化】触发增量比对 (仅计算当前新增的 items)
-        // 原代码: checkDiffStatus(deploymentId); // 这会触发全量比对
-        // 新代码: 只针对 items 进行比对
-        /*if(deployment.getTargetOrgId() != null) {
-            // 为了线程安全，复制一份列表引用传入异步线程
-            List<SfDeploymentItem> deltaItems = new ArrayList<>(items);
-
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 复用现有的核心比对逻辑，但只传入新增的列表
-                    doCalculateDiff(deployment, deltaItems);
-                } catch(Exception e) {
-                    log.error("增量比对失败", e);
-                    // 异常处理：标记为未知状态
-                    for(SfDeploymentItem item : deltaItems) {
-                        item.setDiffStatus("Unknown");
-                        sfDeploymentItemMapper.updateById(item);
-                    }
-                }
-            });
-        }*/
     }
 
     /**
@@ -268,7 +250,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 log.error("异步部署任务异常", e);
                 handleDeploymentError(deployment.getId(), "系统内部错误: " + e.getMessage());
             }
-        });
+        }, deployExecutor);
     }
 
     // =================================================================
@@ -525,7 +507,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 DeployWebSocketServer.sendMessage(deployment.getId(), buildErrorJson(e.getMessage()));
                 historyService.finishHistory(history.getId(), "Failed", e.getMessage());
             }
-        });
+        }, deployExecutor);
     }
 
     /**
@@ -633,7 +615,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     }
                 }
             }
-        });
+        }, deployExecutor);
     }
 
     // 为了兼容旧代码，提供一个重载方法 (普通部署调用这个)
@@ -881,7 +863,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                     sfDeploymentItemMapper.updateById(item);
                 }
             }
-        });
+        }, deployExecutor);
     }
 
     /**
@@ -1205,6 +1187,6 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 log.error("回滚启动失败", e);
                 handleDeploymentError(deployment.getId(), "回滚启动异常: " + e.getMessage());
             }
-        });
+        }, deployExecutor);
     }
 }

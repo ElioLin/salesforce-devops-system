@@ -705,20 +705,45 @@ export default {
             }
             return value; // 没找到则显示原始英文
         },
+        /**
+         * 【优化】获取状态标签颜色
+         * 逻辑：优先读取字典配置 -> 其次根据状态值硬编码兜底
+         */
         getStatusTagType(value) {
             if (!value) return 'info';
+
+            // 1. 尝试从字典中获取配置的样式 (listClass)
             const datas = this.dict.type.sys_salesforce_deploy_status;
             if (datas) {
                 const found = datas.find(item => item.value === value);
-                // 若依的 listClass 通常是: default, primary, success, info, warning, danger
-                // el-tag 的 type 是: '', success, info, warning, danger
                 if (found && found.listClass) {
+                    // 若依字典的 listClass 映射到 ElementUI Tag type
                     if (found.listClass === 'default') return 'info';
-                    if (found.listClass === 'primary') return ''; // el-tag 默认就是蓝色
-                    return found.listClass;
+                    if (found.listClass === 'primary') return ''; // 默认蓝色
+                    return found.listClass; // success, warning, danger, info
                 }
             }
-            return 'info';
+
+            // 2. 【新增兜底策略】如果字典里没配颜色，或者字典加载延迟，使用硬编码的行业标准色
+            // 确保 "部署成功" 永远是绿色，不会变成灰色
+            switch (value) {
+                case 'Succeeded':
+                case 'Validated':
+                    return 'success'; // 绿色
+                case 'Failed':
+                case 'Canceled':
+                    return 'danger';  // 红色
+                case 'Deploying':
+                case 'Validating':
+                case 'Processing':
+                case 'InProgress':
+                    return 'primary'; // 蓝色 (处理中)
+                case 'Pending':
+                case 'Queued':
+                    return 'warning'; // 黄色 (排队)
+                default:
+                    return 'info';    // 灰色 (未知)
+            }
         },
         statusType(status) {
             return this.getStatusTagType(status);
@@ -1385,30 +1410,37 @@ export default {
             }).catch(() => loading.close());
         },
         handleDiff(row) {
-            if (!this.deployment.targetOrgId) {
-                this.$modal.msgWarning("请先设置部署包的目标环境，才能进行比对！");
+            // 1. 优先使用传入参数中的 targetOrgId (来自元数据浏览器的选择)，如果没有则使用部署包默认的
+            const targetOrgId = row.targetOrgId || this.deployment.targetOrgId;
+            const sourceOrgId = row.sourceOrgId || this.deployment.sourceOrgId;
+
+            if (!targetOrgId) {
+                this.$modal.msgWarning("请先设置部署包的目标环境，或在下方列表中选择比对基准环境！");
                 return;
             }
+
             // 兼容传入的是 list row 还是 emit data
             const type = row.metadataType || row.type;
-            const name = row.memberName || row.name || row.fullName; // 兼容 fullName
+            const name = row.memberName || row.name || row.fullName;
 
             if (!type || !name) {
                 this.$modal.msgError("缺少必要的元数据参数 (Type/Name)，无法比对");
                 return;
             }
+
             const loading = this.$loading({
                 lock: true,
                 text: '正在从源环境和目标环境同时拉取代码，请稍候...',
                 spinner: 'el-icon-loading',
                 background: 'rgba(0, 0, 0, 0.7)'
             });
+
             request({
                 url: '/system/sf/meta/compare',
                 method: 'get',
                 params: {
-                    sourceOrgId: this.deployment.sourceOrgId,
-                    targetOrgId: this.deployment.targetOrgId,
+                    sourceOrgId: sourceOrgId,
+                    targetOrgId: targetOrgId,
                     type: type,
                     name: name
                 },
@@ -1416,19 +1448,27 @@ export default {
             }).then(response => {
                 loading.close();
                 const diffData = response.data;
-                this.previewTitle = `比对: ${name} (${type}) [左:目标环境 vs 右:源环境]`;
-                this.lang = this.getLanguage(name); // 自动识别语言
 
-                // 【修改】调用子组件打开
-                this.$refs.diffDialog.open(
-                    diffData.sourceContent,
-                    diffData.targetContent,
-                    title,
-                    lang,
-                    true
-                );
-            }).catch(() => {
+                // 【修复】定义局部变量 title 和 lang
+                const title = `比对: ${name} (${type}) [左:目标环境 vs 右:源环境]`;
+                const lang = this.getLanguage(name);
+
+                // 调用子组件打开
+                if (this.$refs.diffDialog) {
+                    this.$refs.diffDialog.open(
+                        diffData.sourceContent,
+                        diffData.targetContent,
+                        title,
+                        lang,
+                        true
+                    );
+                } else {
+                    this.$modal.msgError("比对组件加载失败，请刷新页面重试");
+                }
+            }).catch((e) => {
                 loading.close();
+                console.error("比对失败:", e); // 【修复】打印具体错误日志，防止静默失败
+                this.$modal.msgError("拉取比对数据失败，请查看控制台日志");
             });
         },
         clearColumnFilters() {

@@ -2,7 +2,7 @@ package com.ruoyi.common.constant;
 
 /**
  * 缓存的key 常量
- * 
+ *
  * @author ruoyi
  */
 public class CacheConstants
@@ -41,4 +41,24 @@ public class CacheConstants
      * 登录账户密码错误次数 redis key
      */
     public static final String PWD_ERR_CNT_KEY = "pwd_err_cnt:";
+
+    /**
+     * 缓存Salesforce的对象
+     */
+    public static final String CACHE_KEY_OBJS = "sf_meta_objs:";
+
+    /**
+     * 缓存Salesforce的字段
+     */
+    public static final String CACHE_KEY_FIELDS = "sf_meta_fields:";
+
+    /**
+     * 缓存Salesforce元数据内容
+     */
+    public static final String REDIS_CONTENT_KEY_PREFIX = "sf_content:";
+
+    /**
+     * 缓存Salesforce元数据
+     */
+    public static final String REDIS_META_KEY_PREFIX = "sf_meta_v1";
 }

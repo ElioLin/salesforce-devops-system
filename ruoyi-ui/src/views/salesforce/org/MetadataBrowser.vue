@@ -140,12 +140,12 @@
       <div class="server-count-info">
         <i class="el-icon-cloudy"></i> 服务端总数: <b>{{ total }}</b>
         <span class="ml-10" v-if="filteredList.length !== list.length">
-           (筛选后: <b class="text-primary">{{ filteredList.length }}</b>)
+          (筛选后: <b class="text-primary">{{ filteredList.length }}</b>)
         </span>
       </div>
 
-      <pagination v-show="total > 0" :total="filteredList.length" :page.sync="queryParams.pageNum" :limit.sync="queryParams.pageSize"
-        :page-sizes="[50, 100, 200, 300, 500]" @pagination="handlePagination" />
+      <pagination v-show="total > 0" :total="filteredList.length" :page.sync="queryParams.pageNum"
+        :limit.sync="queryParams.pageSize" :page-sizes="[50, 100, 200, 300, 500]" @pagination="handlePagination" />
     </div>
 
   </div>
@@ -189,11 +189,11 @@ export default {
       parentFilter: '',
       parentFilterOp: 'contains',
       diffFilter: '',
-      
+
       // 【新增 1.3】智能筛选字段
       dateFilter: 'all', // all, today, 3days, 7days
       onlyDiff: false,   // 仅显示差异
-      
+
       debounceTimer: null
     };
   },
@@ -221,7 +221,7 @@ export default {
       if (this.diffFilter) {
         result = result.filter(item => item.diffStatus === this.diffFilter);
       }
-      
+
       // 2. 仅显示差异复选框 (Smart Diff Toggle)
       if (this.onlyDiff) {
         result = result.filter(item => ['New', 'Changed'].includes(item.diffStatus));
@@ -232,11 +232,11 @@ export default {
         const now = new Date();
         const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
         const oneDay = 24 * 60 * 60 * 1000;
-        
+
         result = result.filter(item => {
           if (!item.lastModifiedDate) return false;
           const itemTime = new Date(item.lastModifiedDate).getTime();
-          
+
           if (this.dateFilter === 'today') {
             return itemTime >= todayStart;
           } else if (this.dateFilter === '3days') {
@@ -256,7 +256,7 @@ export default {
           const val = this.getShortName(item.fullName || '').toLowerCase();
           if (op === 'equals') return val === filter;
           if (op === 'not_contains') return !val.includes(filter);
-          return val.includes(filter); 
+          return val.includes(filter);
         });
       }
 
@@ -268,7 +268,7 @@ export default {
           const val = this.getParentName(item.fullName).toLowerCase();
           if (op === 'equals') return val === filter;
           if (op === 'not_contains') return !val.includes(filter);
-          return val.includes(filter); 
+          return val.includes(filter);
         });
       }
 
@@ -279,9 +279,9 @@ export default {
     },
     // 【新增】前端分页数据 (如果想支持前端真分页)
     pagedList() {
-        const start = (this.queryParams.pageNum - 1) * this.queryParams.pageSize;
-        const end = start + this.queryParams.pageSize;
-        return this.filteredList.slice(start, end);
+      const start = (this.queryParams.pageNum - 1) * this.queryParams.pageSize;
+      const end = start + this.queryParams.pageSize;
+      return this.filteredList.slice(start, end);
     }
   },
   watch: {
@@ -384,7 +384,7 @@ export default {
       // 重置智能筛选
       this.dateFilter = 'all';
       this.onlyDiff = false;
-      
+
       this.queryParams.keyword = '';
       this.queryParams.pageNum = 1;
       this.list = [];
@@ -392,8 +392,8 @@ export default {
     },
     // 【新增 1.3】处理智能筛选变更
     handleSmartFilterChange() {
-        this.queryParams.pageNum = 1; // 重置页码
-        // 筛选逻辑全在 computed: filteredList 中，这里只需触发视图更新
+      this.queryParams.pageNum = 1; // 重置页码
+      // 筛选逻辑全在 computed: filteredList 中，这里只需触发视图更新
     },
     handleInputSearch() {
       if (this.debounceTimer) {
@@ -458,7 +458,7 @@ export default {
           orgId: this.localTargetOrgId,
           type: this.queryParams.type,
           pageNum: 1,
-          pageSize: 10000, 
+          pageSize: 10000,
           keyword: this.queryParams.keyword
         };
         pTarget = request({
@@ -523,24 +523,24 @@ export default {
     // 其实对于 el-table，只要数据在 filteredList 里，它会自动渲染
     // 但为了配合底部的 pagination 组件，我们需要处理页码事件
     handlePagination() {
-        // 由于是前端分页/过滤，其实不需要重新请求 fetchList，
-        // 但这里 pagination 组件 emit 的是 fetchList? 
-        // 不，我们在 template 里改为了 @pagination="handlePagination"
-        
-        // 这里的逻辑：其实不需要做太多，因为 pagedList 计算属性依赖 pageNum
-        // 只要 pageNum 变了，Table data (如果是用 pagedList) 就会变
-        // 但目前 Table :data="filteredList"，意味着是“一页显示所有筛选结果”
-        // 如果想做前端分页，需要把 el-table :data 改为 pagedList
-        
-        // 建议：为了简单直观，智能筛选模式下，直接展示所有结果 (filteredList)，
-        // 分页组件仅作为数据量展示，或者可以保留 fetchList 以支持服务端分页(如果未来需要)
-        // 在此代码中，我保持 Table :data="filteredList"，即“筛选即所得，不分页展示”
-        // 这样体验最好，因为用户就是为了找那几个文件。
-        
-        // 如果数据量确实很大(>500)，建议 Table data 切回 pagedList
-        // 这里演示全量展示逻辑：
+      // 由于是前端分页/过滤，其实不需要重新请求 fetchList，
+      // 但这里 pagination 组件 emit 的是 fetchList? 
+      // 不，我们在 template 里改为了 @pagination="handlePagination"
+
+      // 这里的逻辑：其实不需要做太多，因为 pagedList 计算属性依赖 pageNum
+      // 只要 pageNum 变了，Table data (如果是用 pagedList) 就会变
+      // 但目前 Table :data="filteredList"，意味着是“一页显示所有筛选结果”
+      // 如果想做前端分页，需要把 el-table :data 改为 pagedList
+
+      // 建议：为了简单直观，智能筛选模式下，直接展示所有结果 (filteredList)，
+      // 分页组件仅作为数据量展示，或者可以保留 fetchList 以支持服务端分页(如果未来需要)
+      // 在此代码中，我保持 Table :data="filteredList"，即“筛选即所得，不分页展示”
+      // 这样体验最好，因为用户就是为了找那几个文件。
+
+      // 如果数据量确实很大(>500)，建议 Table data 切回 pagedList
+      // 这里演示全量展示逻辑：
     },
-    
+
     getDiffTagType(status) {
       if (status === 'New') return 'success';
       if (status === 'Changed') return 'warning';
@@ -583,10 +583,10 @@ export default {
       if (this.disabled) return;
       const currentType = this.queryParams.type;
       const isSelectAll = selection.length > 0;
-      
+
       // 注意：全选时，只选择当前 filteredList 里的项，还是所有 list?
       // 通常用户筛选后全选，只期望选择筛选出来的
-      const targetList = this.filteredList; 
+      const targetList = this.filteredList;
 
       if (isSelectAll) {
         const batchItems = [];
@@ -631,7 +631,7 @@ export default {
       }
       this.$emit('diff-code', {
         sourceOrgId: this.sourceOrgId,
-        targetOrgId: this.localTargetOrgId,
+        targetOrgId: this.localTargetOrgId, // 这里传出了用户在下拉框选的环境ID
         type: this.queryParams.type,
         name: row.fullName
       });
@@ -694,17 +694,41 @@ export default {
   line-height: 24px;
 }
 
-.mt-10 { margin-top: 10px; }
-.mt-20 { margin-top: 20px; }
-.ml-10 { margin-left: 10px; }
-.ml-20 { margin-left: 20px; }
+.mt-10 {
+  margin-top: 10px;
+}
 
-.w-100 { width: 100%; }
+.mt-20 {
+  margin-top: 20px;
+}
 
-.text-primary { color: #409EFF; }
-.text-warning { color: #E6A23C; }
-.text-success { color: #67C23A; }
-.text-info { color: #909399; }
+.ml-10 {
+  margin-left: 10px;
+}
+
+.ml-20 {
+  margin-left: 20px;
+}
+
+.w-100 {
+  width: 100%;
+}
+
+.text-primary {
+  color: #409EFF;
+}
+
+.text-warning {
+  color: #E6A23C;
+}
+
+.text-success {
+  color: #67C23A;
+}
+
+.text-info {
+  color: #909399;
+}
 
 .custom-header {
   display: flex;
