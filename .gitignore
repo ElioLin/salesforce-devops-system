@@ -1,47 +1,25 @@
-######################################################################
-# Build Tools
-
-.gradle
-/build/
-!gradle/wrapper/gradle-wrapper.jar
-
+# --- Java / Maven / IntelliJ ---
 target/
-!.mvn/wrapper/maven-wrapper.jar
-
-######################################################################
-# IDE
-
-### STS ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-
-### IntelliJ IDEA ###
-.idea
-*.iws
+*.class
+.idea/
 *.iml
-*.ipr
+.settings/
+.classpath
+.project
+logs/
+temp/
 
-### JRebel ###
-rebel.xml
-
-### NetBeans ###
-nbproject/private/
-build/*
-nbbuild/
+# --- Vue / Frontend ---
+node_modules/
 dist/
-nbdist/
-.nb-gradle/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
 
-######################################################################
-# Others
-*.log
-*.xml.versionsBackup
-*.swp
-
-!*/build/*.java
-!*/build/*.html
-!*/build/*.xml
+# --- 敏感配置 (非常重要！！！) ---
+# 如果你的 application.yml 或 application-druid.yml 里写了真实的数据库密码或SF密钥
+# 请选择以下一种方式：
+# 1. 忽略整个配置文件（自己本地保留，服务器上手动配）
+# src/main/resources/application-druid.yml
+# 2. 或者确保上传的是脱敏后的版本（把密码改成 ******）

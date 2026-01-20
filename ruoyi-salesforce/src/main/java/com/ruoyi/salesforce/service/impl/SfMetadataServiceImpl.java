@@ -512,4 +512,20 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
             return null; // Void return
         });
     }
+
+    /**
+     * 【新增 2.2】预检专用：验证 Org 连接有效性
+     * 利用 describeMetadata 发起一次轻量级调用，触发 Token 校验和网络连通性检查
+     */
+    @Override
+    public void validateOrgConnection(Long orgId) throws Exception {
+        if (orgId == null) return;
+        sfAuthService.executeWithRetry(orgId, () -> {
+            MetadataConnection conn = getMetadataConnection(orgId);
+            // 调用一次 describeMetadata，版本 58.0
+            // 只要不报错，说明 Token 有效且网络通畅
+            conn.describeMetadata(58.0);
+            return null;
+        });
+    }
 }

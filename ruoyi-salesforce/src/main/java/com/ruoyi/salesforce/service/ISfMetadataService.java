@@ -80,4 +80,11 @@ public interface ISfMetadataService {
      * 【新增】取消正在进行的部署
      */
     void cancelDeploy(Long orgId, String processId) throws Exception;
+
+    /**
+     * 检查 Org 连接
+     * @param orgId
+     * @throws Exception
+     */
+    void validateOrgConnection(Long orgId) throws Exception;
 }

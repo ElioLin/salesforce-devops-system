@@ -239,6 +239,22 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         List<SfDeploymentItem> items = selectItems(deploymentId);
         if(items.isEmpty()) throw new ServiceException("部署包为空，请先添加元数据");
 
+        // ========================= 【新增 2.2 预检机制】 =========================
+        // 在状态变更为 Processing 之前，同步检查环境连通性
+        // 如果这里失败，直接抛出异常给前端，状态保持原样 (Draft/Validated)，不会卡死
+        try {
+            log.info("开始部署预检: DeploymentId={}", deploymentId);
+            // 1. 检查源环境 (拉取代码需要)
+            sfMetadataService.validateOrgConnection(deployment.getSourceOrgId());
+            // 2. 检查目标环境 (部署需要)
+            sfMetadataService.validateOrgConnection(deployment.getTargetOrgId());
+            log.info("部署预检通过");
+        } catch(Exception e) {
+            log.error("部署预检失败", e);
+            throw new ServiceException("环境连接预检失败: " + e.getMessage() + "，请检查授权状态或网络连接。");
+        }
+        // =========================================================================
+
         deployment.setStatus("Processing");
         deployment.setErrorMsg("");
         sfDeploymentMapper.updateById(deployment);
@@ -277,6 +293,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         SfBackupService.BackupResult backupResult = null;
         String newAsyncId = null;
 
+        java.io.File sourceZipTemp = null;
         try {
             // [检查点]
             checkInterrupted(deployment.getId());
@@ -390,9 +407,15 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             update.setLastAsyncId(newAsyncId);
             sfDeploymentMapper.updateById(update);
 
+            // 将内存中的 ZIP 包写入临时文件，传递 File 对象给异步线程，而非 byte[]
+            // 这样当前线程结束时，zipBytes 即可被 GC 回收
+            if(zipBytes != null && zipBytes.length > 0) {
+                sourceZipTemp = saveTempFile(zipBytes, "deploy_source_" + deployment.getId());
+            }
+
             // 启动监控 (传入 rollbackFromHistoryId)
             startMonitoring(deployment.getId(), deployment.getTargetOrgId(), newAsyncId,
-                    history.getId(), backupResult, items, rollbackFromHistoryId, zipBytes);
+                    history.getId(), backupResult, items, rollbackFromHistoryId, sourceZipTemp);
 
         } catch(InterruptedException e) {
             log.info("任务被中断: {}", e.getMessage());
@@ -403,6 +426,16 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             handleDeploymentError(deployment.getId(), "流程异常: " + e.getMessage());
             DeployWebSocketServer.sendMessage(deployment.getId(), buildErrorJson(e.getMessage()));
             historyService.finishHistory(history.getId(), "Failed", e.getMessage());
+            // 如果 sourceZipTemp 已经创建，但因为这里抛异常导致 startMonitoring 没跑，
+            // 必须在这里删掉，否则会变成垃圾文件。
+            if(sourceZipTemp != null && sourceZipTemp.exists()) {
+                try {
+                    sourceZipTemp.delete();
+                    log.info("部署异常终止，已清理临时文件: {}", sourceZipTemp.getName());
+                } catch(Exception ex) {
+                    log.warn("清理临时文件失败", ex);
+                }
+            }
         }
     }
 
@@ -442,6 +475,18 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         if(!"Validated".equals(deployment.getStatus()) || deployment.getLastAsyncId() == null) {
             throw new ServiceException("只有【验证成功】的部署包才能使用快速部署");
         }
+
+        // ========================= 【新增 2.2 预检机制】 =========================
+        try {
+            log.info("开始快速部署预检: DeploymentId={}", deploymentId);
+            // 快速部署主要依赖目标环境，源环境虽然用于审计(catch了异常)，但建议一并检查保证健康
+            sfMetadataService.validateOrgConnection(deployment.getTargetOrgId());
+            // 源环境可选检查，如果为了严谨可以加上
+            sfMetadataService.validateOrgConnection(deployment.getSourceOrgId());
+        } catch(Exception e) {
+            throw new ServiceException("环境预检失败: " + e.getMessage());
+        }
+        // =========================================================================
 
         SfDeploymentHistory history = historyService.initHistory(deployment.getId(), deployment.getTargetOrgId(), "Quick");
 
@@ -497,9 +542,15 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 update.setLastAsyncId(newProcessId);
                 sfDeploymentMapper.updateById(update);
 
+                // 【优化】将 payloadZipBytes 转为临时文件
+                java.io.File payloadTemp = null;
+                if(payloadZipBytes != null) {
+                    payloadTemp = saveTempFile(payloadZipBytes, "quick_audit_" + deployment.getId());
+                }
+
                 // 4. 启动监控，传入 payloadZipBytes
                 startMonitoring(deployment.getId(), deployment.getTargetOrgId(), newProcessId,
-                        history.getId(), backupResult, items, null, payloadZipBytes);
+                        history.getId(), backupResult, items, null, payloadTemp);
 
             } catch(InterruptedException e) {
                 handleDeploymentLocalCancel(deployment.getId());
@@ -521,7 +572,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                                  Long historyId, SfBackupService.BackupResult backupResult,
                                  List<SfDeploymentItem> items,
                                  Long originalHistoryId,
-                                 byte[] payloadZipBytes) {
+                                 java.io.File sourceZipTemp) {
         CompletableFuture.runAsync(() -> {
             boolean done = false;
             long startTime = System.currentTimeMillis();
@@ -569,29 +620,39 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                         // 2. 保存备份明细 (只要部署成功 且 有备份结果，就应该保存)
                         // 修复：去掉了 && originalHistoryId != null 的条件
                         if("Succeeded".equals(finalStatus)) {
-                            // 1. 准备数据
-                            byte[] beforeZip = (backupResult != null) ? backupResult.getZipData() : null; // 旧代码
-                            byte[] afterZip = payloadZipBytes; // 新代码
+                            byte[] beforeZip = null;
+                            byte[] afterZip = null;
 
-                            // 2. 计算 Diff Map
-                            Map<String, String> diffMap = new HashMap<>();
                             try {
+                                // 1. 从磁盘读取备份文件 (Before State)
+                                if(backupResult != null && StringUtils.isNotEmpty(backupResult.getBackupFilePath())) {
+                                    beforeZip = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(backupResult.getBackupFilePath()));
+                                }
+
+                                // 2. 从临时文件读取源文件 (After State)
+                                if(sourceZipTemp != null && sourceZipTemp.exists()) {
+                                    afterZip = java.nio.file.Files.readAllBytes(sourceZipTemp.toPath());
+                                }
+
+                                // 3. 计算 Diff
+                                Map<String, String> diffMap = new HashMap<>();
                                 if(items != null && !items.isEmpty()) {
                                     diffMap = SfMetadataDiffUtils.generateDiffMap(beforeZip, afterZip, items);
                                 }
-                            } catch(Exception e) {
-                                log.warn("计算 Diff 失败", e);
-                            }
 
-                            // 3. 保存备份明细 (传入 diffMap)
-                            // 注意：回滚操作如果也想记录 Diff，逻辑同理
-                            if(backupResult != null) {
-                                try {
+                                // 4. 保存
+                                if(backupResult != null) {
                                     historyService.saveBackupAndDetails(historyId, backupResult.getBackupFilePath(),
                                             backupResult.getActionMap(), diffMap, items);
-                                } catch(Exception e) {
-                                    log.error("保存历史明细失败", e);
                                 }
+                            } catch(Exception e) {
+                                log.error("读取审计文件或计算Diff失败", e);
+                            } finally {
+                                // 5. 【关键】删除临时文件，清理磁盘
+                                if(sourceZipTemp != null && sourceZipTemp.exists()) {
+                                    sourceZipTemp.delete();
+                                }
+                                // beforeZip 和 afterZip 在此处变为垃圾对象，等待回收
                             }
                         }
 
@@ -612,6 +673,8 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
                 } catch(Exception e) {
                     log.error("监控线程异常", e);
+                    // 【资源释放】异常退出也要删文件
+                    if(sourceZipTemp != null && sourceZipTemp.exists()) sourceZipTemp.delete();
                     try {
                         TimeUnit.SECONDS.sleep(5);
                     } catch(InterruptedException ignored) {
@@ -975,29 +1038,41 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 ZipEntry entry;
                 while((entry = zis.getNextEntry()) != null) {
                     if(entry.isDirectory() || entry.getName().endsWith("package.xml")) continue;
-
-                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                    byte[] buffer = new byte[1024];
-                    int len;
-                    while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
-
-                    byte[] fileBytes = bos.toByteArray();
                     String fileName = entry.getName();
 
-                    // 【核心修改】调用增强版的 DiffUtils (含去噪逻辑)
-                    // 修复：Visualforce (.page/.component) 往往没有显式声明 xmlns:apex，导致 XML 解析报 Fatal Error
-                    // 策略：对这类文件直接使用物理 MD5，跳过 XML 语义分析；其他 XML 文件尝试语义分析，失败则降级。
+                    // ========================= 【优化 2.3 流式哈希】 =========================
                     String smartHash;
-                    if(fileName.endsWith(".page") || fileName.endsWith(".component")) {
-                        smartHash = DigestUtils.md5Hex(fileBytes);
+                    // 如果不是文本文件（例如 StaticResource, Binary），直接流式计算 MD5
+                    // 避免将大文件读入 ByteArrayOutputStream
+                    if(!isTextFile(fileName)) {
+                        // 使用 CloseShieldInputStream 防止 DigestUtils 关闭 zis
+                        // 注意：需确保引入 org.apache.commons.io.input.CloseShieldInputStream 或自行实现
+                        // 若没有 commons-io，可简单包装：
+                        java.io.FilterInputStream shield = new java.io.FilterInputStream(zis) {
+                            @Override
+                            public void close() throws IOException {
+                            }
+                        };
+                        smartHash = DigestUtils.md5Hex(shield);
                     } else {
-                        try {
-                            smartHash = SfMetadataDiffUtils.computeSemanticHash(fileName, fileBytes);
-                        } catch(Throwable e) {
-                            // 如果 XML 解析失败（如格式不规范），静默降级为普通 MD5，避免控制台刷 Fatal Error
+                        // 文本文件需要读出来做语义哈希
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                        byte[] buffer = new byte[1024];
+                        int len;
+                        while((len = zis.read(buffer)) > 0) bos.write(buffer, 0, len);
+                        byte[] fileBytes = bos.toByteArray();
+
+                        if(fileName.endsWith(".page") || fileName.endsWith(".component")) {
                             smartHash = DigestUtils.md5Hex(fileBytes);
+                        } else {
+                            try {
+                                smartHash = SfMetadataDiffUtils.computeSemanticHash(fileName, fileBytes);
+                            } catch(Throwable e) {
+                                smartHash = DigestUtils.md5Hex(fileBytes);
+                            }
                         }
                     }
+                    // =====================================================================
 
                     resultMap.put(fileName, smartHash);
                 }
@@ -1176,6 +1251,16 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
         SfDeployment deployment = selectSfDeploymentById(originalHistory.getDeploymentId());
 
+        // ========================= 【新增 2.2 预检机制】 =========================
+        try {
+            log.info("开始回滚预检: HistoryId={}", originalHistoryId);
+            // 回滚必须保证目标环境可连接
+            sfMetadataService.validateOrgConnection(deployment.getTargetOrgId());
+        } catch(Exception e) {
+            throw new ServiceException("回滚预检失败: 目标环境连接异常 (" + e.getMessage() + ")");
+        }
+        // =========================================================================
+
         // 2. 更新状态为 Deploying
         deployment.setStatus("Deploying");
         deployment.setErrorMsg("");
@@ -1191,5 +1276,22 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 handleDeploymentError(deployment.getId(), "回滚启动异常: " + e.getMessage());
             }
         }, deployExecutor);
+    }
+
+    /**
+     * 【新增 2.3】将字节数组写入临时文件，释放内存压力
+     */
+    private java.io.File saveTempFile(byte[] data, String prefix) {
+        if(data == null || data.length == 0) return null;
+        try {
+            java.io.File tempFile = java.io.File.createTempFile(prefix + "_", ".zip");
+            try(java.io.FileOutputStream fos = new java.io.FileOutputStream(tempFile)) {
+                fos.write(data);
+            }
+            return tempFile;
+        } catch(IOException e) {
+            log.error("创建临时文件失败", e);
+            return null;
+        }
     }
 }
