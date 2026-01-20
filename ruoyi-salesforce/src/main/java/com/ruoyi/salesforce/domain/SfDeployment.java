@@ -1,12 +1,10 @@
 package com.ruoyi.salesforce.domain;
 
-import com.alibaba.fastjson2.annotation.JSONField;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.Version;
 import com.fasterxml.jackson.annotation.JsonFormat;
-import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
-import com.ruoyi.common.core.domain.BaseEntity;
 
 import java.util.Date;
 import java.util.HashMap;
@@ -89,6 +87,9 @@ public class SfDeployment {
      * 更新者
      */
     private String updateBy;
+
+    @Version
+    private Long version;
 
     /**
      * 更新时间

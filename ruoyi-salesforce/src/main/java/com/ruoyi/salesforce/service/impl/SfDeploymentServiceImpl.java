@@ -92,10 +92,10 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addItems(Long deploymentId, List<SfDeploymentItem> items) {
-        checkIfLocked(deploymentId);
-
         SfDeployment deployment = sfDeploymentMapper.selectById(deploymentId);
         if(deployment == null) throw new ServiceException("部署包不存在");
+
+        checkIfLocked(deployment);
 
         // 1. 填充元数据信息 (修改人/时间)
         populateMetadataInfo(deployment.getSourceOrgId(), items);
@@ -113,6 +113,12 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             // 如果前端传了 "New"/"Changed"/"Same"，就直接存入数据库
 
             sfDeploymentItemMapper.insert(item);
+        }
+
+        deployment.setUpdateTime(new Date());
+        int rows = sfDeploymentMapper.updateById(deployment);
+        if(rows == 0) {
+            throw new ServiceException("数据已发生变更(乐观锁冲突)，请刷新页面后重试");
         }
 
         // 3. 触发异步预取内容
@@ -197,21 +203,24 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         // 【优化】校验状态。因为传入的是itemId，先查出 deploymentId
         SfDeploymentItem item = sfDeploymentItemMapper.selectById(itemIds.get(0));
         if(item != null) {
-            checkIfLocked(item.getDeploymentId());
+            SfDeployment deployment = sfDeploymentMapper.selectById(item.getDeploymentId());
+            if(deployment != null) {
+                checkIfLocked(deployment);
+
+                // 【核心优化 3.1】移除子项也要升级主表版本
+                deployment.setUpdateTime(new Date());
+                int rows = sfDeploymentMapper.updateById(deployment);
+                if(rows == 0) {
+                    throw new ServiceException("操作失败：部署包已被其他人修改，请刷新重试");
+                }
+            }
         }
 
         sfDeploymentItemMapper.deleteBatchIds(itemIds);
     }
 
-    /**
-     * 【新增】检查部署包是否被锁定（正在处理中）
-     */
-    private void checkIfLocked(Long deploymentId) {
-        SfDeployment deployment = sfDeploymentMapper.selectById(deploymentId);
-        if(deployment == null) return;
-
+    private void checkIfLocked(SfDeployment deployment) {
         String s = deployment.getStatus();
-        // 如果处于中间状态，禁止修改
         if("Processing".equals(s) || "Validating".equals(s) || "Deploying".equals(s) ||
                 "Pending".equals(s) || "InProgress".equals(s) || "Queued".equals(s)) {
             throw new ServiceException("当前部署包正在执行验证或部署任务，禁止修改元数据！");
@@ -224,6 +233,12 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 new LambdaQueryWrapper<SfDeploymentItem>().eq(SfDeploymentItem::getDeploymentId, deploymentId)
         );
     }
+
+    private void checkIfLocked(Long deploymentId) {
+        SfDeployment d = sfDeploymentMapper.selectById(deploymentId);
+        if(d != null) checkIfLocked(d);
+    }
+
 
     // ================== 部署核心逻辑 ==================
 
@@ -257,7 +272,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
         deployment.setStatus("Processing");
         deployment.setErrorMsg("");
-        sfDeploymentMapper.updateById(deployment);
+        // 【核心优化 3.1：乐观锁检查】
+        // 这里 updateById 会带上 WHERE id=? AND version=?
+        // 如果在此期间有人执行了 addItems 导致 version+1，这里就会更新失败返回 0
+        int rows = sfDeploymentMapper.updateById(deployment);
+        if(rows == 0) {
+            throw new ServiceException("部署启动失败：部署包内容或状态已被其他人修改，请刷新页面重新检查。");
+        }
 
         CompletableFuture.runAsync(() -> {
             try {
@@ -487,7 +508,11 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
         deployment.setStatus("Deploying");
         deployment.setErrorMsg("");
-        sfDeploymentMapper.updateById(deployment);
+        // 【核心优化 3.1：乐观锁检查】
+        int rows = sfDeploymentMapper.updateById(deployment);
+        if(rows == 0) {
+            throw new ServiceException("快速部署启动失败：数据已被修改，请刷新重试。");
+        }
 
         CompletableFuture.runAsync(() -> {
             SfBackupService.BackupResult backupResult = null;
@@ -1259,7 +1284,11 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         // 2. 更新状态为 Deploying
         deployment.setStatus("Deploying");
         deployment.setErrorMsg("");
-        sfDeploymentMapper.updateById(deployment);
+        // 【核心优化 3.1：乐观锁检查】
+        int rows = sfDeploymentMapper.updateById(deployment);
+        if(rows == 0) {
+            throw new ServiceException("回滚启动失败：部署包状态已被变更，请刷新重试。");
+        }
 
         // 3. 异步调用核心流程 (items 传 null，因为回滚包是基于历史生成的，不需要实时 items)
         CompletableFuture.runAsync(() -> {
