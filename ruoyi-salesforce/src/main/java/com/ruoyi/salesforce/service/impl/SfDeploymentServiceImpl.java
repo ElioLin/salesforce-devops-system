@@ -361,12 +361,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             deployOptions.setCheckOnly(checkOnly);
 
             // 如果是回滚，通常建议忽略警告并在出错时回滚
+            deployOptions.setRollbackOnError(true);
             if(isRollback) {
-                deployOptions.setRollbackOnError(true);
                 deployOptions.setIgnoreWarnings(true);
-            } else {
-                deployOptions.setRollbackOnError(true);
-                // 普通部署是否忽略警告可根据业务需求，这里保持默认
             }
 
             // 处理测试级别 (逻辑通用)
@@ -381,8 +378,6 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                 }
             } else if("RunLocalTests".equals(deployment.getTestLevel())) {
                 deployOptions.setTestLevel(TestLevel.RunLocalTests);
-            } else {
-//                deployOptions.setTestLevel(TestLevel.NoTestRun);
             }
 
             log.info("执行部署/回滚，Org: {}, Option: CheckOnly={}", deployment.getTargetOrgId(), checkOnly);
