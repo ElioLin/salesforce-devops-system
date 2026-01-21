@@ -73,25 +73,37 @@
             </el-row>
 
             <div class="config-section">
-                <el-form label-width="80px" size="small" :inline="true" class="config-form">
+                <div class="config-header">
+                    <span class="config-title"><i class="el-icon-s-operation"></i> 部署配置策略</span>
+                    <span class="save-status" :class="saveState.status">
+                        <i :class="saveState.icon"></i> {{ saveState.text }}
+                    </span>
+                </div>
+
+                <el-form label-width="90px" size="small" :inline="true" class="config-form">
                     <el-form-item label="测试级别">
-                        <el-select v-model="deployment.testLevel" placeholder="请选择" style="width: 220px">
-                            <el-option label="默认 (NoTestRun / Default)" value="NoTestRun" />
+                        <el-select v-model="deployment.testLevel" placeholder="请选择测试级别" style="width: 240px">
+                            <el-option label="默认 (NoTestRun / Default)" value="NoTestRun">
+                                <span style="float: left">默认 (Default)</span>
+                                <span style="float: right; color: #8492a6; font-size: 12px">生产环境必跑</span>
+                            </el-option>
                             <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
                             <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
                         </el-select>
                     </el-form-item>
-                    <el-form-item label="指定类名" v-if="deployment.testLevel === 'RunSpecifiedTests'">
-                        <el-select v-model="specifiedTestsArr" multiple filterable allow-create default-first-option
-                            placeholder="输入类名并回车" style="width: 800px" no-data-text="输入类名按回车添加">
-                        </el-select>
-                    </el-form-item>
-                    <el-form-item>
-                        <el-button type="text" icon="el-icon-check" @click="handleSaveConfig">保存配置</el-button>
-                    </el-form-item>
+
+                    <template v-if="deployment.testLevel === 'RunSpecifiedTests'">
+                        <el-form-item label="指定类名" class="spec-test-item">
+                            <el-select ref="testSelect" v-model="specifiedTestsArr" multiple filterable allow-create
+                                default-first-option placeholder="支持直接粘贴 (逗号/空格/换行分隔)，自动识别" style="width: 600px"
+                                no-data-text="请输入类名" @paste.native.capture.prevent="handleSmartPaste">
+                            </el-select>
+                            <el-button type="text" size="mini" icon="el-icon-delete" style="margin-left: 5px;"
+                                v-if="specifiedTestsArr.length > 0" @click="specifiedTestsArr = []">清空</el-button>
+                        </el-form-item>
+                    </template>
                 </el-form>
             </div>
-
             <build-console ref="buildConsole" :visible="showConsole"
                 :title="'DEVOPS TERMINAL - ' + (deployment.lastAsyncId || 'READY')" />
 
@@ -536,9 +548,14 @@ export default {
                 list: []
             },
             previewSearchQuery: '',
-
-
-            showConsole: false // 默认展开，用户体验更好，部署时能看到动静
+            configLoaded: false,
+            showConsole: false, // 默认展开，用户体验更好，部署时能看到动静
+            saveState: {
+                status: 'saved', // saved, saving, error
+                text: '配置已同步',
+                icon: 'el-icon-check'
+            },
+            saveTimer: null, // 防抖定时器
         };
     },
     computed: {
@@ -665,6 +682,32 @@ export default {
         }
     },
     watch: {
+        // 【新增】监听筛选条件变化，重置到第一页
+        columnFilters: {
+            handler() {
+                this.pagination.pageNum = 1;
+            },
+            deep: true
+        },
+        // 【优化】监听配置变化，触发自动保存
+        'deployment.testLevel'(val) {
+            // 【核心优化】如果配置还没加载完成，或者是初始化赋值，不触发保存
+            if (!this.configLoaded) return;
+
+            this.triggerAutoSave();
+        },
+
+        'specifiedTestsArr'(val) {
+            // 【核心优化】初始化时不触发
+            if (!this.configLoaded) return;
+
+            if (this.deployment.testLevel === 'RunSpecifiedTests') {
+                this.triggerAutoSave();
+            }
+        },
+
+        // 【注意】保留原有的 deployment.specifiedTests 监听用于初始化，但要注意不要死循环
+        // 建议修改原有的 watch 逻辑如下：
         'deployment.specifiedTests': {
             handler(val) {
                 if (val) {
@@ -674,13 +717,6 @@ export default {
                 }
             },
             immediate: true
-        },
-        // 【新增】监听筛选条件变化，重置到第一页
-        columnFilters: {
-            handler() {
-                this.pagination.pageNum = 1;
-            },
-            deep: true
         }
     },
     created() {
@@ -1269,19 +1305,6 @@ export default {
                 }
             }
         },
-        handleSaveConfig() {
-            const specTestsStr = this.specifiedTestsArr.join(',');
-
-            const data = {
-                id: this.deploymentId,
-                testLevel: this.deployment.testLevel,
-                specifiedTests: specTestsStr
-            };
-            updateDeployment(data).then(res => {
-                this.$modal.msgSuccess("配置已保存");
-                this.deployment.specifiedTests = specTestsStr;
-            });
-        },
         resetProgress() {
             this.progressStatus = null;
             this.compTotal = 0;
@@ -1300,6 +1323,7 @@ export default {
         },
         getDetail() {
             return getDeployment(this.deploymentId).then(res => {
+                this.configLoaded = false;
                 const newData = res.data || {};
                 if (newData.status === 'Validated') {
                     this.localCheckOnly = true;
@@ -1316,6 +1340,9 @@ export default {
                 if (activeStatuses.includes(this.deployment.status)) {
                     this.showConsole = true;
                 }
+                this.$nextTick(() => {
+                    this.configLoaded = true;
+                });
             });
         },
         getItems() {
@@ -1374,11 +1401,8 @@ export default {
             return '#409EFF';
         },
         handleRemoveItem(row) {
-            this.$confirm('确认移除该元数据吗？', "警告", { type: "warning" }).then(() => {
-                removeDeploymentItems(row.id).then(() => {
-                    this.$modal.msgSuccess("移除成功");
-                    this.getItems();
-                });
+            removeDeploymentItems(row.id).then(() => {
+                this.getItems();
             });
         },
         handleBack() {
@@ -1595,6 +1619,70 @@ export default {
                     this.deploying = false;
                     this.$modal.msgError("回滚启动失败: " + err.msg);
                 });
+            });
+        },
+        // 【新增】智能粘贴处理
+        handleSmartPaste(e) {
+            // 1. 获取剪贴板文本
+            let clipboardData = e.clipboardData || window.clipboardData;
+            if (!clipboardData) return;
+            let text = clipboardData.getData('Text');
+
+            if (!text) return;
+
+            // 2. 智能拆分：支持 逗号、空格、换行符、分号
+            // Regex: /[\s,;\n]+/ 会匹配所有空白和常见分隔符
+            let items = text.split(/[\s,;\n]+/).filter(item => item && item.trim().length > 0);
+
+            if (items.length > 0) {
+                // 3. 合并去重
+                const newSet = new Set([...this.specifiedTestsArr, ...items]);
+                this.specifiedTestsArr = Array.from(newSet);
+
+                this.$message.success(`已自动识别并添加 ${items.length} 个测试类`);
+
+                // 4. 解决 ElementUI select 输入框在粘贴后残留文本的问题
+                // 强制让 Select 失去焦点再获得焦点，或者直接重置 query
+                this.$nextTick(() => {
+                    if (this.$refs.testSelect) {
+                        this.$refs.testSelect.query = '';
+                        this.$refs.testSelect.selectedLabel = '';
+                        // 也可以尝试调用 blur 让输入框收起
+                        // this.$refs.testSelect.blur();
+                    }
+                });
+            }
+        },
+
+        // 【新增】触发自动保存（防抖）
+        triggerAutoSave() {
+            // 设置状态为“正在保存...”但暂不发送请求，给用户反应时间
+            this.saveState = { status: 'saving', text: '正在保存...', icon: 'el-icon-loading' };
+
+            if (this.saveTimer) clearTimeout(this.saveTimer);
+
+            this.saveTimer = setTimeout(() => {
+                this.doSaveConfig();
+            }, 1000); // 1秒后执行保存，避免频繁请求
+        },
+
+        // 【新增】执行保存逻辑
+        doSaveConfig() {
+            const specTestsStr = this.specifiedTestsArr.join(',');
+
+            // 只有当数据真的变化了才调API（可选优化，这里为了简单直接调）
+            const data = {
+                id: this.deploymentId,
+                testLevel: this.deployment.testLevel,
+                specifiedTests: specTestsStr
+            };
+
+            updateDeployment(data).then(res => {
+                this.saveState = { status: 'saved', text: '配置已保存', icon: 'el-icon-check' };
+                // 同步一下主对象，防止某些逻辑依赖
+                this.deployment.specifiedTests = specTestsStr;
+            }).catch(err => {
+                this.saveState = { status: 'error', text: '保存失败，请重试', icon: 'el-icon-warning' };
             });
         }
     }
@@ -1820,5 +1908,65 @@ export default {
     font-weight: 600;
     flex: 1;
     /* 让值占据剩余空间 */
+}
+
+.config-section {
+    margin-top: 20px;
+    background-color: #f8f9fa;
+    /* 更柔和的背景色 */
+    border: 1px solid #ebeef5;
+    border-radius: 6px;
+    padding: 15px 20px;
+    position: relative;
+    transition: all 0.3s;
+}
+
+.config-section:hover {
+    box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.05);
+}
+
+.config-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #e4e7ed;
+}
+
+.config-title {
+    font-weight: bold;
+    font-size: 14px;
+    color: #303133;
+}
+
+.config-form {
+    margin-bottom: 0;
+}
+
+.config-tip {
+    font-size: 12px;
+    color: #909399;
+    margin-left: 90px;
+    /* 对齐 label */
+    margin-top: 5px;
+}
+
+/* 自动保存状态样式 */
+.save-status {
+    font-size: 13px;
+    transition: all 0.3s;
+}
+
+.save-status.saved {
+    color: #67C23A;
+}
+
+.save-status.saving {
+    color: #E6A23C;
+}
+
+.save-status.error {
+    color: #F56C6C;
 }
 </style>

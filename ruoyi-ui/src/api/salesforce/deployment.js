@@ -151,5 +151,10 @@ export function rollbackDeployment(historyId) {
   })
 }
 
-// 【新增】下载备份文件 (通用下载方法通常直接用 axios 或 request 配置 responseType)
-// 这里我们复用通用的下载逻辑，但在 methods 里调用
+export function cloneDeployment(id, data) {
+  return request({
+    url: '/salesforce/deployment/clone/' + id,
+    method: 'post',
+    data: data
+  })
+}

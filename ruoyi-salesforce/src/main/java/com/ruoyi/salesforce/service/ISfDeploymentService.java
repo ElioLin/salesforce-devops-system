@@ -67,4 +67,12 @@ public interface ISfDeploymentService extends IService<SfDeployment> {
     void cancelDeploymentTask(Long deploymentId);
 
     void executeRollback(Long originalHistoryId);
+
+    /**
+     * 克隆部署包
+     * @param originalId 原部署包ID
+     * @param newConfig 新的配置（包含新标题、新环境ID等）
+     * @return 新部署包ID
+     */
+    Long cloneDeployment(Long originalId, SfDeployment newConfig);
 }

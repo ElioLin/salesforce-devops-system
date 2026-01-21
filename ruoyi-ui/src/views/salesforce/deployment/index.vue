@@ -35,10 +35,10 @@
         <el-button type="success" plain icon="el-icon-edit" size="mini" :disabled="single"
           @click="handleUpdate">修改</el-button>
       </el-col>
-      <el-col :span="1.5">
+      <!-- <el-col :span="1.5">
         <el-button type="danger" plain icon="el-icon-delete" size="mini" :disabled="multiple"
           @click="handleDelete">删除</el-button>
-      </el-col>
+      </el-col> -->
       <right-toolbar :showSearch.sync="showSearch" @queryTable="getList"></right-toolbar>
     </el-row>
 
@@ -79,6 +79,7 @@
         <template slot-scope="scope">
           <el-button size="mini" type="text" icon="el-icon-s-operation"
             @click="handleEnterDetail(scope.row)">管理/部署</el-button>
+          <el-button size="mini" type="text" icon="el-icon-document-copy" @click="handleClone(scope.row)">复制</el-button>
           <el-button size="mini" type="text" icon="el-icon-edit" @click="handleUpdate(scope.row)">修改</el-button>
           <el-button size="mini" type="text" icon="el-icon-delete" @click="handleDelete(scope.row)">删除</el-button>
         </template>
@@ -133,11 +134,43 @@
         <el-button @click="cancel">取 消</el-button>
       </div>
     </el-dialog>
+
+    <el-dialog title="复制部署包" :visible.sync="cloneOpen" width="500px" append-to-body :close-on-click-modal="false">
+      <el-form ref="cloneForm" :model="cloneForm" :rules="cloneRules" label-width="100px">
+        <el-form-item label="新标题" prop="title">
+          <el-input v-model="cloneForm.title" placeholder="请输入新部署包标题" />
+        </el-form-item>
+
+        <el-form-item label="源环境" prop="sourceOrgId">
+          <el-select v-model="cloneForm.sourceOrgId" placeholder="请选择源环境" style="width:100%">
+            <el-option v-for="item in orgOptions" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="目标环境" prop="targetOrgId">
+          <el-select v-model="cloneForm.targetOrgId" placeholder="请选择目标环境" style="width:100%">
+            <el-option v-for="item in orgOptions" :key="item.id" :label="item.name" :value="item.id"
+              :disabled="item.id === cloneForm.sourceOrgId" />
+          </el-select>
+        </el-form-item>
+
+        <div style="margin-left: 20px; font-size: 12px; color: #909399; line-height: 1.5">
+          <i class="el-icon-info"></i> 说明：<br />
+          1. 将复制原部署包中的所有元数据清单。<br />
+          2. 测试策略配置将被保留。<br />
+          3. 状态将重置为“草稿”，并清除所有比对结果。
+        </div>
+      </el-form>
+      <div slot="footer" class="dialog-footer">
+        <el-button type="primary" :loading="cloneLoading" @click="submitClone">确 定</el-button>
+        <el-button @click="cloneOpen = false">取 消</el-button>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script>
-import { listDeployment, addDeployment, updateDeployment, delDeployment, getDeployment } from "@/api/salesforce/deployment";
+import { listDeployment, addDeployment, updateDeployment, delDeployment, getDeployment, cloneDeployment } from "@/api/salesforce/deployment";
 import { listOrg } from "@/api/salesforce/org";
 import request from '@/utils/request';
 
@@ -178,7 +211,17 @@ export default {
         sourceOrgId: [{ required: true, message: "请选择源环境", trigger: "change" }],
         targetOrgId: [{ required: true, message: "请选择目标环境", trigger: "change" }],
         testLevel: [{ required: true, message: "请选择测试级别", trigger: "change" }]
-      }
+      },
+      // 【新增】复制相关
+      cloneOpen: false,
+      cloneLoading: false,
+      cloneForm: {},
+      cloneRules: {
+        title: [{ required: true, message: "标题不能为空", trigger: "blur" }],
+        sourceOrgId: [{ required: true, message: "请选择源环境", trigger: "change" }],
+        targetOrgId: [{ required: true, message: "请选择目标环境", trigger: "change" }],
+      },
+      originalRow: null, // 暂存被点击的行数据
     };
   },
   created() {
@@ -325,7 +368,49 @@ export default {
     },
     handleDelete(row) {
       const ids = row.id || this.ids;
-      this.$modal.confirm('是否确认删除部署包编号为"' + ids + '"的数据项？').then(function () {
+
+      let content = '';
+      let isRiskOperation = false;
+
+      // 判断逻辑：
+      // 1. 如果是批量删除 (row不存在)，默认视为高危操作
+      // 2. 如果是单条删除，且状态不是 'Draft' (说明可能跑过部署，有备份文件)，视为高危
+      if (!row || (row.status && row.status !== 'Draft')) {
+        isRiskOperation = true;
+      }
+
+      if (isRiskOperation) {
+        // 高危警告提示文案
+        content = `
+            <div style="font-size:14px;">
+                <p>确定要删除选中的部署包吗？</p>
+                <div style="background-color: #fef0f0; color: #f56c6c; padding: 10px; border-radius: 4px; margin-top: 10px; border: 1px solid #fde2e2;">
+                    <p style="font-weight:bold; margin-bottom: 5px;">
+                        <i class="el-icon-warning"></i> 警告：检测到该部署包包含执行记录
+                    </p>
+                    <p style="font-size:13px; line-height: 1.6;">
+                        删除操作将触发级联清理，永久删除以下关联数据：<br/>
+                        1. 所有的 <b>部署历史记录 & 审计日志</b><br/>
+                        2. 服务器上的 <b>物理备份文件 (ZIP)</b> <span style="font-weight:bold">(无法恢复!)</span><br/>
+                        3. 部署包明细配置
+                    </p>
+                </div>
+                <p style="margin-top:10px; color: #606266;">请确认您已做好备份，或不再需要追溯该次变更。</p>
+            </div>
+        `;
+      } else {
+        // 普通草稿删除提示
+        content = `是否确认删除部署包编号为 "<b>${ids}</b>" 的数据项？`;
+      }
+
+      this.$confirm(content, "删除确认", {
+        confirmButtonText: "确认删除",
+        cancelButtonText: "取消",
+        type: "warning",
+        dangerouslyUseHTMLString: true, // 允许解析 HTML
+        confirmButtonClass: isRiskOperation ? "el-button--danger" : "", // 高危操作按钮变红
+        closeOnClickModal: false
+      }).then(function () {
         return delDeployment(ids);
       }).then(() => {
         this.getList();
@@ -336,6 +421,46 @@ export default {
       this.$router.push({
         path: "/salesforce/deploymentDetail",
         query: { id: row.id }
+      });
+    },
+    /** 【新增】点击复制按钮 */
+    handleClone(row) {
+      this.originalRow = row;
+      this.cloneForm = {
+        title: row.title + " - Copy", // 默认加后缀
+        sourceOrgId: row.sourceOrgId,  // 默认保留原环境，方便用户微调
+        targetOrgId: row.targetOrgId
+      };
+      this.cloneOpen = true;
+      this.$nextTick(() => {
+        this.$refs["cloneForm"].clearValidate();
+      });
+    },
+
+    /** 【新增】提交复制 */
+    submitClone() {
+      this.$refs["cloneForm"].validate(valid => {
+        if (valid) {
+          this.cloneLoading = true;
+          cloneDeployment(this.originalRow.id, this.cloneForm).then(response => {
+            this.cloneLoading = false;
+            this.cloneOpen = false;
+            this.$modal.msgSuccess("复制成功");
+
+            // 复制完成后，直接跳转到新包的详情页，体验更流畅
+            const newId = response.data; // 确保后端返回了 ID
+            if (newId) {
+              this.$router.push({
+                path: "/salesforce/deploymentDetail",
+                query: { id: newId }
+              });
+            } else {
+              this.getList(); // 兜底刷新列表
+            }
+          }).catch(() => {
+            this.cloneLoading = false;
+          });
+        }
       });
     }
   }

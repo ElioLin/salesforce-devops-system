@@ -5,10 +5,14 @@ import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.SfDeployment;
 import com.ruoyi.salesforce.domain.SfDeploymentHistory;
+import com.ruoyi.salesforce.domain.SfDeploymentHistoryDetail;
 import com.ruoyi.salesforce.domain.SfDeploymentItem;
+import com.ruoyi.salesforce.mapper.SfDeploymentHistoryDetailMapper;
+import com.ruoyi.salesforce.mapper.SfDeploymentHistoryMapper;
 import com.ruoyi.salesforce.mapper.SfDeploymentItemMapper;
 import com.ruoyi.salesforce.mapper.SfDeploymentMapper;
 import com.ruoyi.salesforce.service.ISfDeploymentService;
@@ -21,16 +25,14 @@ import com.sforce.soap.metadata.*;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.servlet.http.HttpServletResponse;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -60,6 +62,14 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
     @Autowired
     private SfRollbackService rollbackService;
+
+    @Autowired
+    private SfDeploymentItemServiceImpl sfDeploymentItemService;
+
+    @Autowired
+    private SfDeploymentHistoryMapper sfDeploymentHistoryMapper;
+    @Autowired
+    private SfDeploymentHistoryDetailMapper sfDeploymentHistoryDetailMapper;
 
     @Autowired
     @Qualifier("deployTaskExecutor")
@@ -186,14 +196,68 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     }
 
     @Override
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public int deleteSfDeploymentByIds(Long[] ids) {
-        for(Long id : ids) {
-            sfDeploymentItemMapper.delete(
-                    new LambdaQueryWrapper<SfDeploymentItem>().eq(SfDeploymentItem::getDeploymentId, id)
-            );
+        if(ids == null || ids.length == 0) return 0;
+        List<Long> deploymentIds = Arrays.asList(ids);
+
+        // =================================================================================
+        // 阶段 1: 清理历史记录、审计明细、物理备份文件
+        // =================================================================================
+
+        // 1.1 查出这些部署包关联的所有历史记录
+        List<SfDeploymentHistory> histories = sfDeploymentHistoryMapper.selectList(
+                new LambdaQueryWrapper<SfDeploymentHistory>()
+                        .in(SfDeploymentHistory::getDeploymentId, deploymentIds)
+        );
+
+        if(histories != null && !histories.isEmpty()) {
+            List<Long> historyIds = new ArrayList<>();
+            for(SfDeploymentHistory history : histories) {
+                historyIds.add(history.getId());
+
+                // 1.2 【关键】删除磁盘上的物理备份文件
+                if(StringUtils.isNotEmpty(history.getBackupPath())) {
+                    try {
+                        File backupFile = new File(history.getBackupPath());
+                        if(backupFile.exists() && backupFile.isFile()) {
+                            boolean deleted = backupFile.delete();
+                            if(deleted) {
+                                log.info("已清理部署包删除后的关联备份文件: {}", history.getBackupPath());
+                            }
+                        }
+                    } catch(Exception e) {
+                        // 文件删除失败不应阻断数据库删除流程，仅记录日志
+                        log.warn("清理备份文件失败: {} - {}", history.getBackupPath(), e.getMessage());
+                    }
+                }
+            }
+
+            // 1.3 批量删除历史明细 (审计日志)
+            if(!historyIds.isEmpty()) {
+                sfDeploymentHistoryDetailMapper.delete(
+                        new LambdaQueryWrapper<SfDeploymentHistoryDetail>()
+                                .in(SfDeploymentHistoryDetail::getHistoryId, historyIds)
+                );
+
+                // 1.4 批量删除历史主表
+                sfDeploymentHistoryMapper.deleteBatchIds(historyIds);
+            }
         }
-        return sfDeploymentMapper.deleteBatchIds(Arrays.asList(ids));
+
+        // =================================================================================
+        // 阶段 2: 清理部署包自身数据
+        // =================================================================================
+
+        // 2.1 批量删除部署包明细 (Items)
+        // 使用 delete 配合条件构造器，比循环 delete 性能更好
+        sfDeploymentItemMapper.delete(
+                new LambdaQueryWrapper<SfDeploymentItem>()
+                        .in(SfDeploymentItem::getDeploymentId, deploymentIds)
+        );
+
+        // 2.2 批量删除部署包主表
+        return sfDeploymentMapper.deleteBatchIds(deploymentIds);
     }
 
     @Override
@@ -1206,8 +1270,38 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     }
 
     private boolean isTextFile(String name) {
+        if(StringUtils.isEmpty(name)) return false;
         String n = name.toLowerCase();
-        return n.endsWith(".xml") || n.endsWith(".cls") || n.endsWith(".trigger") || n.endsWith(".page") || n.endsWith(".component") || n.endsWith(".object") || n.endsWith(".field") || n.endsWith(".layout") || n.endsWith(".profile") || n.endsWith(".permissionset") || n.endsWith(".js") || n.endsWith(".css") || n.endsWith(".html") || n.endsWith(".txt") || n.endsWith(".json") || n.endsWith(".labels") || n.endsWith(".workflow") || n.endsWith(".flow");
+
+        // 1. 核心修复：添加 .flexipage
+        // 2. 扩展支持：添加 .tab (CustomTab), .app (CustomApp), .quickAction, .remoteSite 等
+        return n.endsWith(".xml")
+                || n.endsWith(".cls")
+                || n.endsWith(".trigger")
+                || n.endsWith(".page")       // Visualforce Page
+                || n.endsWith(".component")  // Visualforce Component
+                || n.endsWith(".flexipage")  // 【修复点】Lightning Page
+                || n.endsWith(".object")
+                || n.endsWith(".field")
+                || n.endsWith(".layout")
+                || n.endsWith(".profile")
+                || n.endsWith(".permissionset")
+                || n.endsWith(".tab")        // 【建议补充】Custom Tab
+                || n.endsWith(".app")        // 【建议补充】Custom App
+                || n.endsWith(".quickaction")// 【建议补充】Quick Action
+                || n.endsWith(".remotesite") // 【建议补充】Remote Site Setting
+                || n.endsWith(".group")      // 【建议补充】Public Group
+                || n.endsWith(".queue")      // 【建议补充】Queue
+                || n.endsWith(".role")       // 【建议补充】Role
+                || n.endsWith(".js")
+                || n.endsWith(".css")
+                || n.endsWith(".html")
+                || n.endsWith(".txt")
+                || n.endsWith(".json")
+                || n.endsWith(".labels")
+                || n.endsWith(".workflow")
+                || n.endsWith(".flow")
+                || n.endsWith(".svg");       // SVG 虽然是图片，但本质是 XML 文本，也可以预览
     }
 
     private byte[] readStream(InputStream in) throws IOException {
@@ -1317,5 +1411,75 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             log.error("创建临时文件失败", e);
             return null;
         }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Long cloneDeployment(Long originalId, SfDeployment newConfig) {
+        // 1. 查询原主表信息
+        SfDeployment original = sfDeploymentMapper.selectById(originalId);
+        if(original == null) {
+            throw new ServiceException("原部署包不存在");
+        }
+
+        // 2. 查询原明细列表
+        List<SfDeploymentItem> originalItems = selectItems(originalId);
+        if(originalItems == null || originalItems.isEmpty()) {
+            throw new ServiceException("原部署包没有元数据，无法复制");
+        }
+
+        // 3. 构建新部署包对象
+        SfDeployment newDeploy = new SfDeployment();
+
+        // 【优化】主表也可以使用 copyProperties，然后重置关键字段
+        BeanUtils.copyProperties(original, newDeploy);
+
+        // 3.1 应用用户的新配置 & 重置主表关键字段
+        newDeploy.setId(null); // 【重要】ID必须置空，让数据库自增
+        newDeploy.setTitle(newConfig.getTitle());
+        newDeploy.setSourceOrgId(newConfig.getSourceOrgId());
+        newDeploy.setTargetOrgId(newConfig.getTargetOrgId());
+
+        newDeploy.setStatus("Draft");
+        newDeploy.setCreateBy(SecurityUtils.getUsername());
+        newDeploy.setCreateTime(new Date());
+        newDeploy.setUpdateTime(new Date());
+        newDeploy.setVersion(0L); // 重置乐观锁
+        newDeploy.setErrorMsg("");
+        newDeploy.setLastAsyncId(null);
+
+        // 4. 插入主表
+        sfDeploymentMapper.insert(newDeploy);
+        Long newDeploymentId = newDeploy.getId();
+
+        // 5. 构建明细项列表
+        List<SfDeploymentItem> newItems = new ArrayList<>(originalItems.size());
+
+        for(SfDeploymentItem originalItem : originalItems) {
+            SfDeploymentItem newItem = new SfDeploymentItem();
+
+            // 【核心优化 1】使用 BeanUtils 进行全量属性复制
+            // 这样以后如果 SfDeploymentItem 加了新字段，这里会自动带过去，不用改代码
+            BeanUtils.copyProperties(originalItem, newItem);
+
+            // 【核心优化 2】手动重置/覆盖那些“不应该被复制”或“需要变更”的字段
+            newItem.setId(null); // 【关键】置空ID，否则会主键冲突或更新原数据
+            newItem.setDeploymentId(newDeploymentId); // 关联到新主表
+            newItem.setCreateTime(new Date());
+
+            // 重置状态信息
+            newItem.setAction("Add");
+            newItem.setDiffStatus("Unknown");
+//            newItem.setLastModifiedByName("");
+//            newItem.setLastModifiedDate(null);
+
+            newItems.add(newItem);
+        }
+
+        if(!newItems.isEmpty()) {
+            sfDeploymentItemService.saveBatch(newItems);
+        }
+
+        return newDeploymentId;
     }
 }
