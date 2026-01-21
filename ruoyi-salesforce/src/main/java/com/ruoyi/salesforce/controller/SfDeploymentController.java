@@ -205,4 +205,15 @@ public class SfDeploymentController extends BaseController {
         sfDeploymentService.cancelDeploymentTask(deploymentId);
         return AjaxResult.success("取消请求已提交");
     }
+
+    /**
+     * 复制/克隆部署包
+     */
+    @PreAuthorize("@ss.hasPermi('salesforce:deployment:add')")
+    @Log(title = "复制部署包", businessType = BusinessType.INSERT)
+    @PostMapping("/clone/{id}")
+    public AjaxResult clone(@PathVariable("id") Long id, @RequestBody SfDeployment newConfig) {
+        Long newId = sfDeploymentService.cloneDeployment(id, newConfig);
+        return AjaxResult.success(newId);
+    }
 }

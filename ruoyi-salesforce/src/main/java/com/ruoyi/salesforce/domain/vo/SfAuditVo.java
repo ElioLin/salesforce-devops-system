@@ -22,4 +22,7 @@ public class SfAuditVo {
     private String action;
     private String diffContent;     // 核心差异文本
     private String backupPath;      // 用于判断是否显示"预览备份"按钮
+
+    /** 部署包标题 (新增) */
+    private String deploymentTitle;
 }

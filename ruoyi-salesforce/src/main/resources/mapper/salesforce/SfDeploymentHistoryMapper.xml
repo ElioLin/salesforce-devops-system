@@ -7,6 +7,8 @@
     <resultMap id="AuditResult" type="com.ruoyi.salesforce.domain.vo.SfAuditVo">
         <result property="historyId" column="history_id"/>
         <result property="deploymentId" column="deployment_id"/>
+        <result property="deploymentTitle" column="deployment_title"/>
+
         <result property="type" column="type"/>
         <result property="status" column="status"/>
         <result property="createBy" column="create_by"/>
@@ -22,7 +24,7 @@
         SELECT
         h.id as history_id,
         h.deployment_id,
-        h.type,
+        s.title as deployment_title, h.type,
         h.status,
         h.create_by,
         h.start_time,
@@ -33,6 +35,7 @@
         d.diff_content
         FROM sf_deployment_history_detail d
         LEFT JOIN sf_deployment_history h ON d.history_id = h.id
+        LEFT JOIN sf_deployment s ON h.deployment_id = s.id
         <where>
             <if test="type != null and type != ''">
                 AND d.metadata_type = #{type}

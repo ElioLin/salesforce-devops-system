@@ -38,11 +38,26 @@
                                         }}</el-tag>
                                 </div>
                                 <div class="header-right">
-                                    <span class="info-text">操作人: {{ item.createBy }}</span>
+                                    <el-tooltip content="点击跳转至部署包详情" placement="top" v-if="item.deploymentTitle">
+                                        <el-link type="primary" :underline="false" icon="el-icon-connection"
+                                            class="deployment-link" @click="handleGoToDeployment(item.deploymentId)">
+                                            {{ item.deploymentTitle }}
+                                        </el-link>
+                                    </el-tooltip>
+                                    <span v-else class="info-text">未知部署包</span>
+
                                     <el-divider direction="vertical"></el-divider>
-                                    <span class="info-text">类型: {{ item.type }}</span>
+
+                                    <span class="info-text"><i class="el-icon-user"></i> {{ item.createBy }}</span>
+
+                                    <el-divider direction="vertical"></el-divider>
+
+                                    <el-tag size="mini" effect="plain" type="info" class="history-type-tag">
+                                        {{ getOperationTypeLabel(item.type) }}
+                                    </el-tag>
 
                                     <el-button v-if="item.backupPath" type="text" icon="el-icon-files"
+                                        style="margin-left: 10px;"
                                         @click="handlePreviewBackup(item.historyId)">备份包</el-button>
                                 </div>
                             </div>
@@ -161,7 +176,7 @@ export default {
         };
     },
     computed: {
-        
+
         // 【新增】计算过滤后的文件列表
         filteredPreviewFiles() {
             if (!this.previewSearchQuery) {
@@ -169,7 +184,7 @@ export default {
                 return this.previewDialog.files.filter(f => f !== 'package.xml');
             }
             const query = this.previewSearchQuery.toLowerCase();
-            return this.previewDialog.files.filter(file => 
+            return this.previewDialog.files.filter(file =>
                 file !== 'package.xml' && file.toLowerCase().includes(query)
             );
         }
@@ -315,6 +330,29 @@ export default {
                 console.error("Download error:", error);
                 this.$modal.msgError("下载请求失败");
             });
+        },
+        /**
+         * 【新增】跳转到部署包详情页
+         */
+        handleGoToDeployment(id) {
+            if (!id) return;
+            this.$router.push({
+                path: "/salesforce/deploymentDetail",
+                query: { id: id }
+            });
+        },
+
+        /**
+         * 【新增】美化操作类型的显示
+         */
+        getOperationTypeLabel(type) {
+            const map = {
+                'Deploy': '完整部署',
+                'Validate': '仅验证',
+                'Quick': '快速部署',
+                'Rollback': '回滚'
+            };
+            return map[type] || type;
         }
     }
 };
@@ -393,7 +431,8 @@ export default {
     overflow-y: auto;
     background: #fff;
     /* height: calc(100% - 45px);  <-- 【删除】这行固定高度 */
-    height: 0; /* 【新增】配合 flex:1 在列方向上滚动 */
+    height: 0;
+    /* 【新增】配合 flex:1 在列方向上滚动 */
 }
 
 .file-ul {
