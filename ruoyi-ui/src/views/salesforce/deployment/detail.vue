@@ -538,7 +538,7 @@ export default {
             canceling: false,
             pagination: {
                 pageNum: 1,
-                pageSize: 20, // 默认每页显示20条，减少渲染压力
+                pageSize: 50, // 默认每页显示20条，减少渲染压力
                 total: 0
             },
             historyList: [],
