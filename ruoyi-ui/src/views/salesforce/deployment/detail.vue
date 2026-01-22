@@ -113,7 +113,7 @@
                         <span class="title">
                             <i class="el-icon-collection"></i> 元数据处理
                             <el-tag size="mini" effect="plain" class="ml-10" v-if="compStateText">{{ compStateText
-                            }}</el-tag>
+                                }}</el-tag>
                         </span>
                         <span class="count" v-if="compTotal > 0">{{ compDone }} / {{ compTotal }}</span>
                     </div>
@@ -963,6 +963,17 @@ export default {
                             this.$modal.msgSuccess(this.localCheckOnly ? "验证成功！" : "部署成功！");
                             this.compStateText = this.localCheckOnly ? "验证完成" : "部署完成";
                             this.appendLog("Process Finished Successfully.", 'success');
+                            // 如果是正式部署成功 (Succeeded)，自动触发重新计算差异
+                            // 注意：验证 (Validated) 不会改变目标环境，所以不需要重算
+                            if (this.deployment.status === 'Succeeded') {
+                                this.appendLog("Auto-triggering difference recalculation...", 'cmd');
+
+                                // 使用 setTimeout 稍微延迟，避免与部署完成的提示冲突，体验更丝滑
+                                setTimeout(() => {
+                                    // 调用现有的状态检查方法 (复用"重新计算差异"按钮的逻辑)
+                                    this.handleCheckStatus();
+                                }, 1000);
+                            }
                         } else {
                             let errMsg = res.errorMessage || res.errorMsg || "未知错误";
                             this.appendLog("Process Failed: " + errMsg, 'error');
@@ -1363,7 +1374,7 @@ export default {
             }
             this.isCheckingStatus = true;
             checkDiffStatus(this.deploymentId).then(res => {
-                this.$modal.msgSuccess("计算已在后台开始...");
+                this.$modal.msgSuccess("新的差异计算已在后台开始...");
                 this.getItems();
                 this.startStatusPolling();
             }).catch(() => {
