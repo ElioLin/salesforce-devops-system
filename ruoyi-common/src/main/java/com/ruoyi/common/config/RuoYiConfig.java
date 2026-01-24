@@ -5,7 +5,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * 读取项目相关配置
- * 
+ *
  * @author ruoyi
  */
 @Component
@@ -20,6 +20,12 @@ public class RuoYiConfig
 
     /** 版权年份 */
     private String copyrightYear;
+
+    /** 版权年份 */
+    private String copyright;
+
+    public String getCopyright() { return copyright; }
+    public void setCopyright(String copyright) { this.copyright = copyright; }
 
     /** 上传路径 */
     private static String profile;
