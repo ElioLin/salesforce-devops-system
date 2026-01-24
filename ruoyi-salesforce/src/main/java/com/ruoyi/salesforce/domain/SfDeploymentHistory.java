@@ -57,4 +57,8 @@ public class SfDeploymentHistory {
      * 备注
      */
     private String remark;
+
+    /** 部署包标题 (非数据库字段) */
+    @TableField(exist = false)
+    private String deploymentTitle;
 }
