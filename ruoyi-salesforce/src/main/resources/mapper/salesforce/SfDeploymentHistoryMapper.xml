@@ -47,4 +47,42 @@
         ORDER BY h.start_time DESC
     </select>
 
+    <select id="selectDailyDeployCount" resultType="java.util.Map">
+        SELECT
+            DATE_FORMAT(start_time, '%m-%d') as dateStr,
+            COUNT(*) as countVal
+        FROM sf_deployment_history
+        WHERE start_time >= DATE_SUB(CURDATE(), INTERVAL #{days} DAY)
+        GROUP BY DATE_FORMAT(start_time, '%m-%d')
+        ORDER BY dateStr ASC
+    </select>
+
+    <select id="selectStatusDistribution" resultType="java.util.Map">
+        SELECT status as name, COUNT(*) as value
+        FROM sf_deployment_history
+        GROUP BY status
+    </select>
+
+    <select id="countWeeklyDeployments" resultType="Long">
+        SELECT COUNT(*) FROM sf_deployment_history
+        WHERE YEARWEEK(start_time, 1) = YEARWEEK(CURDATE(), 1)
+    </select>
+
+    <select id="countSuccessDeployments" resultType="Long">
+        SELECT COUNT(*) FROM sf_deployment_history WHERE status = 'Succeeded'
+    </select>
+
+    <select id="countTotalHistory" resultType="Long">
+        SELECT COUNT(*) FROM sf_deployment_history
+    </select>
+
+    <select id="selectRecentList" resultType="com.ruoyi.salesforce.domain.SfDeploymentHistory">
+        SELECT
+            h.*,
+            s.title as deploymentTitle
+        FROM sf_deployment_history h
+                 LEFT JOIN sf_deployment s ON h.deployment_id = s.id
+        ORDER BY h.start_time DESC
+            LIMIT #{limit}
+    </select>
 </mapper>

@@ -1056,18 +1056,40 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         }
     }
 
+    /**
+     * 【优化】获取元数据文件的哈希值
+     * 修复 CustomLabel 和 MatchingRule 识别为 Invalid 的问题
+     */
     private String getMetadataHash(Map<String, String> fileMap, SfDeploymentItem item) {
         String type = item.getMetadataType();
         String name = item.getMemberName();
 
+        // 1. 【核心修复】CustomLabel 特殊处理
+        // 原因：API 总是返回 labels/CustomLabels.labels，文件名不包含具体的 Label Name
+        if("CustomLabel".equals(type)) {
+            // 只要 ZIP 包里有 CustomLabels.labels 文件，就认为该 Label 存在
+            // 注意：这里使用的是整个文件的哈希。如果包里有多个 Label，其中一个变了，所有 Label 都会显示 Changed。
+            // 这是文件级比对的局限性，但比显示 Invalid 要好。
+            for(Map.Entry<String, String> entry : fileMap.entrySet()) {
+                if(entry.getKey().endsWith("labels/CustomLabels.labels")) {
+                    return entry.getValue();
+                }
+            }
+            // 如果没找到文件，说明目标环境里连 CustomLabels.labels 都没有，那就是 New/Invalid
+            return null;
+        }
+
+        // 2. 处理对象子元素 (Field, ValidationRule, MatchingRule 等)
         if(isObjectChild(type)) {
             String parentName = name.contains(".") ? name.split("\\.")[0] : name;
+            // 匹配 objects/Account.object
             String searchKey = "objects/" + parentName + ".object";
             for(Map.Entry<String, String> entry : fileMap.entrySet()) {
                 if(entry.getKey().endsWith(searchKey)) return entry.getValue();
             }
         }
 
+        // 3. 处理工作流子元素 (WorkflowRule 等)
         if(isWorkflowChild(type)) {
             String parentName = name.contains(".") ? name.split("\\.")[0] : name;
             String searchKey = "workflows/" + parentName + ".workflow";
@@ -1076,6 +1098,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             }
         }
 
+        // 4. 处理 LWC/Aura Bundle (文件夹哈希)
         if(isBundleType(type)) {
             List<String> hashes = new ArrayList<>();
             String bundleFolder = "/" + name + "/";
@@ -1088,20 +1111,33 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
             }
         }
 
+        // 5. 通用匹配逻辑 (匹配文件名包含 MemberName 的文件)
         for(Map.Entry<String, String> entry : fileMap.entrySet()) {
             String fileName = entry.getKey();
+            // 精确匹配文件名部分
             if(fileName.contains("/" + name + ".") || fileName.startsWith(name + ".")) {
+                // 排除 -meta.xml 元数据描述文件 (通常我们比对的是代码主体)
                 if(!fileName.endsWith("-meta.xml")) return entry.getValue();
             }
         }
+
+        // 6. 模糊匹配兜底
         for(Map.Entry<String, String> entry : fileMap.entrySet()) {
             if(entry.getKey().contains(name)) return entry.getValue();
         }
         return null;
     }
 
+    /**
+     * 【优化】判断是否为 CustomObject 的子元素
+     * 补充 MatchingRule
+     */
     private boolean isObjectChild(String type) {
-        return Arrays.asList("CustomField", "WebLink", "ValidationRule", "RecordType", "ListView", "FieldSet", "CompactLayout", "BusinessProcess", "Index", "SharingReason").contains(type);
+        return Arrays.asList(
+                "CustomField", "WebLink", "ValidationRule", "RecordType", "ListView",
+                "FieldSet", "CompactLayout", "BusinessProcess", "Index", "SharingReason",
+                "MatchingRule" // 【新增】匹配规则也是存在于 .object 文件中的
+        ).contains(type);
     }
 
     private boolean isWorkflowChild(String type) {
