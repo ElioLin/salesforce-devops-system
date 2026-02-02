@@ -4,6 +4,7 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.ruoyi.common.annotation.DataScope;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.common.utils.StringUtils;
@@ -76,6 +77,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     private Executor deployExecutor;
 
     @Override
+    @DataScope(deptAlias = "d", userAlias = "d")
     public List<SfDeployment> selectSfDeploymentList(SfDeployment sfDeployment) {
         return this.baseMapper.selectSfDeploymentList(sfDeployment);
     }
@@ -96,6 +98,13 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     public int insertSfDeployment(SfDeployment sfDeployment) {
         sfDeployment.setCreateTime(new Date());
         sfDeployment.setStatus("Draft");
+        // 【新增】自动注入当前用户的 部门ID 和 用户ID
+        try {
+            sfDeployment.setUserId(SecurityUtils.getUserId());
+            sfDeployment.setDeptId(SecurityUtils.getDeptId());
+        } catch (Exception e) {
+            log.warn("无法获取用户信息，可能是定时任务触发");
+        }
         return sfDeploymentMapper.insert(sfDeployment);
     }
 
@@ -1483,7 +1492,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         newDeploy.setVersion(0L); // 重置乐观锁
         newDeploy.setErrorMsg("");
         newDeploy.setLastAsyncId(null);
-
+        // 【新增】克隆出来的新数据，归属权归当前操作人
+        newDeploy.setUserId(SecurityUtils.getUserId());
+        newDeploy.setDeptId(SecurityUtils.getDeptId());
         // 4. 插入主表
         sfDeploymentMapper.insert(newDeploy);
         Long newDeploymentId = newDeploy.getId();

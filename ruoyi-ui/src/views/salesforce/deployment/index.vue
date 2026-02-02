@@ -46,6 +46,12 @@
       :default-sort="defaultSort" @sort-change="handleSortChange">
       <el-table-column type="selection" width="55" align="center" />
 
+      <el-table-column label="序号" align="center" width="55">
+        <template slot-scope="scope">
+          <span>{{ (queryParams.pageNum - 1) * queryParams.pageSize + scope.$index + 1 }}</span>
+        </template>
+      </el-table-column>
+
       <el-table-column label="标题" prop="title" show-overflow-tooltip sortable="custom" min-width="200">
         <template slot-scope="scope">
           <el-link type="primary" :underline="false" @click="handleEnterDetail(scope.row)">
@@ -86,8 +92,8 @@
       </el-table-column>
     </el-table>
 
-    <pagination v-show="total > 0" :total="total" :page.sync="queryParams.pageNum" :limit.sync="queryParams.pageSize"
-      :page-sizes="[50, 100, 150, 200]" @pagination="getList" />
+    <pagination :total="total" :page.sync="queryParams.pageNum" :limit.sync="queryParams.pageSize"
+      :page-sizes="[20, 50, 100, 150, 200]" layout="total, sizes, prev, pager, next, jumper" @pagination="getList" />
 
     <el-dialog :title="title" :visible.sync="open" width="600px" append-to-body :close-on-click-modal="false">
       <el-form ref="form" :model="form" :rules="rules" label-width="100px">
@@ -196,7 +202,7 @@ export default {
 
       queryParams: {
         pageNum: 1,
-        pageSize: 50,
+        pageSize: 20,
         title: null,
         status: null,   // 【新增】
         createBy: null, // 【新增】
@@ -400,7 +406,7 @@ export default {
         `;
       } else {
         // 普通草稿删除提示
-        content = `是否确认删除部署包编号为 "<b>${ids}</b>" 的数据项？`;
+        content = `是否确认删除部署包标题为 "<b>${row.title}</b>" 的数据项？`;
       }
 
       this.$confirm(content, "删除确认", {

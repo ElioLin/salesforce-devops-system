@@ -21,20 +21,22 @@
     </resultMap>
 
     <sql id="selectSfOrgVo">
-        select id,
-               name,
-               org_type,
-               org_id,
-               username,
-               instance_url,
-               access_token,
-               refresh_token,
-               client_id,
-               client_secret,
-               create_time,
-               update_time,
-               custom_domain
-        from sf_org
+        select o.id,
+               o.name,
+               o.org_type,
+               o.org_id,
+               o.username,
+               o.instance_url,
+               o.access_token,
+               o.refresh_token,
+               o.client_id,
+               o.client_secret,
+               o.create_time,
+               o.update_time,
+               o.custom_domain,
+               o.user_id,
+               o.dept_id
+        from sf_org o
     </sql>
 
     <select id="selectSfOrgList" parameterType="SfOrg" resultMap="SfOrgResult">
@@ -50,6 +52,7 @@
             <if test="clientId != null  and clientId != ''">and client_id = #{clientId}</if>
             <if test="clientSecret != null  and clientSecret != ''">and client_secret = #{clientSecret}</if>
             <if test="customDomain != null  and customDomain != ''">and custom_domain = #{customDomain}</if>
+            ${params.dataScope}
         </where>
     </select>
 
@@ -78,6 +81,8 @@
             <if test="createTime != null">create_time,</if>
             <if test="updateTime != null">update_time,</if>
             <if test="customDomain != null">custom_domain,</if>
+            <if test="userId != null">user_id,</if>
+            <if test="deptId != null">dept_id,</if>
         </trim>
         <trim prefix="values (" suffix=")" suffixOverrides=",">
             <if test="name != null">#{name},</if>
@@ -92,6 +97,8 @@
             <if test="createTime != null">#{createTime},</if>
             <if test="updateTime != null">#{updateTime},</if>
             <if test="customDomain != null">#{customDomain},</if>
+            <if test="userId != null">#{userId},</if>
+            <if test="deptId != null">#{deptId},</if>
         </trim>
     </insert>
 
@@ -110,6 +117,8 @@
             <if test="createTime != null">create_time = #{createTime},</if>
             <if test="updateTime != null">update_time = #{updateTime},</if>
             <if test="customDomain != null">custom_domain = #{customDomain},</if>
+            <if test="userId != null">user_id = #{userId},</if>
+            <if test="deptId != null">dept_id = #{deptId},</if>
         </trim>
         where id = #{id}
     </update>

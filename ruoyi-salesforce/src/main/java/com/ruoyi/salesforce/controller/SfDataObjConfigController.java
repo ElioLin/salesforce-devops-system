@@ -31,7 +31,6 @@ public class SfDataObjConfigController extends BaseController {
      * 批量保存/更新对象配置
      * (对应前端向导的 Step 2 & 3)
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:edit')")
     @Log(title = "比对规则配置", businessType = BusinessType.UPDATE)
     @PostMapping("/batchSave/{jobId}")
     public AjaxResult batchSaveConfigs(@PathVariable Long jobId, @RequestBody List<SfDataObjConfig> configs) {

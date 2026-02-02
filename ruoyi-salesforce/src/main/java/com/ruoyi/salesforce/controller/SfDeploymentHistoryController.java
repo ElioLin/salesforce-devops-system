@@ -56,7 +56,6 @@ public class SfDeploymentHistoryController extends BaseController {
     /**
      * 获取指定部署包的历史记录列表
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:list')")
     @GetMapping("/history/list/{deploymentId}")
     public AjaxResult listHistory(@PathVariable Long deploymentId) {
         List<SfDeploymentHistory> list = historyMapper.selectList(
@@ -70,7 +69,6 @@ public class SfDeploymentHistoryController extends BaseController {
     /**
      * 获取某次历史记录的变更明细
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:list')")
     @GetMapping("/history/{historyId}/details")
     public AjaxResult getHistoryDetails(@PathVariable Long historyId) {
         List<SfDeploymentHistoryDetail> details = detailMapper.selectList(
@@ -83,7 +81,6 @@ public class SfDeploymentHistoryController extends BaseController {
     /**
      * 下载备份文件
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:list')")
     @Log(title = "下载备份文件", businessType = BusinessType.EXPORT)
     @PostMapping("/history/download/{historyId}")
     public void downloadBackup(@PathVariable Long historyId, HttpServletResponse response) {
@@ -113,7 +110,6 @@ public class SfDeploymentHistoryController extends BaseController {
     /**
      * 执行回滚操作
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:edit')")
     @Log(title = "回滚部署", businessType = BusinessType.UPDATE)
     @PostMapping("/rollback/{historyId}")
     public AjaxResult rollback(@PathVariable Long historyId) {
@@ -132,7 +128,6 @@ public class SfDeploymentHistoryController extends BaseController {
     /**
      * 【新增】元数据审计搜索
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:list')")
     @GetMapping("/audit/list")
     public TableDataInfo listAudit(@RequestParam(required = false) String type,
                                    @RequestParam(required = false) String name) {
@@ -166,7 +161,6 @@ public class SfDeploymentHistoryController extends BaseController {
     /**
      * 【优化】预览历史备份包
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:list')")
     @GetMapping("/history/preview/{historyId}")
     public AjaxResult previewBackup(@PathVariable Long historyId) {
         SfDeploymentHistory history = historyMapper.selectById(historyId);

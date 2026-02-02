@@ -144,7 +144,7 @@
         </span>
       </div>
 
-      <pagination v-show="total > 0" :total="filteredList.length" :page.sync="queryParams.pageNum"
+      <pagination v-show="total > 0" :total="total" :page.sync="queryParams.pageNum"
         :limit.sync="queryParams.pageSize" :page-sizes="[50, 100, 200, 300, 500]" @pagination="handlePagination" />
     </div>
 
@@ -523,22 +523,7 @@ export default {
     // 其实对于 el-table，只要数据在 filteredList 里，它会自动渲染
     // 但为了配合底部的 pagination 组件，我们需要处理页码事件
     handlePagination() {
-      // 由于是前端分页/过滤，其实不需要重新请求 fetchList，
-      // 但这里 pagination 组件 emit 的是 fetchList? 
-      // 不，我们在 template 里改为了 @pagination="handlePagination"
-
-      // 这里的逻辑：其实不需要做太多，因为 pagedList 计算属性依赖 pageNum
-      // 只要 pageNum 变了，Table data (如果是用 pagedList) 就会变
-      // 但目前 Table :data="filteredList"，意味着是“一页显示所有筛选结果”
-      // 如果想做前端分页，需要把 el-table :data 改为 pagedList
-
-      // 建议：为了简单直观，智能筛选模式下，直接展示所有结果 (filteredList)，
-      // 分页组件仅作为数据量展示，或者可以保留 fetchList 以支持服务端分页(如果未来需要)
-      // 在此代码中，我保持 Table :data="filteredList"，即“筛选即所得，不分页展示”
-      // 这样体验最好，因为用户就是为了找那几个文件。
-
-      // 如果数据量确实很大(>500)，建议 Table data 切回 pagedList
-      // 这里演示全量展示逻辑：
+      this.fetchList();
     },
 
     getDiffTagType(status) {

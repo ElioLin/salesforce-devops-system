@@ -39,7 +39,6 @@ public class SfOrgController extends BaseController
     /**
      * 查询Salesforce环境管理列表
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:org:list')")
     @GetMapping("/list")
     public TableDataInfo list(SfOrg sfOrg)
     {
@@ -51,7 +50,6 @@ public class SfOrgController extends BaseController
     /**
      * 导出Salesforce环境管理列表
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:org:export')")
     @Log(title = "Salesforce环境管理", businessType = BusinessType.EXPORT)
     @PostMapping("/export")
     public void export(HttpServletResponse response, SfOrg sfOrg)
@@ -64,7 +62,6 @@ public class SfOrgController extends BaseController
     /**
      * 获取Salesforce环境管理详细信息
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:org:query')")
     @GetMapping(value = "/{id}")
     public AjaxResult getInfo(@PathVariable("id") Long id)
     {
@@ -74,7 +71,6 @@ public class SfOrgController extends BaseController
     /**
      * 新增Salesforce环境管理
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:org:add')")
     @Log(title = "Salesforce环境管理", businessType = BusinessType.INSERT)
     @PostMapping
     public AjaxResult add(@RequestBody SfOrg sfOrg)
@@ -85,7 +81,6 @@ public class SfOrgController extends BaseController
     /**
      * 修改Salesforce环境管理
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:org:edit')")
     @Log(title = "Salesforce环境管理", businessType = BusinessType.UPDATE)
     @PutMapping
     public AjaxResult edit(@RequestBody SfOrg sfOrg)
@@ -96,7 +91,6 @@ public class SfOrgController extends BaseController
     /**
      * 删除Salesforce环境管理
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:org:remove')")
     @Log(title = "Salesforce环境管理", businessType = BusinessType.DELETE)
     @DeleteMapping("/{ids}")
     public AjaxResult remove(@PathVariable Long[] ids)

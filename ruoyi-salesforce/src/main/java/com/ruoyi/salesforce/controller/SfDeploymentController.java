@@ -30,7 +30,6 @@ public class SfDeploymentController extends BaseController {
     /**
      * 查询部署包列表
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:list')")
     @GetMapping("/list")
     public TableDataInfo list(SfDeployment sfDeployment) {
         startPage();
@@ -41,7 +40,6 @@ public class SfDeploymentController extends BaseController {
     /**
      * 获取部署包详细信息
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:query')")
     @GetMapping(value = "/{id}")
     public AjaxResult getInfo(@PathVariable("id") Long id) {
         return AjaxResult.success(sfDeploymentService.selectSfDeploymentById(id));
@@ -50,7 +48,6 @@ public class SfDeploymentController extends BaseController {
     /**
      * 新增部署包
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:add')")
     @Log(title = "部署包", businessType = BusinessType.INSERT)
     @PostMapping
     public AjaxResult add(@RequestBody SfDeployment sfDeployment) {
@@ -70,7 +67,6 @@ public class SfDeploymentController extends BaseController {
     /**
      * 修改部署包
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:edit')")
     @Log(title = "部署包", businessType = BusinessType.UPDATE)
     @PutMapping
     public AjaxResult edit(@RequestBody SfDeployment sfDeployment) {
@@ -81,7 +77,6 @@ public class SfDeploymentController extends BaseController {
     /**
      * 删除部署包
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:remove')")
     @Log(title = "部署包", businessType = BusinessType.DELETE)
     @DeleteMapping("/{ids}")
     public AjaxResult remove(@PathVariable Long[] ids) {
@@ -189,7 +184,6 @@ public class SfDeploymentController extends BaseController {
         }
     }
 
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:query')")
     @PostMapping("/download/{deploymentId}")
     public void download(@PathVariable("deploymentId") Long deploymentId, HttpServletResponse response) throws IOException {
         sfDeploymentService.downloadPackage(deploymentId, response);
@@ -198,7 +192,6 @@ public class SfDeploymentController extends BaseController {
     /**
      * 【新增】取消正在进行的部署任务
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:edit')")
     @Log(title = "部署包管理", businessType = BusinessType.UPDATE)
     @PostMapping("/cancel/{deploymentId}")
     public AjaxResult cancel(@PathVariable Long deploymentId) {
@@ -209,7 +202,6 @@ public class SfDeploymentController extends BaseController {
     /**
      * 复制/克隆部署包
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:deployment:add')")
     @Log(title = "复制部署包", businessType = BusinessType.INSERT)
     @PostMapping("/clone/{id}")
     public AjaxResult clone(@PathVariable("id") Long id, @RequestBody SfDeployment newConfig) {

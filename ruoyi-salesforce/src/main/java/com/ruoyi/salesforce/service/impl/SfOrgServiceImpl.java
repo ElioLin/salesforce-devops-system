@@ -3,7 +3,9 @@ package com.ruoyi.salesforce.service.impl;
 import java.util.List;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.ruoyi.common.annotation.DataScope;
 import com.ruoyi.common.utils.DateUtils;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.salesforce.service.ISfOrgService;
 import org.springframework.stereotype.Service;
 import com.ruoyi.salesforce.mapper.SfOrgMapper;
@@ -41,6 +43,7 @@ public class SfOrgServiceImpl extends ServiceImpl<SfOrgMapper, SfOrg> implements
      * @return Salesforce环境管理
      */
     @Override
+    @DataScope(deptAlias = "o", userAlias = "o")
     public List<SfOrg> selectSfOrgList(SfOrg sfOrg) {
         return this.baseMapper.selectSfOrgList(sfOrg);
     }
@@ -54,6 +57,9 @@ public class SfOrgServiceImpl extends ServiceImpl<SfOrgMapper, SfOrg> implements
     @Override
     public int insertSfOrg(SfOrg sfOrg) {
         sfOrg.setCreateTime(DateUtils.getNowDate());
+        // 【新增】注入权限归属
+        sfOrg.setUserId(SecurityUtils.getUserId());
+        sfOrg.setDeptId(SecurityUtils.getDeptId());
         return this.baseMapper.insertSfOrg(sfOrg);
     }
 

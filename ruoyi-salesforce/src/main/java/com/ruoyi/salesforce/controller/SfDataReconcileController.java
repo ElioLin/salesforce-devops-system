@@ -32,7 +32,6 @@ public class SfDataReconcileController extends BaseController {
     /**
      * 启动比对任务
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:run')")
     @Log(title = "执行数据比对", businessType = BusinessType.OTHER)
     @PostMapping("/run/{jobId}")
     public AjaxResult runJob(@PathVariable Long jobId) {
@@ -47,7 +46,6 @@ public class SfDataReconcileController extends BaseController {
     /**
      * 停止任务 (预留接口)
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:run')")
     @PostMapping("/stop/{jobId}")
     public AjaxResult stopJob(@PathVariable Long jobId) {
         reconcileService.stopJob(jobId);

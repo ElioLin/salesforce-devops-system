@@ -39,7 +39,6 @@ public class SfDataRunObjLogController extends BaseController {
      * 获取任务监控详情
      * 逻辑已下沉至 Service
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:monitor')")
     @GetMapping("/monitor/{jobId}")
     public AjaxResult getJobMonitor(@PathVariable Long jobId) {
         Map<String, Object> data = objLogService.getMonitorData(jobId);
@@ -49,7 +48,6 @@ public class SfDataRunObjLogController extends BaseController {
     /**
      * 在线预览单个对象的比对结果 (分页)
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:preview')")
     @GetMapping("/previewObj/{objLogId}")
     public AjaxResult previewObjResult(
             @PathVariable Long objLogId,
@@ -66,7 +64,6 @@ public class SfDataRunObjLogController extends BaseController {
     /**
      * 下载单个对象的比对结果文件
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:download')")
     @GetMapping("/downloadObj/{objLogId}")
     public void downloadObjResult(@PathVariable Long objLogId, HttpServletResponse response) throws IOException {
         SfDataRunObjLog objLog = objLogService.selectById(objLogId);
@@ -100,7 +97,6 @@ public class SfDataRunObjLogController extends BaseController {
     /**
      * 新增：重试/重新执行单个对象
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:monitor')")
     @PostMapping("/retry/{objLogId}")
     public AjaxResult retryObjLog(@PathVariable Long objLogId) {
         reconcileService.retryObject(objLogId);

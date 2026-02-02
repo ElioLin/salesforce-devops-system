@@ -31,7 +31,6 @@ public class SfDataRunLogController extends BaseController {
      * 下载差异结果 CSV
      * (Checklist #7: 结果文件下载)
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:export')")
     @GetMapping("/download/{logId}")
     public void downloadResult(@PathVariable Long logId, HttpServletResponse response) {
         try {
