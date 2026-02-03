@@ -55,6 +55,19 @@ public class SfDeployment extends BaseEntity {
     }
 
     @TableField(exist = false)
+    private String remark;
+
+    @Override
+    public String getRemark() {
+        return remark;
+    }
+
+    @Override
+    public void setRemark(String remark) {
+        this.remark = remark;
+    }
+
+    @TableField(exist = false)
     private Map<String, Object> params = new HashMap<>();
 
     @Override

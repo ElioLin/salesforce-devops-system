@@ -17,24 +17,33 @@ public interface SfDeploymentHistoryMapper extends BaseMapper<SfDeploymentHistor
      */
     List<SfAuditVo> selectAuditList(@Param("type") String type, @Param("name") String name);
 
-    /** 统计过去 N 天每天的部署数量 */
-    List<Map<String, Object>> selectDailyDeployCount(@Param("days") int days);
-
-    /** 统计各状态的分布情况 */
-    List<Map<String, Object>> selectStatusDistribution();
-
-    /** 统计本周部署总数 */
-    Long countWeeklyDeployments();
-
-    /** 统计总成功数 (用于计算成功率) */
-    Long countSuccessDeployments();
-
-    /** 统计总历史数 */
-    Long countTotalHistory();
+    /**
+     * 统计过去 N 天趋势 (传入实体以支持权限)
+     */
+    List<Map<String, Object>> selectDailyDeployCount(@Param("days") int days, @Param("params") Map<String, Object> params);
 
     /**
-     * 查询最新的历史记录（带部署包标题）
-     * @param limit 条数
+     * 统计分布 (传入实体)
      */
-    List<SfDeploymentHistory> selectRecentList(@Param("limit") int limit);
+    List<Map<String, Object>> selectStatusDistribution(SfDeploymentHistory history);
+
+    /**
+     * 本周数量
+     */
+    Long countWeeklyDeployments(SfDeploymentHistory history);
+
+    /**
+     * 成功数量
+     */
+    Long countSuccessDeployments(SfDeploymentHistory history);
+
+    /**
+     * 总数量
+     */
+    Long countTotalHistory(SfDeploymentHistory history);
+
+    /**
+     * 最新动态 (注意 params 会包含在 entity 中)
+     */
+    List<SfDeploymentHistory> selectRecentList(SfDeploymentHistory history);
 }

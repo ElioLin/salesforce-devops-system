@@ -1,15 +1,13 @@
 package com.ruoyi.salesforce.controller;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ruoyi.common.config.RuoYiConfig;
 import com.ruoyi.common.core.controller.BaseController;
 import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.salesforce.domain.SfDeployment;
 import com.ruoyi.salesforce.domain.SfDeploymentHistory;
+import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.domain.vo.SfDashboardVo;
-import com.ruoyi.salesforce.mapper.SfDeploymentHistoryMapper;
-import com.ruoyi.salesforce.mapper.SfDeploymentMapper;
-import com.ruoyi.salesforce.mapper.SfOrgMapper; // 假设你有这个 Mapper
+import com.ruoyi.salesforce.service.ISfDashboardService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -17,7 +15,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
@@ -25,11 +25,7 @@ import java.util.stream.Collectors;
 public class SfDashboardController extends BaseController {
 
     @Autowired
-    private SfDeploymentMapper deploymentMapper;
-    @Autowired
-    private SfDeploymentHistoryMapper historyMapper;
-    @Autowired
-    private SfOrgMapper orgMapper; // 需要注入 Org Mapper
+    private ISfDashboardService dashboardService;
 
     @Autowired
     private RuoYiConfig ruoYiConfig;
@@ -38,22 +34,20 @@ public class SfDashboardController extends BaseController {
     public AjaxResult getDashboardData() {
         SfDashboardVo vo = new SfDashboardVo();
 
-        // 1. 顶部卡片指标
-        // 1.1 已连接环境
-        vo.setConnectedOrgs(orgMapper.selectCount(null));
+        // 1. 准备查询对象
+        SfOrg orgQuery = new SfOrg();
+        SfDeployment deployQuery = new SfDeployment();
+        SfDeploymentHistory historyQuery = new SfDeploymentHistory();
 
-        // 1.2 正在执行的任务 (状态为 Processing, Deploying, Validating)
-        Long activeCount = deploymentMapper.selectCount(new LambdaQueryWrapper<SfDeployment>()
-                .in(SfDeployment::getStatus, "Processing", "Deploying", "Validating", "Queued"));
-        vo.setActiveTasks(activeCount);
+        // --- 核心指标 ---
+        vo.setConnectedOrgs(dashboardService.countOrgs(orgQuery));
+        vo.setActiveTasks(dashboardService.countActiveTasks(deployQuery));
+        vo.setWeeklyDeployments(dashboardService.getWeeklyDeployCount(historyQuery));
 
-        // 1.3 本周部署
-        vo.setWeeklyDeployments(historyMapper.countWeeklyDeployments());
-
-        // 1.4 成功率计算
-        Long total = historyMapper.countTotalHistory();
-        Long success = historyMapper.countSuccessDeployments();
-        if (total > 0) {
+        // --- 成功率 ---
+        Long total = dashboardService.getTotalDeployCount(historyQuery);
+        Long success = dashboardService.getSuccessDeployCount(historyQuery);
+        if(total > 0) {
             BigDecimal rate = new BigDecimal(success)
                     .divide(new BigDecimal(total), 4, RoundingMode.HALF_UP)
                     .multiply(new BigDecimal(100));
@@ -62,37 +56,56 @@ public class SfDashboardController extends BaseController {
             vo.setSuccessRate("0%");
         }
 
-        // 2. 趋势图数据 (补全日期，防止某天没数据导致断层)
-        List<Map<String, Object>> dailyCounts = historyMapper.selectDailyDeployCount(13); // 查询过去13天+今天
-        Map<String, Long> dateMap = new HashMap<>();
-        for (Map<String, Object> map : dailyCounts) {
-            String date = (String) map.get("dateStr");
-            Long count = Long.valueOf(String.valueOf(map.get("countVal")));
-            dateMap.put(date, count);
+        // --- 趋势图 (核心修复区域) ---
+        List<Map<String, Object>> dailyCounts = dashboardService.getDailyCounts(13, historyQuery);
+
+        // 【优化】使用 getValueIgnoreCase 兼容大小写，并处理空指针
+        List<String> xDates = dailyCounts.stream()
+                .map(m -> String.valueOf(getValueIgnoreCase(m, "dateStr")))
+                .collect(Collectors.toList());
+
+        List<Long> yCounts = dailyCounts.stream()
+                .map(m -> {
+                    Object val = getValueIgnoreCase(m, "countVal");
+                    return val == null ? 0L : Long.valueOf(String.valueOf(val));
+                })
+                .collect(Collectors.toList());
+
+        vo.setChartDates(xDates);
+        vo.setChartCounts(yCounts);
+
+        // --- 分布图 ---
+        List<Map<String, Object>> pieData = dashboardService.getStatusDistribution(historyQuery);
+        // 【优化】分布图也做一下大小写兼容，防止 Map Key 变大写导致前端饼图没名字
+        List<Map<String, Object>> normalizedPieData = new ArrayList<>();
+        for(Map<String, Object> m : pieData) {
+            m.put("name", getValueIgnoreCase(m, "name")); // 确保 name 字段存在
+            m.put("value", getValueIgnoreCase(m, "value")); // 确保 value 字段存在
+            normalizedPieData.add(m);
         }
+        vo.setStatusPieData(normalizedPieData);
 
-        // 构建连续的日期列表
-        List<String> xDates = new ArrayList<>();
-        List<Long> yCounts = new ArrayList<>();
-        // 简单逻辑：生成过去14天日期字符串 (需配合 DateUtils，这里简化处理，生产环境建议用 Calendar)
-        // 为简化代码，这里直接使用查询出的 Key 排序，如果某天没数据可能会缺省。
-        // 建议前端处理或后端完整生成日期 List。这里简单处理：只返回数据库有的。
-        vo.setChartDates(dailyCounts.stream().map(m -> (String)m.get("dateStr")).collect(Collectors.toList()));
-        vo.setChartCounts(dailyCounts.stream().map(m -> Long.valueOf(String.valueOf(m.get("countVal")))).collect(Collectors.toList()));
-
-
-        // 3. 状态分布图 (饼图)
-        List<Map<String, Object>> pieData = historyMapper.selectStatusDistribution();
-        vo.setStatusPieData(pieData);
-
-        // 4. 最新动态 (取前 8 条)
-        List<SfDeploymentHistory> recentList = historyMapper.selectRecentList(8);
-
+        // --- 最新动态 ---
+        historyQuery.setLimit(8);
+        List<SfDeploymentHistory> recentList = dashboardService.getRecentActivities(historyQuery);
         vo.setRecentActivities(recentList);
 
+        // --- 版本信息 ---
         vo.setSysVersion("v" + ruoYiConfig.getVersion());
         vo.setSysName(ruoYiConfig.getName());
 
         return AjaxResult.success(vo);
+    }
+
+    /**
+     * 【新增辅助方法】忽略大小写获取 Map 值
+     * 解决 MyBatis 在不同数据库/配置下返回 Key 大小写不一致的问题
+     */
+    private Object getValueIgnoreCase(Map<String, Object> map, String key) {
+        if(map == null) return null;
+        if(map.containsKey(key)) return map.get(key);
+        if(map.containsKey(key.toUpperCase())) return map.get(key.toUpperCase());
+        if(map.containsKey(key.toLowerCase())) return map.get(key.toLowerCase());
+        return null;
     }
 }
