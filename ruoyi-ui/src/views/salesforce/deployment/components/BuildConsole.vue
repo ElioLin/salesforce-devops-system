@@ -190,12 +190,26 @@ export default {
     color: #c586c0;
 }
 
-.log-msg.error {
-    color: #f44747;
+.log-msg.cmd {
+    color: #00bcd4;
+    font-weight: bold;
 }
 
+/* 青色，用于显示 >>> 阶段 */
 .log-msg.success {
-    color: #6a9955;
+    color: #67c23a;
+}
+
+.log-msg.warn {
+    color: #e6a23c;
+}
+
+.log-msg.error {
+    color: #f56c6c;
+}
+
+.log-msg.info {
+    color: #d4d4d4;
 }
 
 @keyframes blink {

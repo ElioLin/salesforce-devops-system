@@ -892,21 +892,35 @@ export default {
 
                 // --- 1. 日志对接 (修复版) ---
 
-                // 【修复】通过 ref 访问子组件的日志数据进行去重判断
-                let lastLog = '';
-                if (this.$refs.buildConsole && this.$refs.buildConsole.logs.length > 0) {
+                // 获取子组件中最后一条日志，用于前端去重 (防止同一条消息刷屏)
+                let lastLogMsg = '';
+                // 【注意】这里要加个非空判断，防止组件还没渲染出来报错
+                if (this.$refs.buildConsole && this.$refs.buildConsole.logs && this.$refs.buildConsole.logs.length > 0) {
                     const logs = this.$refs.buildConsole.logs;
-                    lastLog = logs[logs.length - 1].message;
+                    lastLogMsg = logs[logs.length - 1].message;
                 }
 
                 // 捕获状态详情 (stateDetail) -> Info 日志
-                if (res.stateDetail && res.stateDetail !== lastLog) {
-                    this.appendLog(res.stateDetail, 'info');
+                // 【优化点】
+                // 后端现在会通过 stateDetail 字段传具体的步骤日志
+                // 我们只需判断它不为空，且跟上一条不一样，就追加到控制台
+                if (res.stateDetail && res.stateDetail !== lastLogMsg) {
+                    // 识别关键词，给日志加不同的颜色级别
+                    let level = 'info';
+                    if (res.stateDetail.includes('>>>')) level = 'cmd'; // 阶段开始
+                    else if (res.stateDetail.includes('失败') || res.stateDetail.includes('异常')) level = 'error';
+                    else if (res.stateDetail.includes('成功') || res.stateDetail.includes('完成')) level = 'success';
+                    else if (res.stateDetail.includes('状态变更')) level = 'warn';
+
+                    this.appendLog(res.stateDetail, level);
                 }
 
-                // 捕获错误信息 (errorMessage) -> Error 日志
+                // 捕获严重错误 (Salesforce 返回的顶层错误)
                 if ((res.errorMsg || res.errorMessage) && !res.done) {
-                    this.appendLog(res.errorMsg || res.errorMessage, 'error');
+                    // 避免和 stateDetail 重复
+                    if ((res.errorMsg || res.errorMessage) !== lastLogMsg) {
+                        this.appendLog(res.errorMsg || res.errorMessage, 'error');
+                    }
                 }
 
                 // 捕获任务ID变化

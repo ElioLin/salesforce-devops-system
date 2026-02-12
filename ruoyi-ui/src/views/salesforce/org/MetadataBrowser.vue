@@ -394,6 +394,11 @@ export default {
     handleSmartFilterChange() {
       this.queryParams.pageNum = 1; // 重置页码
       // 筛选逻辑全在 computed: filteredList 中，这里只需触发视图更新
+      // 筛选逻辑虽然在 computed: filteredList 中自动生效了
+      // 但 UI 上的“打勾”状态需要手动重新应用
+      this.$nextTick(() => {
+        this.checkExistingRows(); // 关键：DOM 更新后，立即回显选中状态
+      });
     },
     handleInputSearch() {
       if (this.debounceTimer) {
