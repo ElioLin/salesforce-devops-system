@@ -20,35 +20,49 @@
         <el-table v-loading="loading" :data="jobList" border>
             <el-table-column label="任务名称" prop="jobName" show-overflow-tooltip min-width="150" />
 
-            <el-table-column label="比对对象" align="left" min-width="220">
+            <el-table-column label="比对对象" align="left" min-width="280">
                 <template slot-scope="scope">
-                    <div v-if="scope.row.objectNames && scope.row.objectNames.length > 0">
-                        <el-tag v-for="(name, index) in scope.row.objectNames.slice(0, 2)" :key="index" size="mini"
-                            effect="plain" style="margin-right: 5px; margin-bottom: 2px;">
-                            {{ name }}
+                    <div v-if="scope.row.objectNames && scope.row.objectNames.length > 0" style="display: flex; align-items: center; flex-wrap: wrap; gap: 5px;">
+                        <el-tag v-for="(name, index) in scope.row.objectNames.slice(0, 3)" :key="index" size="small"
+                            effect="light" type="primary">
+                            <i class="el-icon-document"></i> {{ name }}
                         </el-tag>
-                        <el-popover v-if="scope.row.objectNames.length > 2" placement="top" width="250" trigger="hover">
-                            <div style="display: flex; flex-wrap: wrap; gap: 5px;">
-                                <el-tag v-for="(name, idx) in scope.row.objectNames" :key="idx" size="mini"
-                                    type="info">{{ name }}</el-tag>
+                        
+                        <el-popover v-if="scope.row.objectNames.length > 3" placement="bottom" width="300" trigger="hover">
+                            <div style="max-height: 250px; overflow-y: auto;">
+                                <div style="font-size: 13px; font-weight: bold; margin-bottom: 10px; color: #606266; border-bottom: 1px solid #EBEEF5; padding-bottom: 6px;">
+                                    包含的所有比对对象 (共 {{ scope.row.objectNames.length }} 个)
+                                </div>
+                                <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                                    <el-tag v-for="(name, idx) in scope.row.objectNames" :key="idx" size="small" type="info" effect="plain">
+                                        {{ name }}
+                                    </el-tag>
+                                </div>
                             </div>
-                            <el-tag slot="reference" size="mini" type="info" style="cursor: pointer">+{{
-                                scope.row.objectNames.length - 2 }}</el-tag>
+                            <el-tag slot="reference" size="small" type="warning" effect="dark" style="cursor: pointer; border-radius: 12px; padding: 0 10px;">
+                                +{{ scope.row.objectNames.length - 3 }} 更多...
+                            </el-tag>
                         </el-popover>
                     </div>
-                    <span v-else style="color: #C0C4CC; font-size: 12px;">未配置</span>
+                    <span v-else style="color: #909399; font-size: 12px; font-style: italic;">
+                        <i class="el-icon-warning-outline"></i> 尚未配置对象
+                    </span>
                 </template>
             </el-table-column>
 
-            <el-table-column label="源环境" align="center" width="120">
+            <el-table-column label="源环境" align="center" width="140">
                 <template slot-scope="scope">
-                    <el-tag type="info">{{ getOrgName(scope.row.sourceOrgId) }}</el-tag>
+                    <el-tag type="info" size="medium">
+                        <i class="el-icon-cloudy"></i> {{ getOrgName(scope.row.sourceOrgId) }}
+                    </el-tag>
                 </template>
             </el-table-column>
 
-            <el-table-column label="目标环境" align="center" width="120">
+            <el-table-column label="目标环境" align="center" width="140">
                 <template slot-scope="scope">
-                    <el-tag type="success">{{ getOrgName(scope.row.targetOrgId) }}</el-tag>
+                    <el-tag type="success" size="medium">
+                        <i class="el-icon-cloudy-and-sunny"></i> {{ getOrgName(scope.row.targetOrgId) }}
+                    </el-tag>
                 </template>
             </el-table-column>
 
@@ -97,6 +111,7 @@ import { runJob } from "@/api/salesforce/reconcile";
 // 引入组件
 import JobDialog from "./components/JobDialog";
 import WizardConfig from "./wizard";
+import { listOrg } from "@/api/salesforce/org";
 
 export default {
     name: "ReconcileIndex",
@@ -105,6 +120,7 @@ export default {
         return {
             loading: true,
             jobList: [],
+            orgList: [],
             total: 0,
             showSearch: true,
             queryParams: {
@@ -115,6 +131,7 @@ export default {
         };
     },
     created() {
+        this.getOrgList();
         this.getList();
     },
     methods: {
@@ -126,13 +143,21 @@ export default {
                 this.loading = false;
             });
         },
+        getOrgList() {
+            listOrg().then(res => {
+                // 兼容分页数据或全量数据的结构
+                this.orgList = res.rows || res.data || [];
+            });
+        },
         resetQuery() {
             this.queryParams.jobName = undefined;
             this.getList();
         },
         getOrgName(id) {
-            // 这里可以对接 Org 列表接口回显名称，目前暂显 ID
-            return id;
+            if (!id) return '未配置';
+            const org = this.orgList.find(item => item.id === id);
+            // 如果找到了匹配的Org，返回名称，否则降级显示ID
+            return org ? org.name : `[未知ID:${id}]`;
         },
         getStatusType(status) {
             if (status === 'RUNNING') return '';
