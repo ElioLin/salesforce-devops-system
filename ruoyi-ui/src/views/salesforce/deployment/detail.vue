@@ -32,11 +32,13 @@
                         {{ showConsole ? '收起日志' : '部署日志' }}
                     </el-button>
 
-                    <el-button type="text" icon="el-icon-refresh-left" :loading="isCheckingStatus"
-                        style="margin-right: 15px;" @click="handleGlobalRecalculate"
-                        :disabled="!deployment.targetOrgId || isProcessing">
-                        重新计算差异
-                    </el-button>
+                    <el-tooltip content="拉取底层代码对当前已添加至包中的元数据进行全量精确 Hash 比对" placement="bottom">
+                        <el-button type="text" icon="el-icon-aim" :loading="isCheckingStatus"
+                            style="margin-right: 15px;" @click="handleGlobalRecalculate"
+                            :disabled="!deployment.targetOrgId || isProcessing">
+                            重新精确比对(已添加)
+                        </el-button>
+                    </el-tooltip>
 
                     <el-button type="info" icon="el-icon-refresh" size="mini" @click="refreshData"
                         :disabled="isProcessing">手动刷新</el-button>
@@ -113,7 +115,7 @@
                         <span class="title">
                             <i class="el-icon-collection"></i> 元数据处理
                             <el-tag size="mini" effect="plain" class="ml-10" v-if="compStateText">{{ compStateText
-                                }}</el-tag>
+                            }}</el-tag>
                         </span>
                         <span class="count" v-if="compTotal > 0">{{ compDone }} / {{ compTotal }}</span>
                     </div>
@@ -1405,10 +1407,47 @@ export default {
                         clearInterval(this.statusTimer);
                         this.statusTimer = null;
                         this.isCheckingStatus = false;
-                        this.$modal.msgSuccess("状态计算完成");
+                        this.$modal.msgSuccess("精确状态计算完成");
+                        //计算完成后，将结果穿透同步给“添加元数据”浏览器的全局缓存池
+                        this.syncExactDiffCacheToBrowser();
                     }
                 });
             }, 3000);
+        },
+        /**
+         * 【新增优化】缓存穿透共享
+         * 将已添加列表中跑完的精确 Hash 状态，静默注入给 MetadataBrowser 子组件
+         */
+        syncExactDiffCacheToBrowser() {
+            // 确保子组件实例和数据都存在
+            if (this.$refs.metaBrowser && this.itemList) {
+                let updateCount = 0;
+
+                // 初始化子组件的缓存池（以防它还没被点开过）
+                if (!this.$refs.metaBrowser.exactDiffCache) {
+                    this.$refs.metaBrowser.exactDiffCache = {};
+                }
+
+                // 遍历当前已添加的数据
+                this.itemList.forEach(item => {
+                    // 只要状态是明确的比对结果，就写入缓存字典 (排除 Unknown, Comparing 等)
+                    if (item.diffStatus && !['Unknown', 'Comparing'].includes(item.diffStatus)) {
+                        this.$refs.metaBrowser.exactDiffCache[item.memberName] = item.diffStatus;
+                        updateCount++;
+                    }
+                });
+
+                // 如果此时用户刚好停留在 "添加元数据" Tab页，我们需要顺便触发一次视图强制刷新
+                if (updateCount > 0 && this.activeTab === 'add') {
+                    this.$refs.metaBrowser.list.forEach(browserItem => {
+                        if (this.$refs.metaBrowser.exactDiffCache[browserItem.fullName]) {
+                            browserItem.diffStatus = this.$refs.metaBrowser.exactDiffCache[browserItem.fullName];
+                            this.$refs.metaBrowser.$set(browserItem, 'exactDiffDone', true);
+                        }
+                    });
+                }
+                console.log(`[Cache Sync] 成功向浏览器同步了 ${updateCount} 条精确比对状态`);
+            }
         },
         getDiffIcon(status) {
             if (status === 'New') return 'el-icon-circle-plus';

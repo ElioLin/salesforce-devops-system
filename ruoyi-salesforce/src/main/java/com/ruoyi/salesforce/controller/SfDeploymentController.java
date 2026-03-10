@@ -208,4 +208,20 @@ public class SfDeploymentController extends BaseController {
         Long newId = sfDeploymentService.cloneDeployment(id, newConfig);
         return AjaxResult.success(newId);
     }
+
+    /**
+     * 【新增】前端元数据浏览器专用：执行精准哈希差异比对
+     */
+    @Log(title = "精准比对", businessType = BusinessType.OTHER)
+    @PostMapping("/diff/exact")
+    public AjaxResult calculateExactDiff(@RequestBody Map<String, Object> params) {
+        Long sourceOrgId = Long.valueOf(params.get("sourceOrgId").toString());
+        Long targetOrgId = Long.valueOf(params.get("targetOrgId").toString());
+        String metadataType = params.get("metadataType").toString();
+        // 提取前端当前显示的组件名单
+        List<String> memberNames = (List<String>) params.get("memberNames");
+
+        Map<String, String> diffResult = sfDeploymentService.calculateTypeExactDiff(sourceOrgId, targetOrgId, metadataType, memberNames);
+        return AjaxResult.success(diffResult);
+    }
 }

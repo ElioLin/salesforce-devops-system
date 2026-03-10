@@ -1174,6 +1174,70 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     }
 
     /**
+     * 【新增】为前端浏览器提供实时的精准物理哈希比对
+     */
+    @Override
+    public Map<String, String> calculateTypeExactDiff(Long sourceOrgId, Long targetOrgId, String metadataType, List<String> memberNames) {
+        Map<String, String> resultMap = new HashMap<>();
+        if(sourceOrgId == null || targetOrgId == null || StringUtils.isEmpty(metadataType) || memberNames == null || memberNames.isEmpty()) {
+            return resultMap;
+        }
+
+        try {
+            // 1. 动态构造临时的 Package.xml (仅针对前端当前展示的列表)
+            com.sforce.soap.metadata.Package manifest = new com.sforce.soap.metadata.Package();
+            PackageTypeMembers typeMembers = new PackageTypeMembers();
+            typeMembers.setName(metadataType);
+            typeMembers.setMembers(memberNames.toArray(new String[0]));
+            manifest.setTypes(new PackageTypeMembers[]{typeMembers});
+            manifest.setVersion("58.0");
+
+            // 2. 异步并发拉取源环境和目标环境的真实物理文件 (ZIP) 并流式计算 Hash
+            CompletableFuture<Map<String, String>> sourceFuture = CompletableFuture.supplyAsync(() ->
+                    retrieveAndHashMap(sourceOrgId, manifest)
+            );
+            CompletableFuture<Map<String, String>> targetFuture = CompletableFuture.supplyAsync(() ->
+                    retrieveAndHashMap(targetOrgId, manifest)
+            );
+
+            // 等待双端拉取与哈希计算完成
+            CompletableFuture.allOf(sourceFuture, targetFuture).join();
+
+            Map<String, String> sourceFileMap = sourceFuture.get();
+            Map<String, String> targetFileMap = targetFuture.get();
+
+            // 3. 遍历比对真实 Hash，完全抛弃时间戳
+            for(String name : memberNames) {
+                // 借助一个临时的 Item 对象来复用已有的 getMetadataHash 算法 (支持 LWC, Folder 等复杂类型)
+                SfDeploymentItem tempItem = new SfDeploymentItem();
+                tempItem.setMetadataType(metadataType);
+                tempItem.setMemberName(name);
+
+                String sourceHash = getMetadataHash(sourceFileMap, tempItem);
+                String targetHash = getMetadataHash(targetFileMap, tempItem);
+
+                String status;
+                if(sourceHash == null) {
+                    status = "Invalid"; // 源环境被删
+                } else if(targetHash == null) {
+                    status = "New";     // SFoA 中不存在
+                } else if(sourceHash.equals(targetHash)) {
+                    status = "Same";    // Hash 完美一致
+                } else {
+                    status = "Changed"; // 物理内容确实发生了改变
+                }
+
+                resultMap.put(name, status);
+            }
+        } catch (Exception e) {
+            log.error("精准差异比对异常", e);
+            throw new RuntimeException("底层 Hash 提取失败: " + e.getMessage());
+        }
+
+        return resultMap;
+    }
+
+    /**
      * 【优化】获取元数据文件的哈希值
      * 修复 CustomLabel 和 MatchingRule 识别为 Invalid 的问题
      */
