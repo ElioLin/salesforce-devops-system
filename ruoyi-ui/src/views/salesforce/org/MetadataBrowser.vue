@@ -78,7 +78,9 @@
     </div>
 
     <el-table ref="metaTable" :data="filteredList" style="width: 100%" border stripe highlight-current-row
-      row-key="fullName" @select="handleSelect" @select-all="handleSelectAll" height="500px">
+      row-key="fullName" @select="handleSelect" @select-all="handleSelectAll" height="500px"
+      v-loading="exactDiffLoading" :element-loading-text="exactDiffText" element-loading-spinner="el-icon-loading"
+      element-loading-background="rgba(255, 255, 255, 0.8)">
 
       <el-table-column type="selection" width="50" align="center" :selectable="checkSelectable" />
 
@@ -224,7 +226,8 @@ export default {
 
       debounceTimer: null,
       exactDiffCache: {},
-      exactDiffLoading: false
+      exactDiffLoading: false,
+      exactDiffText: '正在执行精准比对, 请稍候...'
     };
   },
   computed: {
@@ -709,56 +712,87 @@ export default {
     },
 
     /**
-     * 【新增】执行底层 Hash 比对并回写全局缓存
+     * 执行底层 Hash 比对并回写全局缓存 (支持自动分片防超时)
      */
-    executeExactDiff(memberNames) {
-      if (memberNames.length > 10000) {
-        this.exactDiffLoading = false;
-        this.$modal.msgWarning(`当前选中了 ${memberNames.length} 条数据，数量过大可能导致 API 超时，建议通过搜索框缩小范围后分批比对。`);
-        return;
-      }
+     async executeExactDiff(memberNames) {
+      // 1. 移除之前的写死上限拦截，现在支持十万级数据自动分片
+      if (memberNames.length === 0) return;
+
+      // 2. 预先把所有被选中的数据状态变为 Comparing 转圈圈
       this.list.forEach(item => {
         if (memberNames.includes(item.fullName)) {
           item.diffStatus = 'Comparing';
           this.$set(item, 'exactDiffDone', false);
         }
       });
+
       this.exactDiffLoading = true;
-      request({
-        url: '/salesforce/deployment/diff/exact',
-        method: 'post',
-        data: {
-          sourceOrgId: this.sourceOrgId,
-          targetOrgId: this.localTargetOrgId,
-          metadataType: this.queryParams.type,
-          memberNames: memberNames
-        }
-      }).then(res => {
-        this.exactDiffLoading = false;
-        const diffMap = res.data;
+      if (!this.exactDiffCache) this.exactDiffCache = {};
+      
+      // 【核心分片参数】每批次处理 800 条，兼顾速度与防止 Nginx 60秒超时
+      const chunkSize = 800; 
+      const totalChunks = Math.ceil(memberNames.length / chunkSize);
+      let totalUpdateCount = 0;
+      let isErrorOccurred = false;
 
-        // 1. 将结果写入全局缓存池 (完美解决翻页、刷新导致的状态丢失)
-        if (!this.exactDiffCache) this.exactDiffCache = {};
-        let updateCount = 0;
-        for (let name in diffMap) {
-          this.exactDiffCache[name] = diffMap[name];
-          updateCount++;
-        }
+      // 3. 开始串行流水线作业
+      try {
+        for (let i = 0; i < totalChunks; i++) {
+          const currentChunkNum = i + 1;
+          const chunkMemberNames = memberNames.slice(i * chunkSize, (i + 1) * chunkSize);
+          
+          // 动态更新表格上的 Loading 文字进度
+          this.exactDiffText = `引擎极速比对中: 第 ${currentChunkNum} 批 / 共 ${totalChunks} 批 (进度: ${Math.min((i + 1) * chunkSize, memberNames.length)} / ${memberNames.length}) ...`;
 
-        // 2. 实时刷新当前列表视图的 UI
+          // 等待当前批次完成，再发下一批 (设置局部超长 timeout 以防万一)
+          const res = await request({
+            url: '/salesforce/deployment/diff/exact',
+            method: 'post',
+            timeout: 120000, // 给单次请求 2 分钟宽裕时间
+            data: {
+              sourceOrgId: this.sourceOrgId,
+              targetOrgId: this.localTargetOrgId,
+              metadataType: this.queryParams.type,
+              memberNames: chunkMemberNames
+            }
+          });
+
+          const diffMap = res.data || {};
+          
+          // 将当前批次结果写入全局缓存池
+          for (let name in diffMap) {
+            this.exactDiffCache[name] = diffMap[name];
+            totalUpdateCount++;
+          }
+
+          // 实时渲染当前批次在屏幕上的 UI (绿色勾勾出现)
+          this.list.forEach(item => {
+            if (this.exactDiffCache[item.fullName]) {
+              item.diffStatus = this.exactDiffCache[item.fullName];
+              this.$set(item, 'exactDiffDone', true);
+            }
+          });
+        }
+      } catch (err) {
+        console.error("分批精确比对异常中断:", err);
+        isErrorOccurred = true;
+        this.$modal.msgError(`比对在执行中途发生网络异常中断。已成功完成 ${totalUpdateCount} 项，其余状态已重置。`);
+      } finally {
+        // 4. 清理兜底：把因为报错没跑完的 Comparing 状态恢复成 Unknown
         this.list.forEach(item => {
-          if (this.exactDiffCache[item.fullName]) {
-            item.diffStatus = this.exactDiffCache[item.fullName];
-            this.$set(item, 'exactDiffDone', true);
+          if (item.diffStatus === 'Comparing') {
+            item.diffStatus = 'Unknown';
           }
         });
 
-        this.$modal.msgSuccess(`精准比对完成！成功校验 ${updateCount} 项元数据。`);
-        this.checkExistingRows(); // 刷新勾选框状态
-      }).catch(err => {
         this.exactDiffLoading = false;
-        console.error("Exact diff failed:", err);
-      });
+        
+        if (!isErrorOccurred) {
+          this.$modal.msgSuccess(`🎯 全量精准比对完美收官！共分为 ${totalChunks} 个批次，成功校验 ${totalUpdateCount} 项元数据。`);
+        }
+        
+        this.checkExistingRows(); // 刷新勾选框状态
+      }
     }
   }
 };
