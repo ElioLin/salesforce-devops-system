@@ -169,9 +169,14 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     }
 
     /**
-     * 单个对象的执行逻辑 (增加停止检查点)
+     * 单个对象的执行逻辑 (优化版：云端并发提取 + 严格磁盘回收)
      */
     private void executeObjectLog(SfDataJob job, SfDataRunObjLog objLog) {
+        String srcPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_src.csv";
+        String tgtPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_tgt.csv";
+        File srcFile = new File(srcPath);
+        File tgtFile = new File(tgtPath);
+
         try {
             updateObjLogStatus(objLog, "RUNNING", "正在初始化...", 5);
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "初始化配置...", 5);
@@ -183,81 +188,53 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
             SfDataObjConfig config = configMapper.selectById(objLog.getObjConfigId());
 
-            // 1. 构建 SOQL (含 ORDER BY)
+            // 1. 构建 SOQL
             String srcKey = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
-            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey); // 传入 Key
-
+            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey);
             String tgtKey = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
-            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey); // 传入 Key
+            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey);
 
-            if(!isRunning(job.getId())) {
-                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
-                return;
-            }
+            if(!isRunning(job.getId())) return;
 
-            // 2. 下载源数据
-            publishProgress(job.getId(), objLog.getId(), "RUNNING", "下载源数据...", 20);
+            // 【核心优化 1：云端并发下发】让源和目标在 Salesforce 云端同时开始提取数据，节省 50% 等待时间
+            publishProgress(job.getId(), objLog.getId(), "RUNNING", "下发双端并行提取指令...", 10);
             String srcJobId = bulkApiService.submitQueryJob(job.getSourceOrgId(), srcSoql);
-            waitForJob(job.getSourceOrgId(), srcJobId);
+            String tgtJobId = bulkApiService.submitQueryJob(job.getTargetOrgId(), tgtSoql);
 
-            // 【新增】获取源数据行数
+            // 2. 依次等待云端处理完成并获取行数
+            publishProgress(job.getId(), objLog.getId(), "RUNNING", "等待云端打包源数据...", 20);
+            waitForJob(job.getSourceOrgId(), srcJobId);
             int srcRows = bulkApiService.getJobRecordCount(job.getSourceOrgId(), srcJobId);
 
-            // 再次检查停止 (避免下载大文件浪费时间)
-            if(!isRunning(job.getId())) {
-                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
-                return;
-            }
-
-            String srcPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_src.csv";
-            File srcFile = bulkApiService.downloadResult(job.getSourceOrgId(), srcJobId, srcPath);
-
-            // 3. 下载目标数据
-            publishProgress(job.getId(), objLog.getId(), "RUNNING", "下载目标数据...", 25);
-            String tgtJobId = bulkApiService.submitQueryJob(job.getTargetOrgId(), tgtSoql);
+            publishProgress(job.getId(), objLog.getId(), "RUNNING", "等待云端打包目标数据...", 30);
             waitForJob(job.getTargetOrgId(), tgtJobId);
-
-            // 【新增】获取目标数据行数
             int tgtRows = bulkApiService.getJobRecordCount(job.getTargetOrgId(), tgtJobId);
 
-            if(!isRunning(job.getId())) {
-                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
-                return;
-            }
+            if(!isRunning(job.getId())) return;
 
-            String tgtPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_tgt.csv";
-            File tgtFile = bulkApiService.downloadResult(job.getTargetOrgId(), tgtJobId, tgtPath);
+            // 3. 依次拉取到本地硬盘
+            publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在下载源环境数据...", 40);
+            srcFile = bulkApiService.downloadResult(job.getSourceOrgId(), srcJobId, srcPath);
 
-            // 4. 执行比对
-            if(!isRunning(job.getId())) {
-                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
-                return;
-            }
+            publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在下载目标环境数据...", 55);
+            tgtFile = bulkApiService.downloadResult(job.getTargetOrgId(), tgtJobId, tgtPath);
 
-            // 计算总预估行数 (算法里会用这个作为分母)
+            if(!isRunning(job.getId())) return;
+
+            // 4. 执行本地比对算法
             int totalEstimatedRows = srcRows + tgtRows;
-
-            publishProgress(job.getId(), objLog.getId(), "RUNNING", "执行比对算法...", 70);
+            publishProgress(job.getId(), objLog.getId(), "RUNNING", "数据就绪，引擎极速碰撞中...", 70);
             String resPath = "/tmp/sf_reconcile/res_" + objLog.getId() + ".csv";
             File resFile = new File(resPath);
 
-            // 【核心修改】定义进度回调函数
-            // 使用 synchronized 或者 Atomic 变量并不是必须的，因为 executeObjectLog 是单线程跑一个对象
-            // 但是为了防止数据库写入太频繁，我们可以在这里做二层防抖（或者 Algorithm 里做）
-            // Algorithm 里已经做了 1% 的阈值判断，这里直接处理即可
             java.util.function.Consumer<Integer> progressCallback = (pct) -> {
-                // 只有还在运行才推送
-                if (isRunning(job.getId())) {
-                    // 更新数据库 (可选：如果觉得太频繁，可以只推 WebSocket，不更 DB)
-                     objLog.setProgress(pct);
-                     objLogMapper.updateById(objLog);
-
-                    // 推送 WebSocket (这是给用户看的，必须实时)
-                    publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在比对中...", pct);
+                if(isRunning(job.getId())) {
+                    objLog.setProgress(pct);
+                    objLogMapper.updateById(objLog);
+                    publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在比对数据...", pct);
                 }
             };
 
-            // 传入 totalRows 和 callback
             SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resFile, config, totalEstimatedRows, progressCallback);
 
             // 5. 保存结果
@@ -269,14 +246,15 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             updateObjLogStatus(objLog, "FINISHED", "比对完成", 100);
             publishProgress(job.getId(), objLog.getId(), "FINISHED", "完成", 100);
 
-            // 清理临时文件
-            FileUtil.del(srcFile);
-            FileUtil.del(tgtFile);
-
         } catch(Exception e) {
             log.error("对象 [" + objLog.getObjectName() + "] 执行失败", e);
             updateObjLogStatus(objLog, "FAILED", e.getMessage(), 0);
             publishProgress(job.getId(), objLog.getId(), "FAILED", "异常: " + e.getMessage(), 0);
+        } finally {
+            // 【核心优化 2：终极防泄漏兜底】无论算法是否因为脏数据或者内存溢出崩溃，在此处必定销毁源和目标CSV巨型文件
+            FileUtil.del(srcFile);
+            FileUtil.del(tgtFile);
+            // 备注：resFile (差异结果文件) 故意不删，留给用户从前端点击下载
         }
     }
 

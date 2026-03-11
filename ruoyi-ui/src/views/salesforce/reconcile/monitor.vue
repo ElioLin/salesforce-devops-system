@@ -87,6 +87,9 @@
 
         <el-table-column label="结果操作" width="220" align="center" fixed="right">
           <template slot-scope="scope">
+            <el-button size="mini" type="text" icon="el-icon-setting" style="color: #909399"
+              v-if="scope.row.status !== 'RUNNING' && scope.row.status !== 'WAITING'"
+              @click="handleConfig(scope.row)">映射配置</el-button>
             <el-button size="mini" type="text" icon="el-icon-view" :disabled="scope.row.status !== 'FINISHED'"
               @click="handlePreview(scope.row)">预览</el-button>
             <el-button size="mini" type="text" icon="el-icon-download" :disabled="scope.row.status !== 'FINISHED'"
@@ -101,6 +104,17 @@
     </el-card>
 
     <preview-result ref="previewRef" />
+    <el-drawer :title="`正在配置: ${currentEditObj.objectLabel}`" :visible.sync="configDrawerVisible" direction="rtl"
+      size="60%" :destroy-on-close="true">
+      <div v-loading="drawerLoading" style="padding: 0 20px; height: calc(100vh - 130px);">
+        <field-mapping-panel v-if="currentEditConfig && !drawerLoading" :config="currentEditConfig"
+          :source-org-id="jobMeta.sourceOrgId" :object-label="currentEditObj.objectLabel" />
+      </div>
+      <div style="padding: 15px 20px; border-top: 1px solid #ebeef5; text-align: right; background: #fff;">
+        <el-button @click="configDrawerVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingConfig" @click="saveSingleConfig">保存并关闭</el-button>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -109,10 +123,13 @@ import { getJobMonitor, downloadObjUrl, retryObjLog } from "@/api/salesforce/dat
 import PreviewResult from './preview';
 import { getToken } from "@/utils/auth"; // 必须引入 Token
 import request from '@/utils/request';
+import FieldMappingPanel from './components/FieldMappingPanel';
+import { getJob } from "@/api/salesforce/dataJob";
+import { listConfigs, batchSaveConfigs } from "@/api/salesforce/dataObjConfig"; // 引入保存 API
 
 export default {
   name: "JobMonitor",
-  components: { PreviewResult },
+  components: { PreviewResult, FieldMappingPanel },
   data() {
     return {
       jobId: null,
@@ -124,6 +141,13 @@ export default {
       timer: null,
       lockReconnect: false,
       socketRetryCount: 0, // 增加重连计数防止死循环
+      configDrawerVisible: false,
+      drawerLoading: false,
+      savingConfig: false,
+      currentEditObj: {},
+      currentEditConfig: null,
+      fullConfigList: [], // 缓存当前Job下的所有配置
+      jobMeta: {}, // 缓存环境ID
     };
   },
   computed: {
@@ -449,6 +473,51 @@ export default {
           this.fetchData();
         });
       }).catch(() => { });
+    },
+    async handleConfig(row) {
+      this.currentEditObj = row;
+      this.configDrawerVisible = true;
+      this.drawerLoading = true;
+
+      try {
+        // 1. 获取源环境 ID (如果还没有的话)
+        if (!this.jobMeta.sourceOrgId) {
+           const jobRes = await getJob(this.jobId);
+           this.jobMeta = jobRes.data;
+        }
+        
+        // 2. 拉取整个 Job 的所有配置策略
+        const confRes = await listConfigs(this.jobId);
+        this.fullConfigList = confRes.data || [];
+        
+        // 3. 找出当前被点击的这个 Salesforce 对象的配置，并丢给提取出的子组件渲染
+        this.currentEditConfig = this.fullConfigList.find(c => c.objectName === row.objectName);
+        
+        if (!this.currentEditConfig) {
+           this.$message.warning("未找到该对象的原始配置数据。");
+        }
+      } catch (err) {
+        console.error(err);
+        this.$message.error("加载配置失败");
+      } finally {
+        this.drawerLoading = false;
+      }
+    },
+
+    // 独立保存
+    async saveSingleConfig() {
+      this.savingConfig = true;
+      try {
+        // 因为组件内部直接双向绑定修改了 currentEditConfig
+        // 我们只需把更新后的 fullConfigList 整体提交给后端覆盖即可
+        await batchSaveConfigs(this.jobId, this.fullConfigList);
+        this.$message.success("映射策略保存成功！您可以直接点击“重试”重新验证数据。");
+        this.configDrawerVisible = false;
+      } catch (err) {
+        this.$message.error("保存失败");
+      } finally {
+        this.savingConfig = false;
+      }
     }
   }
 };

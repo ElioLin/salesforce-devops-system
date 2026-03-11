@@ -18,7 +18,8 @@ public class SfBulkApiService {
     @Autowired
     private ISfOrgService sfOrgService;
 
-    @Autowired private ISfAuthService sfAuthService;
+    @Autowired
+    private ISfAuthService sfAuthService;
 
     private static final String API_VERSION = "v58.0";
 
@@ -125,42 +126,99 @@ public class SfBulkApiService {
     }
 
     /**
-     * 4. 下载结果 (支持自动 Token 续期)
+     * 4. 下载结果 (支持自动 Token 续期，并支持大文件 Locator 自动分批下载与合并)
      */
     public File downloadResult(Long orgId, String jobId, String filePath) {
         try {
             return sfAuthService.executeWithRetry(orgId, () -> {
                 SfOrg org = sfOrgService.selectSfOrgById(orgId);
-                String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId + "/results";
-
-                // 使用 executeAsync 获取流，但也需要检查状态
-                HttpResponse response = HttpRequest.get(url)
-                        .header("Authorization", "Bearer " + org.getAccessToken())
-                        .header("Accept", "text/csv")
-                        .timeout(60000) // 1分钟超时
-                        .executeAsync();
-
-                if(response.getStatus() == 401) {
-                    throw new Exception("INVALID_SESSION_ID");
-                }
-
-                if(!response.isOk()) {
-                    // 读取错误体
-                    String err = response.body(); // 注意：流被读取后可能无法再次读取，但这里是错误情况无所谓
-                    if(err.contains("INVALID_SESSION_ID")) {
-                        throw new Exception("INVALID_SESSION_ID");
-                    }
-                    throw new Exception("下载失败 Code: " + response.getStatus());
-                }
+                String baseUrl = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + jobId + "/results";
 
                 File file = new File(filePath);
                 if(!file.getParentFile().exists()) {
                     file.getParentFile().mkdirs();
                 }
 
-                // 流式写入文件
-                long size = response.writeBody(file, null);
-                log.info("Bulk 结果下载成功: {}, 大小: {} bytes", file.getName(), size);
+                // 【关键修复 1】防脏数据：由于我们即将使用追加模式，如果存在上次失败残留的文件，必须先物理删除
+                if(file.exists()) {
+                    file.delete();
+                }
+
+                String locator = null;
+                boolean isFirstChunk = true;
+
+                // 【关键修复 2】使用追加模式 (append = true) 打开文件流，应对多批次分片组合
+                try(java.io.FileOutputStream fos = new java.io.FileOutputStream(file, true);
+                    java.io.BufferedOutputStream bos = new java.io.BufferedOutputStream(fos)) {
+
+                    do {
+                        String url = baseUrl;
+                        if(locator != null && !"null".equalsIgnoreCase(locator)) {
+                            url += "?locator=" + locator;
+                        }
+
+                        log.info("开始下载 Bulk 结果数据块 (Locator: {}), URL: {}", locator, url);
+
+                        HttpResponse response = HttpRequest.get(url)
+                                .header("Authorization", "Bearer " + org.getAccessToken())
+                                .header("Accept", "text/csv")
+                                .timeout(120000) // 放宽到 2 分钟超时，应对大文件传输
+                                .executeAsync();
+
+                        if(response.getStatus() == 401) {
+                            throw new Exception("INVALID_SESSION_ID");
+                        }
+
+                        if(!response.isOk()) {
+                            // 注意：调用 .body() 后流会被消耗，用来记录错误日志
+                            String err = response.body();
+                            if(err != null && err.contains("INVALID_SESSION_ID")) {
+                                throw new Exception("INVALID_SESSION_ID");
+                            }
+                            throw new Exception("下载失败 Code: " + response.getStatus() + ", Msg: " + err);
+                        }
+
+                        // 提取下一页的游标 (Salesforce 在没有下一页时会返回 "null" 字符串或不返回该Header)
+                        locator = response.header("Sforce-Locator");
+
+                        // 【性能压榨优化】：使用 BufferedInputStream 包裹原生网络流，极大地加速跳过表头和数据搬运的过程
+                        try (java.io.InputStream rawIs = response.bodyStream();
+                             java.io.BufferedInputStream is = new java.io.BufferedInputStream(rawIs)) {
+
+                            if (isFirstChunk) {
+                                // 第一批次：毫无保留，全量写入（包含最顶部的 CSV 表头）
+                                byte[] buffer = new byte[8192];//现代操作系统的磁盘块（Block Size）和内存页（Page Size）通常是 4KB 或 8KB。将缓冲区设置为 8KB，刚好能与操作系统的底层机制完美对齐，达到吞吐量与内存占用的最佳平衡。
+                                int bytesRead;
+                                while ((bytesRead = is.read(buffer)) != -1) {
+                                    bos.write(buffer, 0, bytesRead);
+                                }
+                                isFirstChunk = false;
+                            } else {
+                                // 后续批次：字节级跳过第一行表头
+                                int b;
+                                boolean headerSkipped = false;
+                                while ((b = is.read()) != -1) {
+                                    if (b == '\n') {
+                                        headerSkipped = true;
+                                        break;
+                                    }
+                                }
+
+                                // 精准跳过表头后，再将剩余的业务数据块全速泵入文件
+                                if (headerSkipped) {
+                                    byte[] buffer = new byte[8192];
+                                    int bytesRead;
+                                    while ((bytesRead = is.read(buffer)) != -1) {
+                                        bos.write(buffer, 0, bytesRead);
+                                    }
+                                }
+                            }
+                            bos.flush();
+                        }
+                    } while(locator != null && !"null".equalsIgnoreCase(locator) && !locator.trim().isEmpty());
+                }
+
+                log.info("Bulk 结果全部分块下载并无缝合并完成: {}, 最终文件大小: {} bytes", file.getName(), file.length());
                 return file;
             });
         } catch(Exception e) {
