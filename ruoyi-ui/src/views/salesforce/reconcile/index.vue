@@ -22,24 +22,29 @@
 
             <el-table-column label="比对对象" align="left" min-width="280">
                 <template slot-scope="scope">
-                    <div v-if="scope.row.objectNames && scope.row.objectNames.length > 0" style="display: flex; align-items: center; flex-wrap: wrap; gap: 5px;">
+                    <div v-if="scope.row.objectNames && scope.row.objectNames.length > 0"
+                        style="display: flex; align-items: center; flex-wrap: wrap; gap: 5px;">
                         <el-tag v-for="(name, index) in scope.row.objectNames.slice(0, 3)" :key="index" size="small"
                             effect="light" type="primary">
                             <i class="el-icon-document"></i> {{ name }}
                         </el-tag>
-                        
-                        <el-popover v-if="scope.row.objectNames.length > 3" placement="bottom" width="300" trigger="hover">
+
+                        <el-popover v-if="scope.row.objectNames.length > 3" placement="bottom" width="300"
+                            trigger="hover">
                             <div style="max-height: 250px; overflow-y: auto;">
-                                <div style="font-size: 13px; font-weight: bold; margin-bottom: 10px; color: #606266; border-bottom: 1px solid #EBEEF5; padding-bottom: 6px;">
+                                <div
+                                    style="font-size: 13px; font-weight: bold; margin-bottom: 10px; color: #606266; border-bottom: 1px solid #EBEEF5; padding-bottom: 6px;">
                                     包含的所有比对对象 (共 {{ scope.row.objectNames.length }} 个)
                                 </div>
                                 <div style="display: flex; flex-wrap: wrap; gap: 6px;">
-                                    <el-tag v-for="(name, idx) in scope.row.objectNames" :key="idx" size="small" type="info" effect="plain">
+                                    <el-tag v-for="(name, idx) in scope.row.objectNames" :key="idx" size="small"
+                                        type="info" effect="plain">
                                         {{ name }}
                                     </el-tag>
                                 </div>
                             </div>
-                            <el-tag slot="reference" size="small" type="warning" effect="dark" style="cursor: pointer; border-radius: 12px; padding: 0 10px;">
+                            <el-tag slot="reference" size="small" type="warning" effect="dark"
+                                style="cursor: pointer; border-radius: 12px; padding: 0 10px;">
                                 +{{ scope.row.objectNames.length - 3 }} 更多...
                             </el-tag>
                         </el-popover>
@@ -66,9 +71,37 @@
                 </template>
             </el-table-column>
 
+            <el-table-column label="数据截断时间" align="center" width="160">
+                <template slot-scope="scope">
+                    <el-tag v-if="scope.row.dataEndTime" type="warning" size="small" effect="plain">
+                        <i class="el-icon-time"></i> {{ scope.row.dataEndTime }}
+                    </el-tag>
+                    <span v-else style="color: #909399; font-size: 12px; font-style: italic;">
+                        全量拉取 (无限制)
+                    </span>
+                </template>
+            </el-table-column>
+
             <el-table-column label="最新状态" align="center" width="100">
                 <template slot-scope="scope">
                     <el-tag :type="getStatusType(scope.row.status)">{{ scope.row.status }}</el-tag>
+                </template>
+            </el-table-column>
+
+            <el-table-column label="最近比对结果" align="center" width="160">
+                <template slot-scope="scope">
+                    <div v-if="scope.row.lastDiffCount !== undefined">
+                        <el-tooltip v-if="scope.row.lastDiffCount > 0"
+                            :content="`其中有 ${scope.row.diffObjCount} 个对象存在数据差异`" placement="top">
+                            <el-tag type="danger" effect="dark" size="small" style="cursor: help;">
+                                <i class="el-icon-warning"></i> 差异数据: {{ scope.row.lastDiffCount }} 条
+                            </el-tag>
+                        </el-tooltip>
+                        <el-tag v-else type="success" effect="plain" size="small">
+                            <i class="el-icon-circle-check"></i> 数据完全一致
+                        </el-tag>
+                    </div>
+                    <span v-else style="color: #909399; font-size: 12px; font-style: italic;">尚未执行</span>
                 </template>
             </el-table-column>
 
@@ -83,15 +116,13 @@
                     <el-button size="mini" type="text" icon="el-icon-video-play" @click="handleStart(scope.row)"
                         v-if="scope.row.status !== 'RUNNING'">启动</el-button>
 
-                    <el-button size="mini" type="text" icon="el-icon-monitor" @click="handleMonitor(scope.row)"
-                        v-if="scope.row.status !== 'IDLE' && scope.row.status !== null">监控</el-button>
+                    <el-button size="mini" type="text" icon="el-icon-monitor"
+                        @click="handleMonitor(scope.row)">控制台</el-button>
 
                     <el-button size="mini" type="text" icon="el-icon-setting"
-                        @click="handleConfig(scope.row)">配置</el-button>
+                        @click="handleConfig(scope.row)">向导配置</el-button>
 
-                    <el-button size="mini" type="text" icon="el-icon-edit"
-                        @click="handleUpdate(scope.row)">修改</el-button>
-                    <el-button size="mini" type="text" icon="el-icon-delete"
+                    <el-button size="mini" type="text" icon="el-icon-delete" style="color: #F56C6C"
                         @click="handleDelete(scope.row)">删除</el-button>
                 </template>
             </el-table-column>
@@ -100,8 +131,8 @@
         <pagination v-show="total > 0" :total="total" :page.sync="queryParams.pageNum"
             :limit.sync="queryParams.pageSize" @pagination="getList" />
 
-        <job-dialog ref="jobDialog" @ok="getList" />
-        <wizard-config ref="wizardConfig" @ok="getList" />
+        <wizard-config ref="wizardConfig" @ok="handleJobCreated" />
+
     </div>
 </template>
 
@@ -109,13 +140,12 @@
 import { listJob, delJob } from "@/api/salesforce/dataJob";
 import { runJob } from "@/api/salesforce/reconcile";
 // 引入组件
-import JobDialog from "./components/JobDialog";
 import WizardConfig from "./wizard";
 import { listOrg } from "@/api/salesforce/org";
 
 export default {
     name: "ReconcileIndex",
-    components: { JobDialog, WizardConfig },
+    components: { WizardConfig },
     data() {
         return {
             loading: true,
@@ -148,6 +178,15 @@ export default {
                 // 兼容分页数据或全量数据的结构
                 this.orgList = res.rows || res.data || [];
             });
+        },
+
+        //捕获新建成功的任务 ID，实现创建即跳转的丝滑体验
+        handleJobCreated(jobId) {
+            this.getList();
+            // 如果存在有效的新建任务 ID，则自动路由至工作台
+            if (jobId && (typeof jobId === 'number' || typeof jobId === 'string')) {
+                this.handleMonitor({ id: jobId });
+            }
         },
         resetQuery() {
             this.queryParams.jobName = undefined;
@@ -183,23 +222,22 @@ export default {
 
         // 2. 跳转监控页
         handleMonitor(row) {
-            this.$router.push({ 
-                path: '/salesforce/jobMonitor', // <--- 请根据实际菜单路径确认此处
-                query: { jobId: row.id } 
+            this.$router.push({
+                path: '/salesforce/jobMonitor',
+                query: { jobId: row.id }
             });
         },
 
         // 3. 打开基础信息弹窗
         handleAdd() {
-            this.$refs.jobDialog.init();
+            this.$refs.wizardConfig.init();
         },
         handleUpdate(row) {
-            this.$refs.jobDialog.init(row.id);
+            this.$refs.wizardConfig.init(row.id);
         },
 
         // 4. 打开配置向导 (Wizard)
         handleConfig(row) {
-            console.log("Opening wizard for job:", row.id);
             // 调用 wizard.vue 中的 init 方法
             this.$refs.wizardConfig.init(row.id);
         },

@@ -65,4 +65,13 @@ public class SfDataJob implements Serializable {
     /** 任务包含的对象名称集合 (非数据库字段) */
     @TableField(exist = false)
     private List<String> objectNames;
+
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    private Date dataEndTime;
+
+    @TableField(exist = false)
+    private Integer lastDiffCount; // 最新一次执行的总差异数
+
+    @TableField(exist = false)
+    private Integer diffObjCount;  // 最新一次执行存在差异的对象个数
 }

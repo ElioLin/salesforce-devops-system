@@ -33,6 +33,16 @@
                         </el-form-item>
                     </el-col>
                 </el-row>
+                <el-form-item label="数据截断时间" prop="dataEndTime">
+                    <el-date-picker v-model="form.dataEndTime" type="datetime" placeholder="留空则默认拉取全量源数据"
+                        value-format="yyyy-MM-dd HH:mm:ss" style="width: 100%">
+                    </el-date-picker>
+                    <div style="font-size: 12px; color: #E6A23C; line-height: 1.4; margin-top: 4px;">
+                        <i class="el-icon-info"></i> 配置后，源环境仅提取 CreatedDate ≤ 该时间的数据。（注：若选定的 Salesforce 对象底层无
+                        CreatedDate
+                        字段如系统元数据，该限制将自动豁免并执行全量比对）。
+                    </div>
+                </el-form-item>
                 <el-form-item label="备注" prop="remark">
                     <el-input type="textarea" v-model="form.remark" placeholder="请输入任务描述或备注信息" :rows="4" />
                 </el-form-item>
@@ -78,10 +88,23 @@
         </div>
 
         <div slot="footer" class="drawer-footer">
-            <el-button @click="open = false">取消</el-button>
-            <el-button v-if="activeStep > 0" @click="prevStep">上一步</el-button>
-            <el-button v-if="activeStep < 2" type="primary" @click="nextStep">下一步</el-button>
-            <el-button v-if="activeStep === 2" type="primary" :loading="submitting" @click="submit">完成配置</el-button>
+
+            <el-button v-if="activeStep === 0" type="success" plain icon="el-icon-monitor" @click="handleSaveAndExit"
+                :loading="submitting" style="margin-right: auto; float: left;">保存并前往控制台</el-button>
+            <el-button v-if="activeStep === 0" type="primary" @click="nextStep" :loading="submitting">保存并继续下一步 <i
+                    class="el-icon-arrow-right"></i></el-button>
+
+            <el-button v-if="activeStep === 1" type="success" plain icon="el-icon-check" @click="handleQuickSave"
+                :loading="submitting" style="margin-right: auto; float: left;">保存并稍后配置</el-button>
+
+            <el-button @click="open = false">取 消</el-button>
+
+            <el-button v-if="activeStep > startStep" @click="prevStep">上一步</el-button>
+
+            <el-button v-if="activeStep === 1" type="primary" @click="nextStep">下一步 (精细化字段映射) <i
+                    class="el-icon-arrow-right"></i></el-button>
+
+            <el-button v-if="activeStep === 2" type="primary" :loading="submitting" @click="submit">完成所有配置</el-button>
         </div>
     </el-dialog>
 </template>
@@ -137,7 +160,7 @@ export default {
             // --- Step 3 Data ---
             currentObjIndex: "0",
             configList: [],
-            // 注意：关于字段过滤、搜索、弹窗配置的 data 全都移走了！
+            startStep: 0
         };
     },
     watch: {
@@ -157,23 +180,25 @@ export default {
         }
     },
     methods: {
-        init(jobId) {
+        init(jobId, startStep = 0) {
             this.reset();
+            this.startStep = startStep;
+            this.activeStep = startStep;
             this.open = true;
 
-            // 兜底获取Org列表
             if (this.orgOptionsList.length === 0) {
                 listOrg().then(res => this.orgOptionsList = res.rows);
             }
 
             if (jobId) {
-                this.title = "编辑比对任务";
+                this.title = startStep === 1 ? "添加/修改比对对象" : "编辑比对任务";
                 getJob(jobId).then(res => {
                     this.form = res.data;
                     listConfigs(jobId).then(cRes => {
-                        this.configList = cRes.data;
+                        this.configList = cRes.data || [];
                         this.selectedObjects = this.configList.map(c => c.objectName);
-                        if (this.selectedObjects.length > 0) {
+                        // 如果直接跳到选对象页面，或者已经有选中的对象，就拉取字典库
+                        if (this.activeStep === 1 || this.selectedObjects.length > 0) {
                             this.loadAllObjects();
                         }
                     });
@@ -182,7 +207,34 @@ export default {
                 this.title = "创建比对任务";
             }
         },
-
+        handleSaveAndExit() {
+            this.$refs["form"].validate(valid => {
+                if (valid) {
+                    this.submitting = true;
+                    const jobFunc = this.form.id ? updateJob : addJob;
+                    jobFunc(this.form).then(res => {
+                        this.submitting = false;
+                        const newId = this.form.id || res.data;
+                        this.$modal.msgSuccess("基础信息保存成功");
+                        this.open = false;
+                        // 抛出新 ID，触发 index.vue 跳转到控制台
+                        this.$emit("ok", newId);
+                    }).catch(() => {
+                        this.submitting = false;
+                    });
+                }
+            });
+        },
+        handleQuickSave() {
+            if (this.selectedObjects.length === 0) {
+                this.$modal.msgError("请至少选择一个对象");
+                return;
+            }
+            // 自动补齐所选对象的默认配置策略
+            this.initConfigs();
+            // 直接触发统筹保存
+            this.submit();
+        },
         reset() {
             this.activeStep = 0;
             this.form = { id: undefined, jobName: '', sourceOrgId: undefined, targetOrgId: undefined, remark: '' };
@@ -201,20 +253,33 @@ export default {
         // --- Step Navigation ---
         nextStep() {
             if (this.activeStep === 0) {
-                this.$refs.form.validate(valid => {
+                // 【核心突破】：如果是从第0步点下一步，必须先落盘基础信息生成 JobId，否则后面没法挂载对象！
+                this.$refs["form"].validate(valid => {
                     if (valid) {
-                        this.activeStep = 1;
-                        this.loadAllObjects();
+                        this.submitting = true;
+                        const jobFunc = this.form.id ? updateJob : addJob;
+                        jobFunc(this.form).then(res => {
+                            this.submitting = false;
+                            // 如果是新建，必须把后端返回的 ID 赋值给表单，这样后续配置才知道归属哪个 Job
+                            if (!this.form.id) {
+                                this.form.id = res.data;
+                            }
+                            this.activeStep++;
+                            // 进入选对象页面时，加载元数据字典
+                            this.loadAllObjects();
+                        }).catch(() => {
+                            this.submitting = false;
+                        });
                     }
                 });
-            } else if (this.activeStep === 1) {
+            }
+            else if (this.activeStep === 1) {
                 if (this.selectedObjects.length === 0) {
                     this.$modal.msgError("请至少选择一个对象");
                     return;
                 }
-                this.activeStep = 2;
                 this.initConfigs();
-                // 注意：这里不再调用 loadFieldsForCurrentObj()，因为子组件被挂载后会自动拉取
+                this.activeStep++;
             }
         },
 

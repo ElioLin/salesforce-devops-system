@@ -9,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.ruoyi.salesforce.domain.SfDataRunObjLog;
+import com.ruoyi.salesforce.mapper.SfDataRunObjLogMapper;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -18,6 +20,9 @@ import java.util.stream.Collectors;
 public class SfDataObjConfigServiceImpl implements ISfDataObjConfigService {
     @Autowired
     private SfDataObjConfigMapper configMapper;
+
+    @Autowired
+    private SfDataRunObjLogMapper objLogMapper;
 
     @Override
     public List<SfDataObjConfig> selectConfigList(Long jobId) {
@@ -38,7 +43,14 @@ public class SfDataObjConfigServiceImpl implements ISfDataObjConfigService {
             if(!inputIds.contains(dbId)) idsToDelete.add(dbId);
         }
 
-        if(!idsToDelete.isEmpty()) configMapper.deleteBatchIds(idsToDelete);
+        if(!idsToDelete.isEmpty()) {
+            // 1. 删除对象配置
+            configMapper.deleteBatchIds(idsToDelete);
+
+            // 【核心修复】：2. 级联彻底删除下游关联的对象执行明细日志 (清理脏数据)
+            objLogMapper.delete(new LambdaQueryWrapper<SfDataRunObjLog>()
+                    .in(SfDataRunObjLog::getObjConfigId, idsToDelete));
+        }
 
         for(SfDataObjConfig config : configs) {
             config.setJobId(jobId);

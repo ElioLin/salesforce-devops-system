@@ -18,6 +18,8 @@ import com.ruoyi.salesforce.service.ISfDescribeApiService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import com.ruoyi.salesforce.domain.SfDataObjConfig;
+import com.ruoyi.salesforce.mapper.SfDataObjConfigMapper;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -41,6 +43,9 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
 
     @Autowired
     private ISfDescribeApiService describeApiService;
+
+    @Autowired
+    private SfDataObjConfigMapper configMapper;
 
     @Override
     public List<SfDataRunObjLog> selectListByRunLogId(Long runLogId) {
@@ -146,7 +151,7 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
     }
 
     /**
-     * 获取监控数据的业务逻辑实现
+     * 获取监控数据的业务逻辑实现 (全新重构版)
      */
     @Override
     public Map<String, Object> getMonitorData(Long jobId) {
@@ -159,43 +164,64 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
         }
         result.put("jobName", job.getJobName());
 
+        // 【核心修复 1】获取该任务当前真实的【对象配置清单】作为绝对基准
+        List<SfDataObjConfig> configs = configMapper.selectList(
+                new LambdaQueryWrapper<SfDataObjConfig>().eq(SfDataObjConfig::getJobId, jobId)
+        );
+
         // 2. 找到该任务最近一次的主日志
         SfDataRunLog lastRun = runLogMapper.selectOne(new LambdaQueryWrapper<SfDataRunLog>()
                 .eq(SfDataRunLog::getJobId, jobId)
                 .orderByDesc(SfDataRunLog::getStartTime)
                 .last("LIMIT 1"));
 
-        List<SfDataRunObjLog> list = new ArrayList<>();
+        // 3. 将最近一次运行的对象日志转为 Map，以便按对象名称快速匹配
+        Map<String, SfDataRunObjLog> logMap = new HashMap<>();
         if(lastRun != null) {
-            list = this.selectListByRunLogId(lastRun.getId());
-        }
-
-        // 3. 填充对象中文名称 (Label)
-        if(!list.isEmpty()) {
-            try {
-                // 获取源组织的元数据缓存
-                List<Map<String, String>> metaList = describeApiService.getSObjectList(job.getSourceOrgId());
-                Map<String, String> nameToLabelMap = new HashMap<>();
-                if(metaList != null) {
-                    for(Map<String, String> meta : metaList) {
-                        nameToLabelMap.put(meta.get("name"), meta.get("label"));
-                    }
-                }
-
-                // 回填 Label
-                for(SfDataRunObjLog log : list) {
-                    String label = nameToLabelMap.get(log.getObjectName());
-                    log.setObjectLabel(StringUtils.isNotEmpty(label) ? label : log.getObjectName());
-                }
-            } catch(Exception e) {
-                log.warn("获取元数据失败，将降级显示API Name: {}", e.getMessage());
-                for(SfDataRunObjLog log : list) {
-                    log.setObjectLabel(log.getObjectName());
-                }
+            List<SfDataRunObjLog> lastLogs = this.selectListByRunLogId(lastRun.getId());
+            for(SfDataRunObjLog log : lastLogs) {
+                logMap.put(log.getObjectName(), log);
             }
         }
 
-        result.put("list", list);
+        // 4. 获取元数据字典，用于翻译中文 Label
+        Map<String, String> nameToLabelMap = new HashMap<>();
+        try {
+            List<Map<String, String>> metaList = describeApiService.getSObjectList(job.getSourceOrgId());
+            if(metaList != null) {
+                for(Map<String, String> meta : metaList) {
+                    nameToLabelMap.put(meta.get("name"), meta.get("label"));
+                }
+            }
+        } catch(Exception e) {
+            log.warn("获取元数据失败，将降级显示API Name: {}", e.getMessage());
+        }
+
+        // 【核心修复 2】基于配置清单拼装最终视图，巧妙处理新增对象
+        List<SfDataRunObjLog> resultList = new ArrayList<>();
+        for(SfDataObjConfig config : configs) {
+            // 尝试去历史日志中匹配
+            SfDataRunObjLog logInfo = logMap.get(config.getObjectName());
+
+            if(logInfo == null) {
+                // 如果是新加的对象，尚未运行过，伪造一条空闲状态的记录供前端无缝展示
+                logInfo = new SfDataRunObjLog();
+                // 故意不设置 ID，避免触发错误逻辑
+                logInfo.setObjectName(config.getObjectName());
+                logInfo.setJobId(jobId);
+                logInfo.setObjConfigId(config.getId());
+                logInfo.setStatus("IDLE"); // 关键：标记为空闲待执行
+                logInfo.setProgress(0);
+            }
+
+            // 回填前端所需的中文 Label
+            String label = nameToLabelMap.get(logInfo.getObjectName());
+            logInfo.setObjectLabel(StringUtils.isNotEmpty(label) ? label : logInfo.getObjectName());
+
+            resultList.add(logInfo);
+        }
+
+        result.put("list", resultList);
         return result;
     }
 }

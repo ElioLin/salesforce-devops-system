@@ -190,9 +190,9 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
             // 1. 构建 SOQL
             String srcKey = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
-            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey);
+            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey, job.getDataEndTime());
             String tgtKey = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
-            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey);
+            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey, null);
 
             if(!isRunning(job.getId())) return;
 
@@ -266,7 +266,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     /**
      * 动态构建 SOQL (含排序)
      */
-    private String buildDynamicSoql(Long orgId, SfDataObjConfig config, String keyField) {
+    private String buildDynamicSoql(Long orgId, SfDataObjConfig config, String keyField, Date dataEndTime) {
         String objectName = config.getObjectName();
 
         // 获取元数据
@@ -293,6 +293,8 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
         Set<String> queryFields = new LinkedHashSet<>();
 
+        boolean hasCreatedDate = false;
+
         // 确保 KeyField 存在
         String effectiveKeyField = StringUtils.isEmpty(keyField) ? "Id" : keyField;
         queryFields.add(effectiveKeyField);
@@ -300,6 +302,10 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         for(Map<String, Object> field : fieldsMeta) {
             String apiName = (String) field.get("name");
             String type = (String) field.get("type");
+
+            if("CreatedDate".equalsIgnoreCase(apiName)) {
+                hasCreatedDate = true;
+            }
 
             if(excludedSet.contains(apiName)) continue;
             if("base64".equalsIgnoreCase(type) || "address".equalsIgnoreCase(type)) continue;
@@ -320,9 +326,33 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         StringBuilder sb = new StringBuilder("SELECT ");
         sb.append(String.join(", ", queryFields));
         sb.append(" FROM ").append(objectName);
+
+        List<String> conditions = new ArrayList<>();
+
+        // 条件 1：追加用户原本在页面上配置的过滤逻辑 (如果有)
         if(StringUtils.isNotEmpty(config.getSyncFilterLogic())) {
-            sb.append(" WHERE ").append(config.getSyncFilterLogic());
+            // 加上括号，防止用户的 OR 逻辑干扰后续的 AND 逻辑
+            conditions.add("(" + config.getSyncFilterLogic() + ")");
         }
+
+        // 条件 2：追加增量数据的截断时间 (UTC 时区转换)
+        if(dataEndTime != null) {
+            if(hasCreatedDate) {
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
+                sdf.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                String sfTime = sdf.format(dataEndTime);
+                conditions.add("CreatedDate <= " + sfTime);
+            } else {
+                // 如果对象没有 CreatedDate，则智能降级并输出警告日志
+                log.warn("对象 [{}] 不包含 CreatedDate 字段，系统已自动忽略增量时间截断限制，将执行全量拉取比对。", objectName);
+            }
+        }
+
+        // 只有当条件不为空时，才统一拼接 WHERE 和 AND
+        if(!conditions.isEmpty()) {
+            sb.append(" WHERE ").append(String.join(" AND ", conditions));
+        }
+        // ==========================================
 
         // 强制排序：ORDER BY Key ASC, Id ASC
         sb.append(" ORDER BY ").append(effectiveKeyField).append(" ASC");
