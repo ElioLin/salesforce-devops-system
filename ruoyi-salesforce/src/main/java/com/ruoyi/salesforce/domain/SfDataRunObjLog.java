@@ -29,13 +29,22 @@ public class SfDataRunObjLog implements Serializable {
     private String resultFilePath;
     private String errorMsg;
 
-    /** 创建时间 */
+    /**
+     * 创建时间
+     */
     @TableField(fill = FieldFill.INSERT)
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private Date createTime;
 
-    /** 更新时间 */
+    /**
+     * 更新时间
+     */
     @TableField(fill = FieldFill.INSERT_UPDATE)
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private Date updateTime;
+
+    /**
+     * 租户归属ID (SaaS公司隔离)
+     */
+    private String tenantId;
 }

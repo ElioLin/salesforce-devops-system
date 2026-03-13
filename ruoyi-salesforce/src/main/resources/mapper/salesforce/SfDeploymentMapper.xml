@@ -4,6 +4,7 @@
 
     <resultMap type="com.ruoyi.salesforce.domain.SfDeployment" id="SfDeploymentResult">
         <result property="id" column="id"/>
+        <result property="tenantId" column="tenant_id"/>
         <result property="title" column="title"/>
         <result property="sourceOrgId" column="source_org_id"/>
         <result property="targetOrgId" column="target_org_id"/>
@@ -19,7 +20,7 @@
 
     <select id="selectSfDeploymentList" parameterType="com.ruoyi.salesforce.domain.SfDeployment"
             resultMap="SfDeploymentResult">
-        select d.id, d.title, d.source_org_id, d.target_org_id, d.status, d.create_time, d.create_by, d.user_id,
+        select d.id, d.tenant_id, d.title, d.source_org_id, d.target_org_id, d.status, d.create_time, d.create_by, d.user_id,
         d.dept_id
         from sf_deployment d
         <where>
@@ -36,8 +37,6 @@
                 and date_format(d.create_time,'%y%m%d') &lt;= date_format(#{params.endTime},'%y%m%d')
             </if>
             and d.del_flag = '0'
-
-            ${params.dataScope}
         </where>
         order by d.create_time desc
     </select>

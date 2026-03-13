@@ -74,4 +74,7 @@ public class SfDataJob implements Serializable {
 
     @TableField(exist = false)
     private Integer diffObjCount;  // 最新一次执行存在差异的对象个数
+
+    /** 租户归属ID (SaaS公司隔离) */
+    private String tenantId;
 }

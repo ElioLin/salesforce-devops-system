@@ -74,7 +74,7 @@ public interface ISfMetadataService {
      */
     void clearCacheForOrg(Long orgId);
 
-    void preloadMetadata(Long orgId, List<SfDeploymentItem> items);
+    void preloadMetadata(Long orgId, List<SfDeploymentItem> items, String currentTenantId);
 
     /**
      * 【新增】取消正在进行的部署

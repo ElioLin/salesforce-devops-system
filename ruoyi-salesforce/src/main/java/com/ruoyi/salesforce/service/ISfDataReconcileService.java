@@ -9,7 +9,7 @@ import java.util.Map;
 
 public interface ISfDataReconcileService {
     // 核心操作
-    void runJob(Long jobId);
+    void runJob(Long jobId, String currentTenantId);
 
     /**
      * 停止任务（移除运行标记）
@@ -20,5 +20,5 @@ public interface ISfDataReconcileService {
     /**
      * 重试单个对象 (异步)
      */
-    void retryObject(Long objLogId);
+    void retryObject(Long objLogId, String currentTenantId);
 }

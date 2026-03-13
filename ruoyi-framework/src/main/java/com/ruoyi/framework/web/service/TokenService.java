@@ -4,6 +4,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import javax.servlet.http.HttpServletRequest;
+
+import com.ruoyi.common.utils.SecurityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,7 +27,7 @@ import io.jsonwebtoken.SignatureAlgorithm;
 
 /**
  * token验证处理
- * 
+ *
  * @author ruoyi
  */
 @Component
@@ -56,7 +58,7 @@ public class TokenService
 
     /**
      * 获取用户身份信息
-     * 
+     *
      * @return 用户信息
      */
     public LoginUser getLoginUser(HttpServletRequest request)
@@ -132,7 +134,7 @@ public class TokenService
 
     /**
      * 创建令牌
-     * 
+     *
      * @param loginUser 用户信息
      * @return 令牌
      */
@@ -141,6 +143,15 @@ public class TokenService
         String token = IdUtils.fastUUID();
         loginUser.setToken(token);
         setUserAgent(loginUser);
+
+        // 从底层关联的 SysUser 中提取 tenantId，赋予 LoginUser 顶级属性
+        // 这样在任何业务代码中只需 SecurityUtils.getLoginUser().getTenantId() 即可获取
+        if (loginUser.getUser() != null && StringUtils.isNotEmpty(loginUser.getUser().getTenantId())) {
+            loginUser.setTenantId(loginUser.getUser().getTenantId());
+        } else {
+            // 安全兜底：如果数据库为空或异常，赋予默认主租户，防止后续拦截器报错
+            loginUser.setTenantId("000000");
+        }
         refreshToken(loginUser);
 
         Map<String, Object> claims = new HashMap<>();
@@ -151,7 +162,7 @@ public class TokenService
 
     /**
      * 验证令牌有效期，相差不足20分钟，自动刷新缓存
-     * 
+     *
      * @param loginUser 登录信息
      * @return 令牌
      */
@@ -167,7 +178,7 @@ public class TokenService
 
     /**
      * 刷新令牌有效期
-     * 
+     *
      * @param loginUser 登录信息
      */
     public void refreshToken(LoginUser loginUser)
@@ -181,7 +192,7 @@ public class TokenService
 
     /**
      * 设置用户代理信息
-     * 
+     *
      * @param loginUser 登录信息
      */
     public void setUserAgent(LoginUser loginUser)

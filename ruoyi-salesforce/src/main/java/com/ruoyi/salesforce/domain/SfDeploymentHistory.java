@@ -13,7 +13,7 @@ import java.util.Map;
 @Data
 @EqualsAndHashCode(callSuper = false)
 @TableName("sf_deployment_history")
-public class SfDeploymentHistory extends BaseEntity{
+public class SfDeploymentHistory extends BaseEntity {
     private static final long serialVersionUID = 1L;
 
     @TableId(type = IdType.AUTO)
@@ -60,7 +60,9 @@ public class SfDeploymentHistory extends BaseEntity{
      */
     private String remark;
 
-    /** 部署包标题 (非数据库字段) */
+    /**
+     * 部署包标题 (非数据库字段)
+     */
     @TableField(exist = false)
     private String deploymentTitle;
 
@@ -69,4 +71,9 @@ public class SfDeploymentHistory extends BaseEntity{
 
     @TableField(exist = false)
     private Integer limit;
+
+    /**
+     * 租户归属ID (SaaS公司隔离)
+     */
+    private String tenantId;
 }

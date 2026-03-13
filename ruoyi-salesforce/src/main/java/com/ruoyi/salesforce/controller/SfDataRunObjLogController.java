@@ -2,6 +2,7 @@ package com.ruoyi.salesforce.controller;
 
 import com.ruoyi.common.core.controller.BaseController;
 import com.ruoyi.common.core.domain.AjaxResult;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.salesforce.domain.SfDataRunObjLog;
 import com.ruoyi.salesforce.mapper.SfDataRunLogMapper;
 import com.ruoyi.salesforce.service.ISfDataReconcileService;
@@ -99,7 +100,7 @@ public class SfDataRunObjLogController extends BaseController {
      */
     @PostMapping("/retry/{objLogId}")
     public AjaxResult retryObjLog(@PathVariable Long objLogId) {
-        reconcileService.retryObject(objLogId);
+        reconcileService.retryObject(objLogId, SecurityUtils.getLoginUser().getTenantId());
         return AjaxResult.success("重试指令已下达");
     }
 }

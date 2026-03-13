@@ -54,6 +54,17 @@ public class SfDeployment extends BaseEntity {
         this.deptId = deptId;
     }
 
+    /** 租户归属ID (SaaS公司隔离) */
+    private String tenantId;
+
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId;
+    }
+
     @TableField(exist = false)
     private String remark;
 

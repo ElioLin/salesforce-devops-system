@@ -6,6 +6,7 @@
 
     <resultMap type="SfOrg" id="SfOrgResult">
         <result property="id" column="id"/>
+        <result property="tenantId" column="tenant_id"/>
         <result property="name" column="name"/>
         <result property="orgType" column="org_type"/>
         <result property="orgId" column="org_id"/>
@@ -22,6 +23,7 @@
 
     <sql id="selectSfOrgVo">
         select o.id,
+               o.tenant_id,
                o.name,
                o.org_type,
                o.org_id,
@@ -52,7 +54,6 @@
             <if test="clientId != null  and clientId != ''">and client_id = #{clientId}</if>
             <if test="clientSecret != null  and clientSecret != ''">and client_secret = #{clientSecret}</if>
             <if test="customDomain != null  and customDomain != ''">and custom_domain = #{customDomain}</if>
-            ${params.dataScope}
         </where>
     </select>
 
@@ -69,6 +70,7 @@
     <insert id="insertSfOrg" parameterType="SfOrg" useGeneratedKeys="true" keyProperty="id">
         insert into sf_org
         <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="tenantId != null">tenant_id,</if>
             <if test="name != null">name,</if>
             <if test="orgType != null">org_type,</if>
             <if test="orgId != null">org_id,</if>
@@ -85,6 +87,7 @@
             <if test="deptId != null">dept_id,</if>
         </trim>
         <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="tenantId != null">#{tenantId},</if>
             <if test="name != null">#{name},</if>
             <if test="orgType != null">#{orgType},</if>
             <if test="orgId != null">#{orgId},</if>
@@ -105,6 +108,7 @@
     <update id="updateSfOrg" parameterType="SfOrg">
         update sf_org
         <trim prefix="SET" suffixOverrides=",">
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
             <if test="name != null">name = #{name},</if>
             <if test="orgType != null">org_type = #{orgType},</if>
             <if test="orgId != null">org_id = #{orgId},</if>

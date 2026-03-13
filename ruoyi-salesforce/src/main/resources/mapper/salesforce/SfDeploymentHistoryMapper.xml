@@ -4,10 +4,12 @@
 
     <resultMap type="SfDeploymentHistory" id="SfDeploymentHistoryResult">
         <result property="id" column="id"/>
+        <result property="tenantId" column="tenant_id"/>
     </resultMap>
 
     <resultMap id="AuditResult" type="com.ruoyi.salesforce.domain.vo.SfAuditVo">
         <result property="historyId" column="history_id"/>
+        <result property="tenantId" column="tenant_id"/>
         <result property="deploymentId" column="deployment_id"/>
         <result property="deploymentTitle" column="deployment_title"/>
 
@@ -25,6 +27,7 @@
     <select id="selectAuditList" resultMap="AuditResult">
         SELECT
         h.id as history_id,
+        h.tenant_id,
         h.deployment_id,
         s.title as deployment_title, h.type,
         h.status,
@@ -57,7 +60,6 @@
         LEFT JOIN sf_deployment d ON h.deployment_id = d.id
         <where>
             h.start_time >= DATE_SUB(CURDATE(), INTERVAL #{days} DAY)
-            ${params.dataScope}
         </where>
         GROUP BY DATE_FORMAT(h.start_time, '%m-%d')
         ORDER BY dateStr ASC
@@ -68,7 +70,6 @@
         FROM sf_deployment_history h
         LEFT JOIN sf_deployment d ON h.deployment_id = d.id
         <where>
-            ${params.dataScope}
         </where>
         GROUP BY h.status
     </select>
@@ -79,7 +80,6 @@
         LEFT JOIN sf_deployment d ON h.deployment_id = d.id
         <where>
             YEARWEEK(h.start_time, 1) = YEARWEEK(CURDATE(), 1)
-            ${params.dataScope}
         </where>
     </select>
 
@@ -89,7 +89,6 @@
         LEFT JOIN sf_deployment d ON h.deployment_id = d.id
         <where>
             h.status = 'Succeeded'
-            ${params.dataScope}
         </where>
     </select>
 
@@ -98,7 +97,6 @@
         FROM sf_deployment_history h
         LEFT JOIN sf_deployment d ON h.deployment_id = d.id
         <where>
-            ${params.dataScope}
         </where>
     </select>
 
@@ -109,7 +107,6 @@
         FROM sf_deployment_history h
         LEFT JOIN sf_deployment s ON h.deployment_id = s.id
         <where>
-            ${params.dataScope}
         </where>
         ORDER BY h.start_time DESC
         LIMIT #{limit}

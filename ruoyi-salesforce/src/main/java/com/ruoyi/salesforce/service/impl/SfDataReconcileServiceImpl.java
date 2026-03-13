@@ -64,15 +64,24 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
      */
     @Async
     @Override
-    public void runJob(Long jobId) {
+    public void runJob(Long jobId, String currentTenantId) {
         SfDataJob job = jobMapper.selectById(jobId);
         if(job == null) return;
+
+        // 【核心安全防线：拦截跨租户恶意启动】
+        if (!StringUtils.equals(job.getTenantId(), currentTenantId)) {
+            log.error("🚨 安全警告：触发跨租户越权执行任务！被系统强制拦截。JobId: {}, 攻击者租户: {}", jobId, currentTenantId);
+            return;
+        }
 
         // 1. 初始化主日志
         SfDataRunLog runLog = new SfDataRunLog();
         runLog.setJobId(jobId);
         runLog.setStartTime(new Date());
         runLog.setStatus("RUNNING");
+
+        runLog.setTenantId(job.getTenantId());
+
         runLogMapper.insert(runLog);
 
         // 2. 获取配置
@@ -94,6 +103,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             objLog.setObjConfigId(config.getId());
             objLog.setObjectName(config.getObjectName());
             objLog.setStatus("WAITING");
+            objLog.setTenantId(job.getTenantId());
             objLog.setProgress(0);
             objLogMapper.insert(objLog);
             queue.add(objLog);
@@ -429,9 +439,15 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
      */
     @Async
     @Override
-    public void retryObject(Long objLogId) {
+    public void retryObject(Long objLogId, String currentTenantId) {
         SfDataRunObjLog objLog = objLogMapper.selectById(objLogId);
         if(objLog == null) return;
+
+        // 【核心安全防线：拦截跨租户恶意重试】
+        if (!StringUtils.equals(objLog.getTenantId(), currentTenantId)) {
+            log.error("🚨 安全警告：触发跨租户越权重试对象！被系统强制拦截。ObjLogId: {}", objLogId);
+            return;
+        }
 
         SfDataJob job = jobMapper.selectById(objLog.getJobId());
         if(job == null) return;
