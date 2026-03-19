@@ -2,6 +2,7 @@ package com.ruoyi.salesforce.service.impl;
 
 import cn.hutool.core.io.FileUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.SfDataJob;
 import com.ruoyi.salesforce.domain.SfDataObjConfig;
@@ -140,6 +141,9 @@ public class SfDataJobServiceImpl implements ISfDataJobService {
     public int insertJob(SfDataJob job) {
         job.setCreateTime(new Date());
         job.setStatus("IDLE"); // 默认空闲
+        if (StringUtils.isEmpty(job.getTenantId())) {
+            job.setTenantId(SecurityUtils.getLoginUser().getTenantId());
+        }
         return jobMapper.insert(job);
     }
 

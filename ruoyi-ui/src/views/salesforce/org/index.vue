@@ -63,7 +63,7 @@
 
           <el-button size="mini" type="text" icon="el-icon-edit" @click="handleUpdate(scope.row)">修改</el-button>
 
-          <el-button size="mini" type="text" icon="el-icon-refresh" @click="handleSyncDict(scope.row)">同步字典</el-button>
+          <!-- <el-button size="mini" type="text" icon="el-icon-refresh" @click="handleSyncDict(scope.row)">同步字典</el-button> -->
 
           <el-button size="mini" type="text" icon="el-icon-delete" @click="handleDelete(scope.row)">删除</el-button>
         </template>
