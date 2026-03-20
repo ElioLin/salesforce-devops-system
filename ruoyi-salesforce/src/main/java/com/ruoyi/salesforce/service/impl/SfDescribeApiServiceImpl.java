@@ -29,7 +29,7 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
     @Autowired
     private RedisCache redisCache; // 注入 Redis 缓存工具
 
-    private static final long CACHE_TIME = 24;
+    private static final long CACHE_TIME = 2;
     private static final TimeUnit CACHE_UNIT = TimeUnit.HOURS;
 
     @Override

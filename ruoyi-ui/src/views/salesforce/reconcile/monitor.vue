@@ -256,15 +256,27 @@ export default {
 
     this.fetchData();
     // 5秒轮询兜底
-    this.timer = setInterval(this.fetchData, 5000);
+    // this.timer = setInterval(this.fetchData, 5000);
   },
   beforeDestroy() {
     this.disconnectSocket();
-    if (this.timer) clearInterval(this.timer);
+    this.stopPolling();
+    // if (this.timer) clearInterval(this.timer);
   },
   methods: {
     // --- 核心优化：全景控制台新增方法 ---
-
+    startPolling() {
+      this.stopPolling(); // 开启前先防抖清除，防止多开
+      this.timer = setInterval(() => {
+        this.fetchData(true); // true 表示静默刷新，不触发加载动画
+      }, 5000);
+    },
+    stopPolling() {
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+    },
     // 翻译 Org 字典
     getOrgName(id) {
       if (!id) return '加载中...';
@@ -348,7 +360,7 @@ export default {
         this.overallStatus = 'RUNNING';
       } else if (allFinished) {
         this.overallStatus = 'FINISHED';
-        if (this.timer) clearInterval(this.timer);
+        // if (this.timer) clearInterval(this.timer);
       } else {
         // 当列表中存在刚刚新增的对象 (状态为 IDLE) 时，它既不是 RUNNING 也不是全部完成
         // 我们需要显式地将大盘状态归为 IDLE，以此重新激活顶部的操作按钮
@@ -358,7 +370,9 @@ export default {
 
     // --- 以下为原有业务逻辑 ---
 
-    fetchData() {
+    fetchData(isSilent = false) {
+      if (!isSilent) this.loading = true; // 仅在非静默时展示表格 loading
+
       getJobMonitor(this.jobId).then(res => {
         const dataWrapper = res.data || {};
         if (dataWrapper.jobName) this.jobName = dataWrapper.jobName;
@@ -367,7 +381,7 @@ export default {
         if (this.objList.length === 0) {
           this.objList = newData;
         } else {
-          // 对比合并数据，防止进度回跳
+          // 对比合并数据，防止进度回跳 (这部分逻辑保持原有完全不变)
           newData.forEach(newItem => {
             const index = this.objList.findIndex(i => i.objectName === newItem.objectName);
             if (index !== -1) {
@@ -399,15 +413,34 @@ export default {
 
         this.updateOverallStatus();
 
-        if (this.overallStatus === 'RUNNING' || this.overallStatus === 'WAITING') {
+        // ==========================================
+        // 【核心优化 6】：智能轮询与 WS 启停判断
+        // ==========================================
+        const activeStatuses = ['RUNNING', 'WAITING', 'INITIALIZING'];
+        const isJobRunning = activeStatuses.includes(this.overallStatus);
+        const hasActiveObjects = this.objList.some(obj => activeStatuses.includes(obj.status));
+
+        if (isJobRunning || hasActiveObjects) {
+          // 当有任务在执行时，确保 HTTP 轮询和 WS 都开启
+          if (!this.timer) {
+            this.startPolling();
+          }
           this.initWebSocket();
         } else {
+          // 没有任何任务执行时 (如 IDLE, FINISHED)，彻底关闭 HTTP 轮询！
+          this.stopPolling();
+          // 未执行时，关闭冗余的 WS 连接 (前端点"启动"时会在 handleStartAllJob 中重新连上)
           if (this.socket && this.socket.readyState === WebSocket.OPEN) {
             this.disconnectSocket();
           }
         }
+        // ==========================================
+
+        if (!isSilent) this.loading = false;
       }).catch(err => {
         console.error("获取监控数据失败", err);
+        if (!isSilent) this.loading = false;
+        this.stopPolling(); // 发生网络异常时停止轮询，防止服务器被死循环请求压垮
       });
     },
 

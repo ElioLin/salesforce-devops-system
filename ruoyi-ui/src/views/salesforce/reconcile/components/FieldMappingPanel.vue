@@ -2,12 +2,15 @@
     <div class="field-config-panel" style="height: 100%; display: flex; flex-direction: column;">
         <div class="panel-header">
             <span class="panel-title">{{ objectLabel }} - 字段策略</span>
-            <div class="header-actions">
+            <div class="header-actions" style="display: flex; align-items: center;">
+                <el-button type="warning" plain size="small" icon="el-icon-magic-stick" @click="autoMapReferences" style="margin-right: 15px">
+                    一键智能映射关联字段
+                </el-button>
                 <el-select v-model="filterType" placeholder="筛选字段类型" size="small" clearable
                     style="width: 140px; margin-right: 10px">
                     <el-option v-for="type in fieldTypes" :key="type" :label="type" :value="type" />
                 </el-select>
-                <el-input v-model="filterKeyword" placeholder="搜索字段..." size="small" prefix-icon="el-icon-search"
+                <el-input v-model="filterKeyword" placeholder="搜索字段..." size="small" prefix-icon="el-icon-search" clearable
                     style="width: 180px" />
             </div>
         </div>
@@ -18,7 +21,7 @@
                 <template slot="prepend">源</template>
             </el-input>
             <i class="el-icon-right" style="margin: 0 15px; color: #909399"></i>
-            <el-input v-model="config.targetKeyField" size="mini" placeholder="Target Key (Source_Org_Id__c)"
+            <el-input v-model="config.targetKeyField" size="mini" placeholder="Target Key (old_sfdc_id__c)"
                 style="width: 240px">
                 <template slot="prepend">目标</template>
             </el-input>
@@ -117,8 +120,16 @@ export default {
         filteredFields() {
             if (!this.currentFields) return [];
             return this.currentFields.filter(f => {
-                const matchKeyword = !this.filterKeyword || f.name.toLowerCase().includes(this.filterKeyword.toLowerCase());
+                // 将关键字统一转为小写，并处理空值情况
+                const keyword = this.filterKeyword ? this.filterKeyword.toLowerCase() : '';
+                
+                // 同时匹配字段API名 (name) 和 字段标签 (label)
+                const matchKeyword = !keyword || 
+                    (f.name && f.name.toLowerCase().includes(keyword)) || 
+                    (f.label && f.label.toLowerCase().includes(keyword));
+                    
                 const matchType = !this.filterType || f.type === this.filterType;
+                
                 return matchKeyword && matchType;
             });
         }
@@ -200,6 +211,78 @@ export default {
             map[fieldName] = { type: 'REFERENCE', sourcePath: `${relationshipName}.${sourceField}`, targetPath: `${relationshipName}.${targetField}` };
             this.$set(this.config, 'mappingConfig', JSON.stringify(map));
             this.mappingDialog.open = false;
+        },
+        //一键智能映射关联字段
+        autoMapReferences() {
+            if (!this.currentFields || this.currentFields.length === 0) return;
+            
+            const map = JSON.parse(this.config.mappingConfig || '{}');
+            const targetKey = this.config.targetKeyField || 'old_sfdc_id__c';
+            let mappedCount = 0;
+
+            // ==========================================
+            // 【新增】：特殊对象映射字典 (对象名 -> 用于跨环境比对的唯一标识字段)
+            // ==========================================
+            const SPECIAL_OBJ_MAPPING = {
+                'RecordType': 'DeveloperName',
+                'User': 'StaffId__c',   // 用户的跨环境唯一键通常是 Username
+                'Profile': 'Name',
+                'Group': 'DeveloperName',
+                'Queue': 'DeveloperName'
+            };
+
+            this.currentFields.forEach(f => {
+                // 必须是 reference 类型，且存在关联对象 (relationshipName 和 referenceTo)
+                // 并且该字段当前没有被手动排除，也没有被映射过
+                if (f.type === 'reference' && f.relationshipName && f.referenceTo && f.referenceTo.length > 0) {
+                    if (!map[f.name] && !this.isExcluded(f.name)) {
+                        
+                        const refObj = f.referenceTo[0]; // 获取主关联对象名
+                        let sourceField = 'Id';
+                        let targetField = targetKey;
+
+                        // ==========================================
+                        // 【核心智能路由逻辑】
+                        // ==========================================
+                        
+                        // 1. 处理特殊的多态字段 (OwnerId 可能是 User 也可能是 Group)
+                        // SOQL 中两者共有的、且能用于比对的最安全字段是 Name
+                        if (f.name === 'OwnerId') {
+                            sourceField = 'Name';
+                            targetField = 'Name';
+                        }
+                        // 2. 拦截极度危险的多态字段 (任务/事件的关联)，直接跳过，交由人工判断或排除
+                        else if (f.name === 'WhoId' || f.name === 'WhatId') {
+                            return; // 直接跳过，不计入自动映射
+                        }
+                        // 3. 处理系统特殊对象 (按字典命中)
+                        else if (SPECIAL_OBJ_MAPPING[refObj]) {
+                            sourceField = SPECIAL_OBJ_MAPPING[refObj];
+                            targetField = SPECIAL_OBJ_MAPPING[refObj];
+                        }
+                        // 4. 普通业务对象，维持 targetKey (如 old_sfdc_id__c)
+                        else {
+                            sourceField = 'Id';
+                            targetField = targetKey;
+                        }
+
+                        // 生成最终的双端 JSON 路径
+                        map[f.name] = { 
+                            type: 'REFERENCE', 
+                            sourcePath: `${f.relationshipName}.${sourceField}`, 
+                            targetPath: `${f.relationshipName}.${targetField}` 
+                        };
+                        mappedCount++;
+                    }
+                }
+            });
+
+            if (mappedCount > 0) {
+                this.$set(this.config, 'mappingConfig', JSON.stringify(map));
+                this.$modal.msgSuccess(`🎉 智能映射完成！共精准处理了 ${mappedCount} 个关联字段。`);
+            } else {
+                this.$modal.msgInfo("当前没有需要自动映射的关联字段，或特殊字段需手工处理。");
+            }
         }
     }
 };

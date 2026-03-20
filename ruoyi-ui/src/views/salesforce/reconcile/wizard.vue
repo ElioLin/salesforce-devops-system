@@ -43,6 +43,12 @@
                         字段如系统元数据，该限制将自动豁免并执行全量比对）。
                     </div>
                 </el-form-item>
+                <el-form-item label="默认排除字段" prop="globalExcludedFields">
+                    <el-input type="textarea" v-model="globalExcludedFields" placeholder="输入以逗号分隔的API名" :rows="2" />
+                    <div style="font-size: 12px; color: #909399; line-height: 1.4; margin-top: 4px;">
+                        <i class="el-icon-magic-stick" style="color: #E6A23C"></i> <b>智能辅助</b>：新增比对对象时，系统会自动将这些字段加入排除列表。系统已记住您的配置习惯。（PS:该默认排除的字段不会存入数据库）
+                    </div>
+                </el-form-item>
                 <el-form-item label="备注" prop="remark">
                     <el-input type="textarea" v-model="form.remark" placeholder="请输入任务描述或备注信息" :rows="4" />
                 </el-form-item>
@@ -118,7 +124,7 @@ import { listSObjects } from "@/api/salesforce/describe";
 
 // 【核心引入】引入独立封装的字段映射面板组件
 import FieldMappingPanel from "./components/FieldMappingPanel";
-
+const DEFAULT_EXCLUDE = 'Id,IsDeleted,CreatedById,CreatedDate,LastModifiedById,LastModifiedDate,SystemModstamp,ConnectionReceivedId,ConnectionSentId';
 export default {
     name: "JobWizard",
     components: { FieldMappingPanel }, // 注册组件
@@ -160,7 +166,8 @@ export default {
             // --- Step 3 Data ---
             currentObjIndex: "0",
             configList: [],
-            startStep: 0
+            startStep: 0,
+            globalExcludedFields: localStorage.getItem('sf_reconcile_default_exclude') || DEFAULT_EXCLUDE,
         };
     },
     watch: {
@@ -169,6 +176,9 @@ export default {
                 if (val && val.length > 0) this.orgOptionsList = val;
             },
             immediate: true
+        },
+        globalExcludedFields(val) {
+            localStorage.setItem('sf_reconcile_default_exclude', val);
         }
     },
     computed: {
@@ -317,8 +327,8 @@ export default {
                     this.configList.push({
                         objectName: objName,
                         sourceKeyField: 'Id',
-                        targetKeyField: 'Source_Org_Id__c',
-                        excludedFields: '',
+                        targetKeyField: 'old_sfdc_id__c',
+                        excludedFields: this.globalExcludedFields,
                         mappingConfig: '{}'
                     });
                 }
