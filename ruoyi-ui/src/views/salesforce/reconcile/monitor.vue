@@ -12,6 +12,9 @@
           <el-button v-if="objList.length > 0 && overallStatus !== 'RUNNING' && overallStatus !== 'LOADING'"
             type="success" size="small" icon="el-icon-video-play" @click="handleStartAllJob">启动全量验证</el-button>
 
+          <el-button v-if="overallStatus === 'RUNNING'" type="danger" size="small" icon="el-icon-video-pause"
+            @click="handleStopAllJob" :loading="stopping">强行停止全部任务</el-button>
+
           <el-button plain size="small" icon="el-icon-back" @click="handleGoBack">返回任务列表</el-button>
         </div>
       </div>
@@ -96,12 +99,12 @@
         <el-table-column label="结果统计 (Source / Target => Diff)" width="320" align="center">
           <template slot-scope="scope">
             <div v-if="scope.row.status === 'FINISHED' || scope.row.status === 'PARTIAL_SUCCESS'" class="stats-bar">
-              <span class="stat-num source">{{ scope.row.totalSource }}</span>
+              <span class="stat-num source">{{ scope.row.totalSource !== undefined ? scope.row.totalSource : 0 }}</span>
               <span class="divider">/</span>
-              <span class="stat-num target">{{ scope.row.totalTarget }}</span>
+              <span class="stat-num target">{{ scope.row.totalTarget !== undefined ? scope.row.totalTarget : 0 }}</span>
               <span class="arrow">➞</span>
-              <el-badge :value="scope.row.diffCount" :max="9999" :type="scope.row.diffCount > 0 ? 'danger' : 'success'"
-                class="diff-badge">
+              <el-badge :value="scope.row.diffCount !== undefined ? scope.row.diffCount : 0" :max="9999"
+                :type="scope.row.diffCount > 0 ? 'danger' : 'success'" class="diff-badge">
                 <span class="stat-num diff">差异</span>
               </el-badge>
             </div>
@@ -129,6 +132,9 @@
             <el-button size="mini" type="text" icon="el-icon-refresh-right" style="color: #E6A23C"
               v-if="scope.row.status === 'FINISHED' || scope.row.status === 'FAILED' || scope.row.status === 'ABORTED'"
               @click="handleRetry(scope.row)">重试</el-button>
+
+            <el-button v-if="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING'" size="mini" type="text"
+              style="color: #F56C6C" icon="el-icon-video-pause" @click="handleStopObj(scope.row)">停止</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -176,7 +182,7 @@ import request from '@/utils/request';
 import { getJob } from "@/api/salesforce/dataJob";
 import { listConfigs, batchSaveConfigs } from "@/api/salesforce/dataObjConfig";
 import { listOrg } from "@/api/salesforce/org";
-import { runJob } from "@/api/salesforce/reconcile";
+import { runJob, stopJob, stopObject } from "@/api/salesforce/reconcile";
 
 // 子组件
 import PreviewResult from './preview';
@@ -207,6 +213,7 @@ export default {
       orgList: [], // 缓存环境字典
       errorDialogVisible: false,
       currentErrorMsg: '',
+      stopping: false,
     };
   },
   computed: {
@@ -483,6 +490,12 @@ export default {
             target.progress = msg.percent;
             target.currentMsg = msg.message;
 
+            if (msg.totalSource !== undefined) {
+              target.totalSource = msg.totalSource;
+              target.totalTarget = msg.totalTarget;
+              target.diffCount = msg.diffCount;
+            }
+
             this.$set(this.objList, index, target);
 
             if (msg.status === 'FINISHED' || msg.status === 'FAILED') {
@@ -655,6 +668,47 @@ export default {
       } finally {
         this.savingConfig = false;
       }
+    },
+    /**
+     * 全局停止任务
+     */
+    handleStopAllJob() {
+      this.$confirm('确定要强制停止整个比对任务吗？正在执行中的对象将被立刻中断，并销毁已生成的残次文件与云端请求。', '高危操作确认', {
+        confirmButtonText: '确定停止',
+        cancelButtonText: '暂不停止',
+        type: 'error'
+      }).then(() => {
+        this.stopping = true;
+        stopJob(this.jobId).then(res => {
+          this.$message.success("停止指令已下发，各节点正在快速安全中断...");
+          this.stopping = false;
+          // 后端处理完后，原有的 WebSocket 会自动推送 ABORTED 状态来更新页面，或者可以在此强制刷新一下列表
+          // this.getList(); 
+        }).catch(() => {
+          this.stopping = false;
+        });
+      }).catch(() => {
+        // 取消停止
+      });
+    },
+
+    /**
+     * 停止单个对象
+     */
+    handleStopObj(row) {
+      this.$confirm(`确定要强制停止对象 [${row.objectName}] 的比对吗？云端正在提取的数据和本地残留将一并销毁。`, '警告', {
+        confirmButtonText: '确定停止',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }).then(() => {
+        stopObject(row.id).then(res => {
+          this.$message.success(`对象 [${row.objectName}] 停止指令已下发`);
+          // 乐观更新 UI（防抖），等后端 WebSocket 推送最终状态
+          row.status = 'ABORTED';
+        });
+      }).catch(() => {
+        // 取消停止
+      });
     }
   }
 };

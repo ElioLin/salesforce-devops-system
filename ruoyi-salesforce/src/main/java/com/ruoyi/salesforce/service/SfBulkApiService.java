@@ -4,6 +4,7 @@ import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.domain.SfOrg;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -128,7 +129,7 @@ public class SfBulkApiService {
     /**
      * 4. 下载结果 (支持自动 Token 续期，并支持大文件 Locator 自动分批下载与合并)
      */
-    public File downloadResult(Long orgId, String jobId, String filePath) {
+    public File downloadResult(Long orgId, String jobId, String filePath, java.util.function.BooleanSupplier checkRunning) {
         try {
             return sfAuthService.executeWithRetry(orgId, () -> {
                 SfOrg org = sfOrgService.selectSfOrgById(orgId);
@@ -152,6 +153,8 @@ public class SfBulkApiService {
                     java.io.BufferedOutputStream bos = new java.io.BufferedOutputStream(fos)) {
 
                     do {
+                        if(checkRunning != null && !checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
+
                         String url = baseUrl;
                         if(locator != null && !"null".equalsIgnoreCase(locator)) {
                             url += "?locator=" + locator;
@@ -190,6 +193,7 @@ public class SfBulkApiService {
                                 byte[] buffer = new byte[8192];//现代操作系统的磁盘块（Block Size）和内存页（Page Size）通常是 4KB 或 8KB。将缓冲区设置为 8KB，刚好能与操作系统的底层机制完美对齐，达到吞吐量与内存占用的最佳平衡。
                                 int bytesRead;
                                 while ((bytesRead = is.read(buffer)) != -1) {
+                                    if(checkRunning != null && !checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
                                     bos.write(buffer, 0, bytesRead);
                                 }
                                 isFirstChunk = false;
@@ -209,6 +213,7 @@ public class SfBulkApiService {
                                     byte[] buffer = new byte[8192];
                                     int bytesRead;
                                     while ((bytesRead = is.read(buffer)) != -1) {
+                                        if(checkRunning != null && !checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
                                         bos.write(buffer, 0, bytesRead);
                                     }
                                 }
@@ -222,6 +227,7 @@ public class SfBulkApiService {
                 return file;
             });
         } catch(Exception e) {
+            if ("ABORTED_BY_USER".equals(e.getMessage())) throw new RuntimeException(e);
             log.error("下载结果文件异常", e);
             throw new ServiceException("下载结果失败: " + e.getMessage());
         }
@@ -250,6 +256,34 @@ public class SfBulkApiService {
         } catch(Exception e) {
             log.warn("获取Job行数失败，进度条可能不准确: {}", e.getMessage());
             return 0;
+        }
+    }
+
+    /**
+     * 【新增】强制中止 Salesforce 远端的 Bulk API 任务
+     * 防止后台停止后，Salesforce 仍在无效消耗资源
+     */
+    public void abortJob(Long orgId, String bulkJobId) {
+        if(StringUtils.isEmpty(bulkJobId)) return;
+        try {
+            sfAuthService.executeWithRetry(orgId, () -> {
+                SfOrg org = sfOrgService.selectSfOrgById(orgId);
+                String url = org.getInstanceUrl() + "/services/data/" + API_VERSION + "/jobs/query/" + bulkJobId;
+
+                // Bulk V2 Abort Payload
+                JSONObject body = new JSONObject();
+                body.put("state", "Aborted");
+
+                HttpRequest.patch(url)
+                        .header("Authorization", "Bearer " + org.getAccessToken())
+                        .header("Content-Type", "application/json")
+                        .body(body.toJSONString())
+                        .execute();
+                return null;
+            });
+            log.info("已成功向 Salesforce (OrgId: {}) 下发中止指令, BulkJobId: {}", orgId, bulkJobId);
+        } catch(Exception e) {
+            log.warn("尝试中止 Salesforce Bulk Job 失败 (可能已完成): {}", e.getMessage());
         }
     }
 }

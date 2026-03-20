@@ -39,17 +39,28 @@ public class SfDataReconcileController extends BaseController {
         try {
             reconcileService.runJob(jobId, SecurityUtils.getLoginUser().getTenantId());
             return AjaxResult.success("任务已启动，请在执行日志中查看进度");
-        } catch (Exception e) {
+        } catch(Exception e) {
             return AjaxResult.error(e.getMessage());
         }
     }
 
     /**
-     * 停止任务 (预留接口)
+     * 停止整个比对任务
      */
+    @Log(title = "停止数据比对", businessType = BusinessType.OTHER)
     @PostMapping("/stop/{jobId}")
     public AjaxResult stopJob(@PathVariable Long jobId) {
         reconcileService.stopJob(jobId);
-        return AjaxResult.success("停止指令已发送");
+        return AjaxResult.success("整个任务的停止指令已下达");
+    }
+
+    /**
+     * 【新增】停止单个对象的比对任务
+     */
+    @Log(title = "停止单对象比对", businessType = BusinessType.OTHER)
+    @PostMapping("/stopObj/{objLogId}")
+    public AjaxResult stopObject(@PathVariable Long objLogId) {
+        reconcileService.stopObject(objLogId);
+        return AjaxResult.success("该对象的停止指令已下达");
     }
 }

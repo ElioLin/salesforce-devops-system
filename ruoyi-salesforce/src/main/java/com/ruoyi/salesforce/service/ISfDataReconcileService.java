@@ -21,4 +21,6 @@ public interface ISfDataReconcileService {
      * 重试单个对象 (异步)
      */
     void retryObject(Long objLogId, String currentTenantId);
+
+    void stopObject(Long objLogId);
 }

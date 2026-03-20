@@ -41,7 +41,7 @@ public class SfReconcileAlgorithm {
         private int missingSource = 0;
     }
 
-    public ReconcileStats execute(File sourceFile, File targetFile, File resultFile, SfDataObjConfig config, int totalRows, Consumer<Integer> progressCallback) {
+    public ReconcileStats execute(File sourceFile, File targetFile, File resultFile, SfDataObjConfig config, int totalRows, Consumer<Integer> progressCallback, java.util.function.BooleanSupplier checkRunning) {
         log.info("开始执行流式比对，对象: {}", config.getObjectName());
         ReconcileStats stats = new ReconcileStats();
 
@@ -105,6 +105,10 @@ public class SfReconcileAlgorithm {
 
                 // 双指针比对循环
                 while(srcRow != null || tgtRow != null) {
+                    if(checkRunning != null && !checkRunning.getAsBoolean()) {
+                        log.warn("算法在游标位置被强行中断...");
+                        throw new RuntimeException("ABORTED_BY_USER");
+                    }
                     // 1. 进度计算与防抖
                     processedCount++;
                     // 防止除以0
@@ -156,6 +160,7 @@ public class SfReconcileAlgorithm {
                 progressCallback.accept(99);
             }
         } catch(Exception e) {
+            if ("ABORTED_BY_USER".equals(e.getMessage())) throw new RuntimeException(e);
             log.error("比对异常", e);
             throw new RuntimeException("比对失败: " + e.getMessage(), e);
         }

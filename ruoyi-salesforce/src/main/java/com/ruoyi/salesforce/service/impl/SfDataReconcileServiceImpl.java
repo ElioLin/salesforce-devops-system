@@ -49,14 +49,27 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     private ISfDescribeApiService describeApiService;
 
     // 运行标志位 (JobId -> Boolean)，用于控制停止
-    private static final Map<Long, Boolean> runningFlags = new ConcurrentHashMap<>();
+    private static final Map<Long, Boolean> jobRunningFlags = new ConcurrentHashMap<>();
+    private static final Map<Long, Boolean> objRunningFlags = new ConcurrentHashMap<>();
 
     @Override
     public void stopJob(Long jobId) {
         if(jobId != null) {
-            runningFlags.remove(jobId);
+            jobRunningFlags.remove(jobId);
             log.info("任务 [{}] 停止指令已下达", jobId);
         }
+    }
+
+    @Override
+    public void stopObject(Long objLogId) {
+        if(objLogId != null) {
+            objRunningFlags.remove(objLogId);
+            log.info("对象任务 [{}] 停止指令已下达", objLogId);
+        }
+    }
+
+    private boolean isRunning(Long jobId, Long objLogId) {
+        return jobRunningFlags.containsKey(jobId) && objRunningFlags.containsKey(objLogId);
     }
 
     /**
@@ -69,7 +82,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         if(job == null) return;
 
         // 【核心安全防线：拦截跨租户恶意启动】
-        if (!StringUtils.equals(job.getTenantId(), currentTenantId)) {
+        if(!StringUtils.equals(job.getTenantId(), currentTenantId)) {
             log.error("🚨 安全警告：触发跨租户越权执行任务！被系统强制拦截。JobId: {}, 攻击者租户: {}", jobId, currentTenantId);
             return;
         }
@@ -110,7 +123,10 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         }
 
         // 标记开始
-        runningFlags.put(jobId, true);
+        jobRunningFlags.put(jobId, true);
+        for(SfDataRunObjLog obj : queue) {
+            objRunningFlags.put(obj.getId(), true);
+        }
         job.setStatus("RUNNING");
         jobMapper.updateById(job);
         publishProgress(jobId, null, "INIT", "任务启动，准备并发执行...", 0);
@@ -135,8 +151,9 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
                 executor.submit(() -> {
                     try {
                         // 双重检查停止标志
-                        if(!isRunning(jobId)) {
+                        if(!isRunning(jobId, objLog.getId())) {
                             updateObjLogStatus(objLog, "ABORTED", "用户手动停止", 0);
+                            publishProgress(jobId, objLog.getId(), "ABORTED", "已停止", 0);
                         } else {
                             executeObjectLog(job, objLog);
                         }
@@ -158,7 +175,6 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         } finally {
             // 关闭线程池
             executor.shutdown();
-            runningFlags.remove(jobId); // 清理标志位
         }
         // --- 多线程执行核心逻辑 End ---
 
@@ -184,17 +200,23 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     private void executeObjectLog(SfDataJob job, SfDataRunObjLog objLog) {
         String srcPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_src.csv";
         String tgtPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_tgt.csv";
+        String resPath = "/tmp/sf_reconcile/res_" + objLog.getId() + ".csv";
+
         File srcFile = new File(srcPath);
         File tgtFile = new File(tgtPath);
+        File resFile = new File(resPath);
+
+        String srcJobId = null;
+        String tgtJobId = null;
+
+        //供底层方法实时回调检查中断状态
+        java.util.function.BooleanSupplier checkRunning = () -> isRunning(job.getId(), objLog.getId());
 
         try {
             updateObjLogStatus(objLog, "RUNNING", "正在初始化...", 5);
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "初始化配置...", 5);
 
-            if(!isRunning(job.getId())) {
-                updateObjLogStatus(objLog, "ABORTED", "已停止", 0);
-                return;
-            }
+            if(!checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
 
             SfDataObjConfig config = configMapper.selectById(objLog.getObjConfigId());
 
@@ -204,48 +226,43 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             String tgtKey = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
             String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey, null);
 
-            if(!isRunning(job.getId())) return;
+            if(!checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
 
             // 【核心优化 1：云端并发下发】让源和目标在 Salesforce 云端同时开始提取数据，节省 50% 等待时间
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "下发双端并行提取指令...", 10);
-            String srcJobId = bulkApiService.submitQueryJob(job.getSourceOrgId(), srcSoql);
-            String tgtJobId = bulkApiService.submitQueryJob(job.getTargetOrgId(), tgtSoql);
+
+            srcJobId = bulkApiService.submitQueryJob(job.getSourceOrgId(), srcSoql);
+            tgtJobId = bulkApiService.submitQueryJob(job.getTargetOrgId(), tgtSoql);
 
             // 2. 依次等待云端处理完成并获取行数
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "等待云端打包源数据...", 20);
-            waitForJob(job.getSourceOrgId(), srcJobId);
+            waitForJob(job.getSourceOrgId(), srcJobId, checkRunning);
             int srcRows = bulkApiService.getJobRecordCount(job.getSourceOrgId(), srcJobId);
 
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "等待云端打包目标数据...", 30);
-            waitForJob(job.getTargetOrgId(), tgtJobId);
+            waitForJob(job.getTargetOrgId(), tgtJobId, checkRunning);
             int tgtRows = bulkApiService.getJobRecordCount(job.getTargetOrgId(), tgtJobId);
-
-            if(!isRunning(job.getId())) return;
 
             // 3. 依次拉取到本地硬盘
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在下载源环境数据...", 40);
-            srcFile = bulkApiService.downloadResult(job.getSourceOrgId(), srcJobId, srcPath);
+            srcFile = bulkApiService.downloadResult(job.getSourceOrgId(), srcJobId, srcPath, checkRunning);
 
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在下载目标环境数据...", 55);
-            tgtFile = bulkApiService.downloadResult(job.getTargetOrgId(), tgtJobId, tgtPath);
+            tgtFile = bulkApiService.downloadResult(job.getTargetOrgId(), tgtJobId, tgtPath, checkRunning);
 
-            if(!isRunning(job.getId())) return;
 
             // 4. 执行本地比对算法
             int totalEstimatedRows = srcRows + tgtRows;
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "数据就绪，引擎极速碰撞中...", 70);
-            String resPath = "/tmp/sf_reconcile/res_" + objLog.getId() + ".csv";
-            File resFile = new File(resPath);
 
             java.util.function.Consumer<Integer> progressCallback = (pct) -> {
-                if(isRunning(job.getId())) {
+                if(checkRunning.getAsBoolean()) {
                     objLog.setProgress(pct);
                     objLogMapper.updateById(objLog);
                     publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在比对数据...", pct);
                 }
             };
-
-            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resFile, config, totalEstimatedRows, progressCallback);
+            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resFile, config, totalEstimatedRows, progressCallback, checkRunning);
 
             // 5. 保存结果
             objLog.setTotalSource(stats.getTotalSource());
@@ -254,23 +271,32 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             objLog.setResultFilePath(resPath);
 
             updateObjLogStatus(objLog, "FINISHED", "比对完成", 100);
-            publishProgress(job.getId(), objLog.getId(), "FINISHED", "完成", 100);
+            publishProgress(job.getId(), objLog.getId(), "FINISHED", "完成", 100, stats);
 
         } catch(Exception e) {
-            log.error("对象 [" + objLog.getObjectName() + "] 执行失败", e);
-            updateObjLogStatus(objLog, "FAILED", e.getMessage(), 0);
-            publishProgress(job.getId(), objLog.getId(), "FAILED", "异常: " + e.getMessage(), 0);
+            // 异常分流处理
+            if ("ABORTED_BY_USER".equals(e.getMessage()) || !checkRunning.getAsBoolean()) {
+                log.info("对象 [{}] 被人工强行中止", objLog.getObjectName());
+                updateObjLogStatus(objLog, "ABORTED", "用户手动停止", 0);
+                publishProgress(job.getId(), objLog.getId(), "ABORTED", "已停止", 0);
+            } else {
+                log.error("对象 [" + objLog.getObjectName() + "] 执行失败", e);
+                updateObjLogStatus(objLog, "FAILED", e.getMessage(), 0);
+                publishProgress(job.getId(), objLog.getId(), "FAILED", "异常: " + e.getMessage(), 0);
+            }
         } finally {
-            // 【核心优化 2：终极防泄漏兜底】无论算法是否因为脏数据或者内存溢出崩溃，在此处必定销毁源和目标CSV巨型文件
+            // 【终极防泄漏 & 回收机制】
             FileUtil.del(srcFile);
             FileUtil.del(tgtFile);
-            // 备注：resFile (差异结果文件) 故意不删，留给用户从前端点击下载
-        }
-    }
 
-    // 辅助方法：检查任务是否还在运行
-    private boolean isRunning(Long jobId) {
-        return runningFlags.containsKey(jobId);
+            // 如果是被中止的，触发云端猎杀与脏文件回收
+            if (!checkRunning.getAsBoolean()) {
+                log.info("触发中止回收机制，清理云端任务和脏文件...");
+                if (srcJobId != null) bulkApiService.abortJob(job.getSourceOrgId(), srcJobId);
+                if (tgtJobId != null) bulkApiService.abortJob(job.getTargetOrgId(), tgtJobId);
+                FileUtil.del(resFile); // 残次品结果毫不留情删除
+            }
+        }
     }
 
     /**
@@ -400,9 +426,10 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     /**
      * 等待 Bulk Job 完成 (详细实现)
      */
-    private void waitForJob(Long orgId, String jobId) throws InterruptedException {
+    private void waitForJob(Long orgId, String jobId, java.util.function.BooleanSupplier checkRunning) throws InterruptedException {
         // 轮询 180 次，每次 2 秒，共 6 分钟
         for(int i = 0; i < 180; i++) {
+            if(!checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
             String state = bulkApiService.checkJobStatus(orgId, jobId);
 
             // 成功
@@ -434,6 +461,26 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         DeployWebSocketServer.sendMessage("reconcile_" + jobId, json.toJSONString());
     }
 
+    // 专供任务完成时，携带精准的统计数据推送到前端
+    private void publishProgress(Long jobId, Long objLogId, String status, String msg, int percent, SfReconcileAlgorithm.ReconcileStats stats) {
+        JSONObject json = new JSONObject();
+        json.put("type", "OBJ_PROGRESS");
+        json.put("jobId", jobId);
+        json.put("objLogId", objLogId);
+        json.put("status", status);
+        json.put("message", msg);
+        json.put("percent", percent);
+
+        // 将比对结果统计一并打包
+        if (stats != null) {
+            json.put("totalSource", stats.getTotalSource());
+            json.put("totalTarget", stats.getTotalTarget());
+            json.put("diffCount", stats.getDiffCount());
+        }
+
+        DeployWebSocketServer.sendMessage("reconcile_" + jobId, json.toJSONString());
+    }
+
     /**
      * 重试单个对象 (完整实现)
      */
@@ -444,7 +491,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         if(objLog == null) return;
 
         // 【核心安全防线：拦截跨租户恶意重试】
-        if (!StringUtils.equals(objLog.getTenantId(), currentTenantId)) {
+        if(!StringUtils.equals(objLog.getTenantId(), currentTenantId)) {
             log.error("🚨 安全警告：触发跨租户越权重试对象！被系统强制拦截。ObjLogId: {}", objLogId);
             return;
         }
@@ -469,7 +516,8 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         publishProgress(job.getId(), objLog.getId(), "WAITING", "进入重试队列...", 0);
 
         // 3. 设置运行标志 (防止被 executeObjectLog 中的 isRunning 拦截)
-        runningFlags.put(job.getId(), true);
+        jobRunningFlags.put(job.getId(), true);
+        objRunningFlags.put(objLog.getId(), true);
 
         try {
             // 稍作停顿确保前端收到 WAITING 消息
