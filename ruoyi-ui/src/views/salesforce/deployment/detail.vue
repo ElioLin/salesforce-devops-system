@@ -959,6 +959,8 @@ export default {
 
                 if (res.errorMsg || res.errorMessage) {
                     this.$set(this.deployment, 'errorMsg', res.errorMsg || res.errorMessage);
+                } else if (res.done && ['Succeeded', 'Validated'].includes(res.status)) {
+                    this.$set(this.deployment, 'errorMsg', '');
                 }
 
                 if (res.hasOwnProperty('checkOnly')) {

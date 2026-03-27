@@ -153,9 +153,6 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
     /**
      * 【新增】辅助方法：从缓存或API填充元数据的修改人与修改时间
      */
-    /**
-     * 【新增】辅助方法：从缓存或API填充元数据的修改人与修改时间
-     */
     private void populateMetadataInfo(Long orgId, List<SfDeploymentItem> items) {
         if(orgId == null || items == null || items.isEmpty()) return;
 
@@ -988,6 +985,18 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                             needUpdate = true;
                         }
                     }
+                    // 【新增这段兜底逻辑】：如果任务成功或验证通过，强制剥离上一轮残留的报错信息
+                    else if (isDone && ("Succeeded".equals(finalStatus) || "Validated".equals(finalStatus))) {
+                        if (StringUtils.isNotEmpty(deploy.getErrorMsg())) {
+                            deploy.setErrorMsg("");
+                            needUpdate = true;
+                            // 强制使用 UpdateWrapper 清空，防止 MyBatis-Plus updateById 策略拦截空字符串
+                            sfDeploymentMapper.update(null, new LambdaUpdateWrapper<SfDeployment>()
+                                    .eq(SfDeployment::getId, deploy.getId())
+                                    .set(SfDeployment::getErrorMsg, "")
+                            );
+                        }
+                    }
                     if(needUpdate) {
                         sfDeploymentMapper.updateById(deploy);
                     }
@@ -1160,6 +1169,7 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
         for(SfDeploymentItem item : items) {
             String sourceHash = getMetadataHash(sourceFileMap, item);
+
             String targetHash = getMetadataHash(targetFileMap, item);
 
             String status;
@@ -1657,6 +1667,9 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         newDeploy.setTitle(newConfig.getTitle());
         newDeploy.setSourceOrgId(newConfig.getSourceOrgId());
         newDeploy.setTargetOrgId(newConfig.getTargetOrgId());
+        newDeploy.setDemandNo(newConfig.getDemandNo());
+        newDeploy.setDemandPersonnel(newConfig.getDemandPersonnel());
+        newDeploy.setDeployType(newConfig.getDeployType());
 
         newDeploy.setStatus("Draft");
         newDeploy.setCreateBy(SecurityUtils.getUsername());

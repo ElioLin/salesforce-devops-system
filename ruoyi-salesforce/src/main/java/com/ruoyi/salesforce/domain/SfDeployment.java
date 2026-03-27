@@ -36,6 +36,33 @@ public class SfDeployment extends BaseEntity {
 
     private Long userId;
 
+    private String deployType;
+
+    private String demandNo;
+
+    private String demandPersonnel;
+
+    public String getDeployType() {
+        return deployType;
+    }
+    public void setDeployType(String deployType) {
+        this.deployType = deployType;
+    }
+
+    public String getDemandNo() {
+        return demandNo;
+    }
+    public void setDemandNo(String demandNo) {
+        this.demandNo = demandNo;
+    }
+
+    public String getDemandPersonnel() {
+        return demandPersonnel;
+    }
+    public void setDemandPersonnel(String demandPersonnel) {
+        this.demandPersonnel = demandPersonnel;
+    }
+
     public Long getUserId() {
         return userId;
     }
