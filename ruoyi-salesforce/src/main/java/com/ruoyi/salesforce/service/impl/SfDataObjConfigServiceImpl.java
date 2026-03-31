@@ -14,6 +14,7 @@ import com.ruoyi.salesforce.mapper.SfDataRunObjLogMapper;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import cn.hutool.core.io.FileUtil;
 
 @Slf4j
 @Service
@@ -44,6 +45,28 @@ public class SfDataObjConfigServiceImpl implements ISfDataObjConfigService {
         }
 
         if(!idsToDelete.isEmpty()) {
+            // 1. 在删除数据库记录前，先查出所有即将被销毁的对象执行明细日志
+            // （因为一个配置对象如果被多次重试/运行，可能会产生多条 log 记录）
+            List<SfDataRunObjLog> logsToDelete = objLogMapper.selectList(
+                    new LambdaQueryWrapper<SfDataRunObjLog>().in(SfDataRunObjLog::getObjConfigId, idsToDelete)
+            );
+            for (SfDataRunObjLog logItem : logsToDelete) {
+                // 2.1 常规清理：删除数据库中明确登记的结果文件
+                if (StringUtils.isNotEmpty(logItem.getResultFilePath())) {
+                    FileUtil.del(logItem.getResultFilePath());
+                }
+
+                // 2.2 极限防御清理：根据我们的底层引擎规则，主动嗅探并剿灭所有可能的残留文件
+                // 防止因为宕机、强杀等原因导致数据库没有记录路径，但磁盘上仍有残骸
+                String baseDir = "/tmp/sf_reconcile/";
+                FileUtil.del(baseDir + "res_" + logItem.getId() + ".csv");        // 兜底正式文件
+                FileUtil.del(baseDir + "res_" + logItem.getId() + "_temp.csv");   // 兜底临时文件
+                FileUtil.del(baseDir + jobId + "_" + logItem.getId() + "_src.csv"); // 兜底源端下载文件
+                FileUtil.del(baseDir + jobId + "_" + logItem.getId() + "_tgt.csv"); // 兜底目标端下载文件
+
+                log.info("已完成对比对象配置的物理文件清理，清理的 ObjLogId: {}", logItem.getId());
+            }
+
             // 1. 删除对象配置
             configMapper.deleteBatchIds(idsToDelete);
 

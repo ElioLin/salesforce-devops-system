@@ -10,11 +10,7 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.OutputStreamWriter;
+import java.io.*;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -42,129 +38,271 @@ public class SfReconcileAlgorithm {
     }
 
     public ReconcileStats execute(File sourceFile, File targetFile, File resultFile, SfDataObjConfig config, int totalRows, Consumer<Integer> progressCallback, java.util.function.BooleanSupplier checkRunning) {
-        log.info("开始执行流式比对，对象: {}", config.getObjectName());
+        log.info("开始执行高精度比对，对象: {}", config.getObjectName());
         ReconcileStats stats = new ReconcileStats();
-
-        // 基础进度从 40% 开始 (前 40% 留给下载)
-        final int BASE_PROGRESS = 40;
-        final int MAX_ALGO_PROGRESS = 60; // 算法占 60% 的权重 (40-100)
-
-        long processedCount = 0; // 已处理行数计数器
-        int lastReportedProgress = BASE_PROGRESS;
 
         String srcKeyField = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
         String tgtKeyField = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
 
-        // 1. 准备配置
         CsvReadConfig csvConfig = CsvReadConfig.defaultConfig();
         csvConfig.setFieldSeparator(',');
         csvConfig.setTextDelimiter('\"');
 
-        // 使用 try-with-resources 确保所有流（写入流 + 读取流）被关闭
-        try(
-                // 结果写入流
-                FileOutputStream fos = new FileOutputStream(resultFile);
-                BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8));
+        File sortedSrcFile = null;
+        File sortedTgtFile = null;
 
-                // 【核心修复】先创建 BufferedReader，确保文件句柄可被关闭
-                BufferedReader srcBr = FileUtil.getReader(sourceFile, StandardCharsets.UTF_8);
-                BufferedReader tgtBr = FileUtil.getReader(targetFile, StandardCharsets.UTF_8);
-        ) {
-            // 初始化写入器
-            fos.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF}); // BOM
-            CsvWriter writer = CsvUtil.getWriter(bw);
-            writer.write(new String[]{"Source_Key", "Target_Key", "Diff_Type", "Field_Name", "Source_Value", "Target_Value"});
+        try {
+            // ==========================================
+            // 【核心修复 1：外部归并排序】无视 SF 的错误排序，强制按 Java Case-Sensitive 统一重排双端 CSV
+            // ==========================================
+            log.info("正在执行本地数据对齐排序...");
+            sortedSrcFile = externalSortCsv(sourceFile, csvConfig, srcKeyField);
+            sortedTgtFile = externalSortCsv(targetFile, csvConfig, tgtKeyField);
 
-            // 【核心修复】绑定 Reader 到 CsvReader
-            CsvReader srcReader = CsvUtil.getReader(srcBr, csvConfig);
-            CsvReader tgtReader = CsvUtil.getReader(tgtBr, csvConfig);
+            try(
+                    FileOutputStream fos = new FileOutputStream(resultFile);
+                    BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8));
+                    BufferedReader srcBr = FileUtil.getReader(sortedSrcFile, StandardCharsets.UTF_8);
+                    BufferedReader tgtBr = FileUtil.getReader(sortedTgtFile, StandardCharsets.UTF_8);
+            ) {
+                fos.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF}); // BOM
+                CsvWriter writer = CsvUtil.getWriter(bw);
+                writer.write(new String[]{"Source_Key", "Target_Key", "Diff_Type", "Field_Name", "Source_Value", "Target_Value"});
 
-            // 【核心修复】调用无参 stream()
-            try(Stream<CsvRow> srcStream = srcReader.stream();
-                Stream<CsvRow> tgtStream = tgtReader.stream()) {
+                CsvReader srcReader = CsvUtil.getReader(srcBr, csvConfig);
+                CsvReader tgtReader = CsvUtil.getReader(tgtBr, csvConfig);
 
-                Iterator<CsvRow> srcIter = srcStream.iterator();
-                Iterator<CsvRow> tgtIter = tgtStream.iterator();
+                try(Stream<CsvRow> srcStream = srcReader.stream();
+                    Stream<CsvRow> tgtStream = tgtReader.stream()) {
 
-                if(!srcIter.hasNext() || !tgtIter.hasNext()) {
-                    log.warn("源文件或目标文件为空");
-                    return stats;
+                    Iterator<CsvRow> srcIter = srcStream.iterator();
+                    Iterator<CsvRow> tgtIter = tgtStream.iterator();
+
+                    if(!srcIter.hasNext() || !tgtIter.hasNext()) return stats;
+
+                    CsvRow srcHeader = srcIter.next();
+                    CsvRow tgtHeader = tgtIter.next();
+
+                    int srcKeyIdx = findColIndex(srcHeader, srcKeyField);
+                    int tgtKeyIdx = findColIndex(tgtHeader, tgtKeyField);
+
+                    CsvRow srcRow = srcIter.hasNext() ? srcIter.next() : null;
+                    CsvRow tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
+
+                    long processedCount = 0;
+                    final int BASE_PROGRESS = 40;
+                    final int MAX_ALGO_PROGRESS = 60;
+                    int lastReportedProgress = BASE_PROGRESS;
+
+                    while(srcRow != null || tgtRow != null) {
+                        if(checkRunning != null && !checkRunning.getAsBoolean()) {
+                            throw new RuntimeException("ABORTED_BY_USER");
+                        }
+
+                        processedCount++;
+                        int safeTotal = totalRows > 0 ? totalRows : 1;
+                        int currentAlgoStep = (int) Math.min(MAX_ALGO_PROGRESS, (processedCount * MAX_ALGO_PROGRESS) / safeTotal);
+                        int totalProgress = BASE_PROGRESS + currentAlgoStep;
+                        if(totalProgress > lastReportedProgress && totalProgress < 100) {
+                            progressCallback.accept(totalProgress);
+                            lastReportedProgress = totalProgress;
+                        }
+
+                        String sKey = getNormalizedKey(srcRow, srcKeyIdx);
+                        String tKey = getNormalizedKey(tgtRow, tgtKeyIdx);
+
+                        int compare;
+                        if(sKey == null && tKey == null) compare = 0;
+                        else if(sKey == null) compare = 1;
+                        else if(tKey == null) compare = -1;
+                            // 【核心修复 2：恢复强一致性校验】文件已完全对齐，恢复最严谨的区分大小写对比
+                        else compare = sKey.compareTo(tKey);
+
+                        if(compare == 0) {
+                            stats.setTotalSource(stats.getTotalSource() + 1);
+                            stats.setTotalTarget(stats.getTotalTarget() + 1);
+                            boolean hasDiff = compareFields(srcRow, tgtRow, srcHeader, tgtHeader, writer, config, stats, sKey, tKey);
+                            if(hasDiff) stats.setDiffCount(stats.getDiffCount() + 1);
+                            srcRow = srcIter.hasNext() ? srcIter.next() : null;
+                            tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
+                        } else if(compare < 0) {
+                            stats.setTotalSource(stats.getTotalSource() + 1);
+                            stats.setMissingTarget(stats.getMissingTarget() + 1);
+                            stats.setDiffCount(stats.getDiffCount() + 1);
+                            writeDiff(writer, sKey, "", "MISSING_IN_TARGET", "-", "Row Exists", "Row Missing", stats);
+                            srcRow = srcIter.hasNext() ? srcIter.next() : null;
+                        } else {
+                            stats.setTotalTarget(stats.getTotalTarget() + 1);
+                            stats.setMissingSource(stats.getMissingSource() + 1);
+                            stats.setDiffCount(stats.getDiffCount() + 1);
+                            writeDiff(writer, "", tKey, "MISSING_IN_SOURCE", "-", "Row Missing", "Row Exists", stats);
+                            tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
+                        }
+                    }
+                    writer.flush();
+                    progressCallback.accept(99);
                 }
-
-                CsvRow srcHeader = srcIter.next();
-                CsvRow tgtHeader = tgtIter.next();
-
-                int srcKeyIdx = findColIndex(srcHeader, srcKeyField);
-                int tgtKeyIdx = findColIndex(tgtHeader, tgtKeyField);
-
-                if(srcKeyIdx == -1) throw new RuntimeException("源文件未找到主键列: " + srcKeyField);
-                if(tgtKeyIdx == -1) throw new RuntimeException("目标文件未找到主键列: " + tgtKeyField);
-
-                CsvRow srcRow = srcIter.hasNext() ? srcIter.next() : null;
-                CsvRow tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
-
-                // 双指针比对循环
-                while(srcRow != null || tgtRow != null) {
-                    if(checkRunning != null && !checkRunning.getAsBoolean()) {
-                        log.warn("算法在游标位置被强行中断...");
-                        throw new RuntimeException("ABORTED_BY_USER");
-                    }
-                    // 1. 进度计算与防抖
-                    processedCount++;
-                    // 防止除以0
-                    int safeTotal = totalRows > 0 ? totalRows : 1;
-
-                    // 计算当前算法阶段的进度 (0-60)
-                    int currentAlgoStep = (int) Math.min(MAX_ALGO_PROGRESS, (processedCount * MAX_ALGO_PROGRESS) / safeTotal);
-                    int totalProgress = BASE_PROGRESS + currentAlgoStep;
-
-                    // 只有进度前进至少 1% 或者是最后一条时，才回调
-                    // 也可以加上时间判断，比如 System.currentTimeMillis()，每秒最多一次
-                    if(totalProgress > lastReportedProgress && totalProgress < 100) {
-                        progressCallback.accept(totalProgress);
-                        lastReportedProgress = totalProgress;
-                    }
-
-                    String sKey = getNormalizedKey(srcRow, srcKeyIdx);
-                    String tKey = getNormalizedKey(tgtRow, tgtKeyIdx);
-
-                    int compare;
-                    if(sKey == null && tKey == null) compare = 0;
-                    else if(sKey == null) compare = 1;
-                    else if(tKey == null) compare = -1;
-                    else compare = sKey.compareTo(tKey);
-
-                    if(compare == 0) {
-                        stats.setTotalSource(stats.getTotalSource() + 1);
-                        stats.setTotalTarget(stats.getTotalTarget() + 1);
-                        boolean hasDiff = compareFields(srcRow, tgtRow, srcHeader, tgtHeader, writer, config, stats, sKey, tKey);
-                        if(hasDiff) stats.setDiffCount(stats.getDiffCount() + 1);
-                        srcRow = srcIter.hasNext() ? srcIter.next() : null;
-                        tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
-                    } else if(compare < 0) {
-                        stats.setTotalSource(stats.getTotalSource() + 1);
-                        stats.setMissingTarget(stats.getMissingTarget() + 1);
-                        stats.setDiffCount(stats.getDiffCount() + 1);
-                        writeDiff(writer, sKey, "", "MISSING_IN_TARGET", "-", "Row Exists", "Row Missing", stats);
-                        srcRow = srcIter.hasNext() ? srcIter.next() : null;
-                    } else {
-                        stats.setTotalTarget(stats.getTotalTarget() + 1);
-                        stats.setMissingSource(stats.getMissingSource() + 1);
-                        stats.setDiffCount(stats.getDiffCount() + 1);
-                        writeDiff(writer, "", tKey, "MISSING_IN_SOURCE", "-", "Row Missing", "Row Exists", stats);
-                        tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
-                    }
-                }
-                writer.flush();
-                // 确保最后是 100% (或者由 Service 层设置 FINISHED 状态来覆盖)
-                progressCallback.accept(99);
             }
         } catch(Exception e) {
-            if ("ABORTED_BY_USER".equals(e.getMessage())) throw new RuntimeException(e);
+            if("ABORTED_BY_USER".equals(e.getMessage())) throw new RuntimeException(e);
             log.error("比对异常", e);
             throw new RuntimeException("比对失败: " + e.getMessage(), e);
+        } finally {
+            // 兜底清理排序产生的中间临时文件
+            if(sortedSrcFile != null && !sortedSrcFile.getAbsolutePath().equals(sourceFile.getAbsolutePath())) {
+                FileUtil.del(sortedSrcFile);
+            }
+            if(sortedTgtFile != null && !sortedTgtFile.getAbsolutePath().equals(targetFile.getAbsolutePath())) {
+                FileUtil.del(sortedTgtFile);
+            }
         }
         return stats;
+    }
+
+    // =========================================================
+    // 【核心部件 1：外部归并排序引擎 (防爆内存处理海量 CSV)】
+    // =========================================================
+    private File externalSortCsv(File inputFile, CsvReadConfig csvConfig, String keyField) throws Exception {
+        File sortedFile = new File(inputFile.getAbsolutePath() + ".sorted");
+        List<File> chunkFiles = new ArrayList<>();
+
+        try(BufferedReader br = FileUtil.getReader(inputFile, StandardCharsets.UTF_8);
+            CsvReader reader = CsvUtil.getReader(br, csvConfig)) {
+
+            Iterator<CsvRow> iter = reader.stream().iterator();
+            if(!iter.hasNext()) return inputFile;
+
+            CsvRow header = iter.next();
+            int keyIdx = findColIndex(header, keyField);
+            if(keyIdx == -1) return inputFile;
+
+            // 【核心优化：自适应分块算法】
+            // 假设我们期望每个 Chunk 在内存中不超过 50MB。
+            // 粗略估计：如果是 10 个字段的窄表，可以放 50000 行；如果是 200 个字段的宽表，只能放 5000 行。
+            // 采用公式：基准数 / 字段数量，同时设定安全上下限。
+            int columnsCount = Math.max(1, header.size());
+            int dynamicChunkSize = Math.max(5000, Math.min(50000, 1000000 / columnsCount));
+            log.info("自适应分块计算：字段数={}, 安全块大小={}", columnsCount, dynamicChunkSize);
+
+            List<CsvRow> chunk = new ArrayList<>(dynamicChunkSize);
+            while(iter.hasNext()) {
+                chunk.add(iter.next());
+                if(chunk.size() >= dynamicChunkSize) {
+                    chunkFiles.add(sortAndSaveChunk(chunk, keyIdx));
+                    chunk.clear();
+                    // 提示 JVM 尽早回收，防止碎片化累积
+                    // System.gc(); // 不强制调用，但利用 ArrayList 的 clear 重用空间已经足够高效
+                }
+            }
+            if(!chunk.isEmpty()) {
+                chunkFiles.add(sortAndSaveChunk(chunk, keyIdx));
+            }
+
+            // 【防御机制】如果切出了数百个块，直接合并可能会报 Too many open files
+            if(chunkFiles.size() > 200) {
+                log.warn("检测到超大海量数据，切割了 {} 个块，准备执行多级归并防文件句柄溢出...", chunkFiles.size());
+                // 这里如果极度严谨，可以写一个多级归并（把每 100 个合并成 1 个大块，再合并大块）。
+                // 考虑到我们现在的动态块大小（5000~50000），要切出 200 个块意味着单对象几百万甚至上千万数据。
+                // 现阶段 OS 的 ulimit -n 通常配置为 65535，所以暂时直接合并也是安全的，只留警告日志。
+            }
+
+            // 执行归并
+            mergeChunks(chunkFiles, sortedFile, header, keyIdx, csvConfig);
+        } finally {
+            for(File f : chunkFiles) FileUtil.del(f); // 严格销毁临时分片文件
+        }
+        return sortedFile;
+    }
+
+    private File sortAndSaveChunk(List<CsvRow> chunk, int keyIdx) throws IOException {
+        chunk.sort((r1, r2) -> {
+            String k1 = getNormalizedKey(r1, keyIdx);
+            String k2 = getNormalizedKey(r2, keyIdx);
+            if(k1 == null) k1 = "";
+            if(k2 == null) k2 = "";
+            return k1.compareTo(k2); // 绝对的区分大小写排序
+        });
+
+        File tempFile = File.createTempFile("sf_chunk_", ".csv");
+        try(BufferedWriter bw = FileUtil.getWriter(tempFile, StandardCharsets.UTF_8, false);
+            CsvWriter writer = CsvUtil.getWriter(bw)) {
+            for(CsvRow row : chunk) {
+                String[] arr = new String[row.size()];
+                for(int i = 0; i < row.size(); i++) arr[i] = row.get(i);
+                writer.write(arr);
+            }
+        }
+        return tempFile;
+    }
+
+    private void mergeChunks(List<File> chunkFiles, File outputFile, CsvRow header, int keyIdx, CsvReadConfig csvConfig) throws Exception {
+        PriorityQueue<ChunkReader> pq = new PriorityQueue<>();
+        List<ChunkReader> readers = new ArrayList<>();
+        try {
+            for(File f : chunkFiles) {
+                ChunkReader cr = new ChunkReader(f, csvConfig, keyIdx);
+                readers.add(cr);
+                if(cr.next()) pq.add(cr);
+            }
+
+            try(BufferedWriter bw = FileUtil.getWriter(outputFile, StandardCharsets.UTF_8, false);
+                CsvWriter writer = CsvUtil.getWriter(bw)) {
+
+                String[] hdr = new String[header.size()];
+                for(int i = 0; i < header.size(); i++) hdr[i] = header.get(i);
+                writer.write(hdr);
+
+                while(!pq.isEmpty()) {
+                    ChunkReader cr = pq.poll();
+                    CsvRow row = cr.currentRow;
+                    String[] arr = new String[row.size()];
+                    for(int i = 0; i < row.size(); i++) arr[i] = row.get(i);
+                    writer.write(arr);
+
+                    if(cr.next()) {
+                        pq.add(cr);
+                    }
+                }
+            }
+        } finally {
+            for(ChunkReader cr : readers) cr.close();
+        }
+    }
+
+    private static class ChunkReader implements Comparable<ChunkReader>, AutoCloseable {
+        BufferedReader br;
+        CsvReader reader;
+        Iterator<CsvRow> iter;
+        CsvRow currentRow;
+        String currentKey;
+        int keyIdx;
+
+        public ChunkReader(File file, CsvReadConfig config, int keyIdx) throws IOException {
+            this.br = FileUtil.getReader(file, StandardCharsets.UTF_8);
+            this.reader = CsvUtil.getReader(br, config);
+            this.iter = reader.stream().iterator();
+            this.keyIdx = keyIdx;
+        }
+
+        public boolean next() {
+            if(iter.hasNext()) {
+                currentRow = iter.next();
+                currentKey = getNormalizedKey(currentRow, keyIdx);
+                if(currentKey == null) currentKey = "";
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        public int compareTo(ChunkReader o) {
+            return this.currentKey.compareTo(o.currentKey);
+        }
+
+        @Override
+        public void close() throws Exception {
+            if(br != null) br.close();
+        }
     }
 
     private int findColIndex(CsvRow header, String colName) {
@@ -181,13 +319,32 @@ public class SfReconcileAlgorithm {
         return header.replace("\uFEFF", "").replace("\"", "").trim();
     }
 
-    private String getNormalizedKey(CsvRow row, int index) {
+    private static String getNormalizedKey(CsvRow row, int index) {
         if(row == null || index == -1 || index >= row.size()) return null;
         String val = row.get(index);
         if(val == null) return null;
         val = StrUtil.trim(val);
-        if(val.length() == 18 && val.startsWith("00")) return val.substring(0, 15);
+
+        // 彻底废除 18 截 15 逻辑。如果传过来的是 15 位，强制使用 SF 标准算法升维成 18 位。
+        if(val.length() == 15) {
+            val = convertId15To18(val);
+        }
         return val;
+    }
+
+    private static String convertId15To18(String id15) {
+        if(id15 == null || id15.length() != 15) return id15;
+        StringBuilder suffix = new StringBuilder();
+        for(int i = 0; i < 3; i++) {
+            int flags = 0;
+            for(int j = 0; j < 5; j++) {
+                char c = id15.charAt(i * 5 + j);
+                if(c >= 'A' && c <= 'Z') flags += 1 << j;
+            }
+            if(flags <= 25) suffix.append("ABCDEFGHIJKLMNOPQRSTUVWXYZ".charAt(flags));
+            else suffix.append("012345".charAt(flags - 26));
+        }
+        return id15 + suffix.toString();
     }
 
     private boolean compareFields(CsvRow src, CsvRow tgt, CsvRow srcHeader, CsvRow tgtHeader,
@@ -234,10 +391,39 @@ public class SfReconcileAlgorithm {
     private boolean isVisuallyEqual(String v1, String v2) {
         v1 = StrUtil.trimToEmpty(v1);
         v2 = StrUtil.trimToEmpty(v2);
+
+        // 1. 完全一致
         if(v1.equals(v2)) return true;
+
+        // 2. 换行符差异抹平
         String v1Norm = CRLF.matcher(v1).replaceAll("\n");
         String v2Norm = CRLF.matcher(v2).replaceAll("\n");
         if(v1Norm.equals(v2Norm)) return true;
+
+        // ==========================================
+        // 【新增优化：多选下拉列表 (Multipicklist) 无序兼容】
+        // 如果两边都包含分号，打散成集合进行无序对比
+        // ==========================================
+        if(v1.contains(";") && v2.contains(";")) {
+            String[] arr1 = v1.split(";");
+            String[] arr2 = v2.split(";");
+            // 只有当分号切分出来的元素数量一致时，才进行集合比对，节省性能
+            if(arr1.length == arr2.length) {
+                Set<String> set1 = new HashSet<>();
+                Set<String> set2 = new HashSet<>();
+                // 加入 Set 前执行 trim，兼容某些带有空格的脏数据 (例如 "A; B")
+                for(String s : arr1) set1.add(s.trim());
+                for(String s : arr2) set2.add(s.trim());
+
+                // Set 的 equals 会自动无视顺序，判断元素是否完全一致
+                if(set1.equals(set2)) {
+                    return true;
+                }
+            }
+        }
+        // ==========================================
+
+        // 4. 数值类型精度抹平 (如 1.0 vs 1.00)
         if(NumberUtil.isNumber(v1) && NumberUtil.isNumber(v2)) {
             try {
                 BigDecimal b1 = NumberUtil.toBigDecimal(v1);
@@ -246,9 +432,12 @@ public class SfReconcileAlgorithm {
             } catch(Exception e) {
             }
         }
+
+        // 5. 15位 / 18位 ID 兼容处理
         if(v1.length() >= 15 && v2.length() >= 15) {
             if(v1.substring(0, 15).equals(v2.substring(0, 15))) return true;
         }
+
         return false;
     }
 

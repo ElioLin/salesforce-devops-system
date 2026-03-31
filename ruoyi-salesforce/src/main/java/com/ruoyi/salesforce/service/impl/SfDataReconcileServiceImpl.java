@@ -195,16 +195,79 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     }
 
     /**
+     * 启动单个尚未执行过的新对象比对
+     */
+    @Async("reconcileTaskExecutor")
+    @Override
+    public void runSingleNewObject(Long jobId, Long configId, String currentTenantId) {
+        SfDataJob job = jobMapper.selectById(jobId);
+        if(job == null || !StringUtils.equals(job.getTenantId(), currentTenantId)) return;
+
+        SfDataObjConfig config = configMapper.selectById(configId);
+        if(config == null) return;
+
+        // 1. 寻找该任务最近的一次主运行日志挂载。如果没有，则代表这是纯新建任务的第一次启动
+        SfDataRunLog runLog = runLogMapper.selectOne(new LambdaQueryWrapper<SfDataRunLog>()
+                .eq(SfDataRunLog::getJobId, jobId)
+                .orderByDesc(SfDataRunLog::getId)
+                .last("LIMIT 1"));
+
+        if(runLog == null) {
+            runLog = new SfDataRunLog();
+            runLog.setJobId(jobId);
+            runLog.setStartTime(new Date());
+            runLog.setStatus("RUNNING");
+            runLog.setTenantId(currentTenantId);
+            runLogMapper.insert(runLog);
+
+            job.setStatus("RUNNING");
+            jobMapper.updateById(job);
+        }
+
+        // 2. 为这个新对象创建首条 ObjLog 运行记录
+        SfDataRunObjLog objLog = new SfDataRunObjLog();
+        objLog.setRunLogId(runLog.getId());
+        objLog.setJobId(jobId);
+        objLog.setObjConfigId(configId);
+        objLog.setObjectName(config.getObjectName());
+        objLog.setStatus("WAITING");
+        objLog.setTenantId(currentTenantId);
+        objLog.setProgress(0);
+        objLogMapper.insert(objLog);
+
+        // 3. 标记正在运行防爆锁
+        jobRunningFlags.put(jobId, true);
+        objRunningFlags.put(objLog.getId(), true);
+
+        // 推送状态给前端
+        publishProgress(jobId, objLog.getId(), "WAITING", "进入执行队列...", 0);
+
+        try {
+            // 4. 复用极其稳定的核心引擎执行方法
+            executeObjectLog(job, objLog);
+        } catch(Exception e) {
+            log.error("单对象初次启动异常", e);
+            updateObjLogStatus(objLog, "FAILED", "系统异常: " + e.getMessage(), 0);
+        }
+    }
+
+    /**
      * 单个对象的执行逻辑 (优化版：云端并发提取 + 严格磁盘回收)
      */
     private void executeObjectLog(SfDataJob job, SfDataRunObjLog objLog) {
         String srcPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_src.csv";
         String tgtPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_tgt.csv";
         String resPath = "/tmp/sf_reconcile/res_" + objLog.getId() + ".csv";
+        //定义一个临时结果文件路径，防覆盖旧文件
+        String resTempPath = "/tmp/sf_reconcile/res_" + objLog.getId() + "_temp.csv";
 
         File srcFile = new File(srcPath);
         File tgtFile = new File(tgtPath);
         File resFile = new File(resPath);
+        File resTempFile = new File(resTempPath);
+
+        // 强制确保父级目录 /tmp/sf_reconcile/ 绝对存在，防止 FileOutputStream 报错
+        FileUtil.mkParentDirs(resTempFile);
 
         String srcJobId = null;
         String tgtJobId = null;
@@ -262,7 +325,12 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
                     publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在比对数据...", pct);
                 }
             };
-            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resFile, config, totalEstimatedRows, progressCallback, checkRunning);
+            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resTempFile, config, totalEstimatedRows, progressCallback, checkRunning);
+
+            if(resTempFile.exists()) {
+                // true 表示如果 resFile 已存在则直接覆盖（等价于删除旧的换新的）
+                FileUtil.move(resTempFile, resFile, true);
+            }
 
             // 5. 保存结果
             objLog.setTotalSource(stats.getTotalSource());
@@ -275,7 +343,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
         } catch(Exception e) {
             // 异常分流处理
-            if ("ABORTED_BY_USER".equals(e.getMessage()) || !checkRunning.getAsBoolean()) {
+            if("ABORTED_BY_USER".equals(e.getMessage()) || !checkRunning.getAsBoolean()) {
                 log.info("对象 [{}] 被人工强行中止", objLog.getObjectName());
                 updateObjLogStatus(objLog, "ABORTED", "用户手动停止", 0);
                 publishProgress(job.getId(), objLog.getId(), "ABORTED", "已停止", 0);
@@ -288,13 +356,14 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             // 【终极防泄漏 & 回收机制】
             FileUtil.del(srcFile);
             FileUtil.del(tgtFile);
+            FileUtil.del(resTempFile);
 
             // 如果是被中止的，触发云端猎杀与脏文件回收
-            if (!checkRunning.getAsBoolean()) {
+            if(!checkRunning.getAsBoolean()) {
                 log.info("触发中止回收机制，清理云端任务和脏文件...");
-                if (srcJobId != null) bulkApiService.abortJob(job.getSourceOrgId(), srcJobId);
-                if (tgtJobId != null) bulkApiService.abortJob(job.getTargetOrgId(), tgtJobId);
-                FileUtil.del(resFile); // 残次品结果毫不留情删除
+                if(srcJobId != null) bulkApiService.abortJob(job.getSourceOrgId(), srcJobId);
+                if(tgtJobId != null) bulkApiService.abortJob(job.getTargetOrgId(), tgtJobId);
+                //FileUtil.del(resFile); // 不再删除旧的比对结果文件，保留给前端预览
             }
         }
     }
@@ -472,7 +541,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         json.put("percent", percent);
 
         // 将比对结果统计一并打包
-        if (stats != null) {
+        if(stats != null) {
             json.put("totalSource", stats.getTotalSource());
             json.put("totalTarget", stats.getTotalTarget());
             json.put("diffCount", stats.getDiffCount());
@@ -484,7 +553,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     /**
      * 重试单个对象 (完整实现)
      */
-    @Async
+    @Async("reconcileTaskExecutor")
     @Override
     public void retryObject(Long objLogId, String currentTenantId) {
         SfDataRunObjLog objLog = objLogMapper.selectById(objLogId);
@@ -508,7 +577,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         objLog.setTotalSource(0);
         objLog.setTotalTarget(0);
         objLog.setDiffCount(0);
-        objLog.setResultFilePath(""); // 清空旧结果路径
+//        objLog.setResultFilePath(""); // 清空旧结果路径
         objLog.setUpdateTime(new Date());
         objLogMapper.updateById(objLog);
 

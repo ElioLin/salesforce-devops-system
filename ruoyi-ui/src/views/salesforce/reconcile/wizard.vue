@@ -124,7 +124,7 @@ import { listSObjects } from "@/api/salesforce/describe";
 
 // 【核心引入】引入独立封装的字段映射面板组件
 import FieldMappingPanel from "./components/FieldMappingPanel";
-const DEFAULT_EXCLUDE = 'Id,IsDeleted,CreatedById,CreatedDate,LastModifiedById,LastModifiedDate,SystemModstamp,ConnectionReceivedId,ConnectionSentId';
+const DEFAULT_EXCLUDE = 'Id,IsDeleted,CreatedById,CreatedDate,LastModifiedById,LastModifiedDate,SystemModstamp,ConnectionReceivedId,ConnectionSentId,LastActivityDate,LastReferencedDate,LastViewedDate';
 export default {
     name: "JobWizard",
     components: { FieldMappingPanel }, // 注册组件

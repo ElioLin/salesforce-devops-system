@@ -87,9 +87,16 @@
           <template slot-scope="scope">
             <el-progress :percentage="scope.row.progress || 0" :status="getProcessStatus(scope.row.status)"
               :stroke-width="18" :text-inside="true"></el-progress>
+
             <div class="progress-msg" v-if="scope.row.status === 'RUNNING'">
               <i class="el-icon-loading"></i> {{ scope.row.currentMsg || '正在处理中...' }}
             </div>
+
+            <div class="progress-msg waiting-msg"
+              v-else-if="scope.row.status === 'WAITING' || scope.row.status === 'INITIALIZING'">
+              <i class="el-icon-time"></i> {{ scope.row.currentMsg || '排队等待分配线程...' }}
+            </div>
+
             <div class="error-msg" v-else-if="scope.row.status === 'FAILED'">
               <i class="el-icon-warning"></i> {{ scope.row.errorMsg }}
             </div>
@@ -118,6 +125,10 @@
               :style="{ color: (scope.row.status === 'RUNNING' || scope.row.status === 'WAITING') ? '#C0C4CC' : '#909399' }"
               :disabled="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING'"
               @click="handleConfig(scope.row)">映射配置</el-button>
+
+            <el-button size="mini" type="text" icon="el-icon-video-play" style="color: #67C23A"
+              v-if="!scope.row.status || scope.row.status === 'IDLE'"
+              @click="handleStartSingleNew(scope.row)">启动</el-button>
 
             <el-button size="mini" type="text" icon="el-icon-document-delete" style="color: #F56C6C"
               v-if="scope.row.status === 'FAILED' || scope.row.status === 'ABORTED'"
@@ -271,6 +282,43 @@ export default {
     // if (this.timer) clearInterval(this.timer);
   },
   methods: {
+    /**
+       * 启动单个刚添加、从未执行过的新对象
+       */
+    handleStartSingleNew(row) {
+      // 获取配置表的 ID。假设你后端 monitor 接口里把 config 的 ID 放在了 objConfigId 或 id 里
+      const configId = row.objConfigId || row.id;
+
+      this.$confirm(`确认要独立启动对象【${row.objectLabel || row.objectName}】的比对任务吗?`, "启动确认", {
+        type: "info"
+      }).then(() => {
+        // 激活 WebSocket
+        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+          this.initWebSocket();
+        }
+
+        // 乐观锁更新 UI，让用户立刻看到反馈
+        const index = this.objList.indexOf(row);
+        if (index !== -1) {
+          const newItem = { ...row, status: 'WAITING', progress: 0, currentMsg: '正在准备引擎运行环境...' };
+          this.$set(this.objList, index, newItem);
+        }
+
+        // 触发大盘状态更新为运行中
+        this.overallStatus = 'RUNNING';
+
+        // 调用刚才新增的后端接口
+        request({
+          url: `/salesforce/reconcile/runObj/${this.jobId}/${configId}`,
+          method: 'post'
+        }).then(() => {
+          this.$message.success("对象已推入引擎队列");
+          this.startPolling(); // 确保轮询开启以防 WebSocket 抖动
+        }).catch(() => {
+          this.fetchData(); // 失败回滚视图
+        });
+      }).catch(() => { });
+    },
     // --- 核心优化：全景控制台新增方法 ---
     startPolling() {
       this.stopPolling(); // 开启前先防抖清除，防止多开
@@ -836,5 +884,21 @@ export default {
       padding: 0 8px;
     }
   }
+}
+
+.progress-msg {
+  font-size: 12px;
+  color: #409EFF; // RUNNING 状态的蓝色
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 【新增】：排队状态的专属颜色（灰色/橘色系都可以，这里用偏常规的提示灰） */
+.waiting-msg {
+  color: #909399;
+  font-style: italic;
+  /* 用斜体增加“等待感” */
 }
 </style>

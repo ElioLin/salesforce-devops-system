@@ -49,4 +49,25 @@ public class SalesforceThreadPoolConfig {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * 3. 数据比对专用线程池 (高 IO / 大内存任务)
+     * 用于：单对象比对启动、单对象重试操作
+     * 特点：严格限制并发数，超出部分进入队列排队，保护服务器内存和 SF Bulk API 限制
+     */
+    @Bean(name = "reconcileTaskExecutor")
+    public Executor reconcileTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        // 核心线程数：同时最多允许 5 个对象在进行比对（可根据你的服务器配置微调）
+        executor.setCorePoolSize(5);
+        // 最大线程数：遇到突发也最多只能跑 10 个
+        executor.setMaxPoolSize(10);
+        // 队列容量：如果点选了超过 10 个对象，剩下的全部放在队列里排队 (前端状态显示 WAITING)
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("sf-recon-");
+        // 拒绝策略：如果连队列100都塞满了，由调用者线程处理（防止任务丢失）
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
 }

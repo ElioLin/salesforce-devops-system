@@ -45,6 +45,20 @@ public class SfDataReconcileController extends BaseController {
     }
 
     /**
+     * 【新增】启动单个全新的比对对象
+     */
+    @Log(title = "启动单对象比对", businessType = BusinessType.OTHER)
+    @PostMapping("/runObj/{jobId}/{configId}")
+    public AjaxResult runSingleNewObject(@PathVariable Long jobId, @PathVariable Long configId) {
+        try {
+            reconcileService.runSingleNewObject(jobId, configId, SecurityUtils.getLoginUser().getTenantId());
+            return AjaxResult.success("该对象的比对任务已成功启动");
+        } catch (Exception e) {
+            return AjaxResult.error("启动失败: " + e.getMessage());
+        }
+    }
+
+    /**
      * 停止整个比对任务
      */
     @Log(title = "停止数据比对", businessType = BusinessType.OTHER)

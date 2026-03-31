@@ -1,5 +1,6 @@
 package com.ruoyi.salesforce.service;
 
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.salesforce.domain.SfDataJob;
 import com.ruoyi.salesforce.domain.SfDataObjConfig;
 import com.ruoyi.salesforce.domain.SfDataRunLog;
@@ -16,6 +17,8 @@ public interface ISfDataReconcileService {
      * 供 JobService 在修改状态或删除任务时调用
      */
     void stopJob(Long jobId);
+
+    void runSingleNewObject(Long jobId, Long configId, String currentTenantId);
 
     /**
      * 重试单个对象 (异步)
