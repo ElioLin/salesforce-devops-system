@@ -285,9 +285,9 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
             // 1. 构建 SOQL
             String srcKey = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
-            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey, job.getDataEndTime());
+            String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey, job.getDataEndTime(), true);
             String tgtKey = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
-            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey, null);
+            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey, null, false);
 
             if(!checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
 
@@ -371,7 +371,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     /**
      * 动态构建 SOQL (含排序)
      */
-    private String buildDynamicSoql(Long orgId, SfDataObjConfig config, String keyField, Date dataEndTime) {
+    private String buildDynamicSoql(Long orgId, SfDataObjConfig config, String keyField, Date dataEndTime, Boolean isSource) {
         String objectName = config.getObjectName();
 
         // 获取元数据
@@ -417,10 +417,12 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
             if("reference".equalsIgnoreCase(type) && relationMap.containsKey(apiName)) {
                 JSONObject mappingObj = relationMap.get(apiName);
-                if(mappingObj != null && mappingObj.containsKey("targetPath")) {
+                // 只有当“不是源环境（即目标环境）”并且配置了 targetPath 时，才使用 __r 的映射字段
+                if(!isSource && mappingObj != null && mappingObj.containsKey("targetPath")) {
                     String targetPath = mappingObj.getString("targetPath");
                     queryFields.add(targetPath);
                 } else {
+                    // 如果是源环境，或者没有配 targetPath，老老实实查原本的 API Name（例如 OA_Owner__c）
                     queryFields.add(apiName);
                 }
             } else {
@@ -474,7 +476,14 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
     private void updateObjLogStatus(SfDataRunObjLog log, String status, String msg, int progress) {
         log.setStatus(status);
-        if(msg != null) log.setErrorMsg(msg);
+        if(msg != null) {
+            // 【核心修复】：截断超长错误日志，保护数据库 varchar 长度限制！
+            // 防止长达数千字符的 Bulk API 报错（常夹带完整 SOQL）导致 updateById 抛出数据库异常而状态更新失败
+            if(msg.length() > 1000) {
+                msg = msg.substring(0, 1000) + "\n\n...(错误日志超长，已被系统安全截断以保护底层存储)";
+            }
+            log.setErrorMsg(msg);
+        }
         log.setProgress(progress);
         log.setUpdateTime(new Date());
         objLogMapper.updateById(log);
