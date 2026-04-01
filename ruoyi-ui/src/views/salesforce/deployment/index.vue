@@ -152,6 +152,34 @@
           </template>
         </el-table-column>
 
+        <el-table-column label="Git 同步" prop="syncGit" width="90" align="center">
+          <template slot-scope="scope">
+            <el-tag :type="scope.row.syncGit === 1 ? 'success' : 'info'" size="small" effect="plain">
+              {{ scope.row.syncGit === 1 ? '开启' : '关闭' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="目标分支" prop="targetBranch" min-width="130" align="center" show-overflow-tooltip>
+          <template slot-scope="scope">
+            <span v-if="scope.row.syncGit === 1" style="font-family: Consolas, monospace;">
+              <i class="el-icon-git-commit" style="color: #909399"></i> {{ scope.row.targetBranch || '-' }}
+            </span>
+            <span v-else style="color: #C0C4CC;">-</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="合并策略" prop="autoMerge" width="100" align="center">
+          <template slot-scope="scope">
+            <span v-if="scope.row.syncGit === 1">
+              <el-tag :type="scope.row.autoMerge === 1 ? 'primary' : 'info'" size="small" effect="plain">
+                {{ scope.row.autoMerge === 1 ? '自动合并' : '仅推送' }}
+              </el-tag>
+            </span>
+            <span v-else style="color: #C0C4CC;">-</span>
+          </template>
+        </el-table-column>
+
         <el-table-column label="创建者" prop="createBy" min-width="120" align="center" />
 
         <el-table-column label="创建时间" prop="createTime" min-width="160" align="center" sortable="custom" />
@@ -176,9 +204,9 @@
       :limit.sync="queryParams.pageSize" :page-sizes="[20, 50, 100, 150, 200]"
       layout="total, sizes, prev, pager, next, jumper" @pagination="getList" />
 
-    <el-dialog :title="title" :visible.sync="open" width="680px" append-to-body :close-on-click-modal="false"
+    <el-dialog :title="title" :visible.sync="open" width="760px" append-to-body :close-on-click-modal="false"
       custom-class="modern-dialog">
-      <el-form ref="form" :model="form" :rules="rules" label-width="90px">
+      <el-form ref="form" :model="form" :rules="rules" label-width="115px">
         <el-form-item label="部署标题" prop="title">
           <el-input v-model="form.title" placeholder="例如: 2025 Sprint 1 上线" />
         </el-form-item>
@@ -201,9 +229,11 @@
             </el-form-item>
           </el-col>
         </el-row>
+
         <el-form-item label="需求单号" prop="demandNo">
           <el-input v-model="form.demandNo" placeholder="请输入单号" />
         </el-form-item>
+
         <el-row :gutter="20">
           <el-col :span="12">
             <el-form-item label="源环境" prop="sourceOrgId">
@@ -221,6 +251,52 @@
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-divider content-position="left"><i class="el-icon-share"></i> GitOps 自动化流水线</el-divider>
+
+        <div v-if="hasGitConfig">
+          <el-row :gutter="24">
+            <el-col :span="10">
+              <el-form-item label="开启 Git 同步" prop="syncGit">
+                <el-switch v-model="form.syncGit" :active-value="1" :inactive-value="0"></el-switch>
+              </el-form-item>
+            </el-col>
+            <el-col :span="14" v-if="form.syncGit === 1">
+              <div style="font-size: 13px; color: #67C23A; margin-top: 6px;">
+                <i class="el-icon-circle-check"></i> 已绑定代码库：{{ gitConfigName }}
+              </div>
+            </el-col>
+          </el-row>
+
+          <el-row :gutter="24" v-if="form.syncGit === 1">
+            <el-col :span="12">
+              <el-form-item label="推送目标分支" prop="targetBranch"
+                :rules="form.syncGit === 1 ? [{ required: true, message: '请选择目标分支', trigger: 'change' }] : []">
+                <el-select v-model="form.targetBranch" placeholder="请选择或输入目标分支" filterable allow-create
+                  style="width:100%" :loading="branchLoading" @visible-change="handleBranchDropdown">
+                  <el-option v-for="branch in branchList" :key="branch" :label="branch" :value="branch">
+                    <i class="el-icon-git-commit" style="color: #909399; margin-right: 5px;"></i> {{ branch }}
+                  </el-option>
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="合并策略" prop="autoMerge">
+                <el-checkbox v-model="form.autoMerge" :true-label="1" :false-label="0">部署成功后合并至主分支</el-checkbox>
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </div>
+
+        <div v-else class="gitops-empty-state">
+          <i class="el-icon-warning-outline" style="font-size: 24px; color: #909399; margin-bottom: 10px;"></i>
+          <div style="font-weight: bold; color: #303133; margin-bottom: 5px;">尚未解锁 GitOps 代码同步能力</div>
+          <div style="font-size: 12px; color: #909399; margin-bottom: 15px;">
+            配置全局 Git 仓库凭证后，每次部署成功将自动为您推送代码，告别手动 Commit 烦恼。
+          </div>
+          <el-button type="primary" plain size="mini" @click="$router.push('/salesforce/gitConfig')">去配置 Git
+            仓库</el-button>
+        </div>
 
         <el-form-item label="测试级别" prop="testLevel">
           <el-select v-model="form.testLevel" placeholder="请选择测试级别" style="width:100%">
@@ -310,6 +386,7 @@
 import { listDeployment, addDeployment, updateDeployment, delDeployment, getDeployment, cloneDeployment } from "@/api/salesforce/deployment";
 import { listOrg } from "@/api/salesforce/org";
 import request from '@/utils/request';
+import { getCurrentConfig, getRemoteBranches } from "@/api/salesforce/gitConfig";
 
 export default {
   name: "Deployment",
@@ -361,13 +438,44 @@ export default {
         targetOrgId: [{ required: true, message: "请选择目标环境", trigger: "change" }],
       },
       originalRow: null,
+      hasGitConfig: false, // 是否已配置有效的全局 Git
+      gitConfigName: '',   // 展示给用户的 Git 仓库名称
+      branchList: [],      // 存储 Git 远程分支列表
+      branchLoading: false,// 分支下拉框的加载动画状态
+      branchLoaded: false, // 懒加载防抖缓存标记 (只拉取一次)
     };
   },
   created() {
     this.getList();
     this.getOrgList();
+    this.checkGitConfig();
   },
   methods: {
+    checkGitConfig() {
+      getCurrentConfig().then(res => {
+        if (res.data && res.data.isActive === 1) {
+          this.hasGitConfig = true;
+          this.gitConfigName = res.data.name;
+        } else {
+          this.hasGitConfig = false;
+        }
+      }).catch(() => {
+        this.hasGitConfig = false;
+      });
+    },
+    // 按需懒加载获取 Git 远程分支列表
+    handleBranchDropdown(visible) {
+      if (visible && !this.branchLoaded) {
+        this.branchLoading = true;
+        getRemoteBranches().then(res => {
+          this.branchList = res.data || [];
+          this.branchLoaded = true; // 缓存结果
+          this.branchLoading = false;
+        }).catch(() => {
+          this.branchLoading = false;
+        });
+      }
+    },
     getList() {
       this.loading = true;
       listDeployment(this.addDateRange(this.queryParams, this.dateRange)).then(response => {
@@ -435,7 +543,10 @@ export default {
         updateTime: null,
         deployType: null,
         demandNo: null,
-        demandPersonnel: null
+        demandPersonnel: null,
+        syncGit: 1,
+        targetBranch: null,
+        autoMerge: 0
       };
       this.dateRange = [];
       this.resetForm("queryForm");
@@ -459,12 +570,25 @@ export default {
       this.multiple = !selection.length
     },
     handleAdd() {
-      this.form = { testLevel: 'RunSpecifiedTests' };
+      this.branchLoaded = false;
+      this.branchList = [];
+      this.form = {
+        testLevel: 'RunSpecifiedTests',
+        syncGit: 1, // 默认开启同步
+        autoMerge: 1
+      };
       this.open = true;
       this.title = "新建部署包";
     },
     handleUpdate(row) {
       this.form = {};
+      //打开修改弹窗时，清除分支缓存
+      this.branchLoaded = false;
+      this.branchList = [];
+      if (row.targetBranch) {
+        // 如果该部署包已经有分支数据，先塞入列表回显
+        this.branchList = [row.targetBranch];
+      }
       const id = row.id || this.ids;
       if (!id) {
         this.$modal.msgError("请选择要修改的数据");
@@ -737,5 +861,14 @@ export default {
   /* 防止长英文或单号撑破容器 */
   line-height: 1.5;
   /* 增加行高，提升阅读舒适度 */
+}
+
+.gitops-empty-state {
+  background-color: #f5f7fa;
+  border: 1px dashed #dcdfe6;
+  border-radius: 6px;
+  padding: 20px;
+  text-align: center;
+  margin-bottom: 20px;
 }
 </style>

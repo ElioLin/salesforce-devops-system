@@ -16,7 +16,6 @@ import java.util.Map;
 /**
  * 部署包主对象 sf_deployment
  */
-
 public class SfDeployment extends BaseEntity {
     private static final long serialVersionUID = 1L;
     /**
@@ -41,6 +40,36 @@ public class SfDeployment extends BaseEntity {
     private String demandNo;
 
     private String demandPersonnel;
+
+    private Integer syncGit;
+
+    private String targetBranch;
+
+    private Integer autoMerge;
+
+    public Integer getSyncGit() {
+        return syncGit;
+    }
+
+    public void setSyncGit(Integer syncGit) {
+        this.syncGit = syncGit;
+    }
+
+    public Integer getAutoMerge() {
+        return autoMerge;
+    }
+
+    public void setAutoMerge(Integer autoMerge) {
+        this.autoMerge = autoMerge;
+    }
+
+    public String getTargetBranch() {
+        return targetBranch;
+    }
+
+    public void setTargetBranch(String targetBranch) {
+        this.targetBranch = targetBranch;
+    }
 
     public String getDeployType() {
         return deployType;

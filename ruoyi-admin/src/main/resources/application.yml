@@ -24,6 +24,7 @@ ruoyi:
     frontendUrl: http://localhost:80
     clientId: 3MVG9pRzvMkjMb6kgFzuHUiyE9anfivt3g1oKlhtcKPeOlHNA2G22Rp5Dg78RUAFpP5ZYNAvNcFll5oINlJNE
     clientSecret: F4D238AD0FAF6547094FABAF2BB1E9284E875F8D6E2256BB6E214D81EF24824B
+    GIT_AES_KEY: SfDevOpsGitToken2026!
 
 # 开发环境配置
 server:

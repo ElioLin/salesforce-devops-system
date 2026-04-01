@@ -69,8 +69,12 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
 
     @Autowired
     private SfDeploymentHistoryMapper sfDeploymentHistoryMapper;
+
     @Autowired
     private SfDeploymentHistoryDetailMapper sfDeploymentHistoryDetailMapper;
+
+    @Autowired
+    private SfGitSyncService gitSyncService;
 
     @Autowired
     @Qualifier("deployTaskExecutor")
@@ -783,17 +787,14 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                         lastTestCompleted = numTestsCompleted;
                     }
 
-                    // 4. 将动态日志注入 JSON 并发送
-                    if(dynamicLog != null) {
-                        json.put("stateDetail", dynamicLog); // 覆盖原来的 null
-                        DeployWebSocketServer.sendMessage(deploymentId, json.toJSONString());
-                    } else {
-                        // 如果没有日志要打，但也需要发送进度条数据给前端更新 Progress Bar
-                        // 前端 BuildConsole 有去重逻辑，所以这里发也没关系，主要是给进度条用的
-                        DeployWebSocketServer.sendMessage(deploymentId, statusJson);
-                    }
-
                     boolean isDone = json.getBooleanValue("done");
+                    if (isDone) {
+                        json.put("done", false); // 强制伪装成未完成，防止前端过早断开
+                    }
+                    if (dynamicLog != null) {
+                        json.put("stateDetail", dynamicLog);
+                    }
+                    DeployWebSocketServer.sendMessage(deploymentId, json.toJSONString());
 
                     if(isDone) {
                         done = true;
@@ -844,12 +845,35 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                                 }
                             } catch(Exception e) {
                                 log.error("读取审计文件或计算Diff失败", e);
+                            }
+                            // =========================================================
+                            // 【里程碑 3 核心触发点】：拦截部署成功事件，启动 GitOps 流水线
+                            // =========================================================
+                            try {
+                                SfDeployment currentDeploy = sfDeploymentMapper.selectById(deploymentId);
+                                // 校验：是否开启了同步，且目标分支已填写，且当前不是"仅验证"操作
+                                boolean isCheckOnlyTask = "Validate".equals(historyService.getById(historyId).getType());
+
+                                if (!isCheckOnlyTask && currentDeploy != null
+                                        && currentDeploy.getSyncGit() != null && currentDeploy.getSyncGit() == 1
+                                        && StringUtils.isNotEmpty(currentDeploy.getTargetBranch())) {
+
+                                    if(sourceZipTemp != null && sourceZipTemp.exists()) {
+                                        // 触发同步（由于身处异步线程，此处同步调用，Git 日志会按顺序推送给前端）
+                                        gitSyncService.syncToGit(currentDeploy, sourceZipTemp, historyId);
+                                    } else {
+                                        log.warn("无法执行 Git 同步：用于同步的部署包源物理文件已丢失");
+                                    }
+                                }
+                            } catch(Exception e) {
+                                // 绝不让 Git 的异常影响 Salesforce 已经成功的部署状态
+                                log.error("调用 Git 引擎启动失败", e);
                             } finally {
-                                // 5. 【关键】删除临时文件，清理磁盘
+                                // 5. 【关键】Git 使用完毕，安全清理磁盘临时文件
                                 if(sourceZipTemp != null && sourceZipTemp.exists()) {
                                     sourceZipTemp.delete();
+                                    log.info("部署与 Git 流程全部结束，已清理临时源文件。");
                                 }
-                                // beforeZip 和 afterZip 在此处变为垃圾对象，等待回收
                             }
                         }
 
@@ -864,10 +888,25 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
                         }
                         finalStatus = json.getString("status");
                         sendStepLog(deploymentId, finalStatus, ">>> 任务结束，最终结果: " + finalStatus);
+
+                        // =========================================================
+                        // 【核心修复】：所有任务(含Git)彻底结束后，再给前端发送真实的 done 信号
+                        // =========================================================
+                        JSONObject finalJson = new JSONObject();
+                        finalJson.put("done", true);
+                        finalJson.put("status", finalStatus);
+                        DeployWebSocketServer.sendMessage(deploymentId, finalJson.toJSONString());
+
                         log.info("部署任务结束: {}", processId);
                     } else {
                         // 未结束，等待 2 秒
                         TimeUnit.SECONDS.sleep(2);
+                        if(dynamicLog != null) {
+                            json.put("stateDetail", dynamicLog);
+                            DeployWebSocketServer.sendMessage(deploymentId, json.toJSONString());
+                        } else {
+                            DeployWebSocketServer.sendMessage(deploymentId, statusJson);
+                        }
                     }
 
                 } catch(Exception e) {

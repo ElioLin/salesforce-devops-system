@@ -5,6 +5,7 @@ import com.ruoyi.salesforce.domain.SfDeploymentHistory;
 import com.ruoyi.salesforce.domain.vo.SfAuditVo;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
 import java.util.Map;
@@ -46,4 +47,12 @@ public interface SfDeploymentHistoryMapper extends BaseMapper<SfDeploymentHistor
      * 最新动态 (注意 params 会包含在 entity 中)
      */
     List<SfDeploymentHistory> selectRecentList(SfDeploymentHistory history);
+
+    @Update("UPDATE sf_deployment_history SET git_commit_hash = #{commitHash}, " +
+            "git_sync_status = #{status}, git_sync_log = #{logMsg} " +
+            "WHERE id = #{id}")
+    int updateGitStatus(@Param("id") Long id,
+                        @Param("commitHash") String commitHash,
+                        @Param("status") String status,
+                        @Param("logMsg") String logMsg);
 }

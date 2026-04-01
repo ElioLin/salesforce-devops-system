@@ -28,6 +28,9 @@ public class SfDeploymentHistory extends BaseEntity {
     private Date startTime;
     private Date endTime;
     private String errorMsg;
+    private String gitCommitHash;
+    private String gitSyncStatus;
+    private String gitSyncLog;
     /**
      * 创建者
      * 使用 fill = FieldFill.INSERT 标记

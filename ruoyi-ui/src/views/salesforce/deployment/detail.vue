@@ -82,28 +82,66 @@
                     </span>
                 </div>
 
-                <el-form label-width="90px" size="small" :inline="true" class="config-form">
-                    <el-form-item label="测试级别">
-                        <el-select v-model="deployment.testLevel" placeholder="请选择测试级别" style="width: 240px">
-                            <el-option label="默认 (NoTestRun / Default)" value="NoTestRun">
-                                <span style="float: left">默认 (Default)</span>
-                                <span style="float: right; color: #8492a6; font-size: 12px">生产环境必跑</span>
-                            </el-option>
-                            <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
-                            <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
-                        </el-select>
-                    </el-form-item>
+                <el-form label-width="110px" size="small" :inline="true" class="config-form">
 
-                    <template v-if="deployment.testLevel === 'RunSpecifiedTests'">
-                        <el-form-item label="指定类名" class="spec-test-item">
-                            <el-select ref="testSelect" v-model="specifiedTestsArr" multiple filterable allow-create
-                                default-first-option placeholder="支持直接粘贴 (逗号/空格/换行分隔)，自动识别" style="width: 600px"
-                                no-data-text="请输入类名" @paste.native.capture.prevent="handleSmartPaste">
+                    <div style="margin-bottom: 5px;">
+                        <el-form-item label="测试级别">
+                            <el-select v-model="deployment.testLevel" placeholder="请选择测试级别" style="width: 240px">
+                                <el-option label="默认 (NoTestRun / Default)" value="NoTestRun">
+                                    <span style="float: left">默认 (Default)</span>
+                                    <span style="float: right; color: #8492a6; font-size: 12px">生产必跑</span>
+                                </el-option>
+                                <el-option label="运行本地测试 (RunLocalTests)" value="RunLocalTests" />
+                                <el-option label="指定测试类 (RunSpecifiedTests)" value="RunSpecifiedTests" />
                             </el-select>
-                            <el-button type="text" size="mini" icon="el-icon-delete" style="margin-left: 5px;"
-                                v-if="specifiedTestsArr.length > 0" @click="specifiedTestsArr = []">清空</el-button>
                         </el-form-item>
-                    </template>
+
+                        <template v-if="deployment.testLevel === 'RunSpecifiedTests'">
+                            <el-form-item label="指定类名" class="spec-test-item">
+                                <el-select ref="testSelect" v-model="specifiedTestsArr" multiple filterable allow-create
+                                    default-first-option placeholder="支持直接粘贴 (逗号/空格/换行分隔)，自动识别" style="width: 500px"
+                                    no-data-text="请输入类名" @paste.native.capture.prevent="handleSmartPaste">
+                                </el-select>
+                                <el-button type="text" size="mini" icon="el-icon-delete" style="margin-left: 5px;"
+                                    v-if="specifiedTestsArr.length > 0" @click="specifiedTestsArr = []">清空</el-button>
+                            </el-form-item>
+                        </template>
+                    </div>
+
+                    <div style="border-top: 1px dashed #e4e7ed; padding-top: 15px; margin-top: 5px;">
+                        <el-form-item label="Git 代码同步" style="margin-bottom: 0;">
+                            <el-switch v-model="deployment.syncGit" :active-value="1" :inactive-value="0"
+                                @change="triggerAutoSave"></el-switch>
+
+                            <span v-if="hasGitConfig && deployment.syncGit === 1"
+                                style="font-size: 13px; color: #67C23A; margin-left: 15px;">
+                                <i class="el-icon-circle-check"></i> 目标代码库：{{ gitConfigName }}
+                            </span>
+                            <span v-else-if="!hasGitConfig && deployment.syncGit === 1"
+                                style="font-size: 13px; color: #E6A23C; margin-left: 15px;">
+                                <i class="el-icon-warning-outline"></i> 警告：全局 Git 未配置或已停用，部署成功后将无法同步Git
+                            </span>
+                        </el-form-item>
+
+                        <template v-if="deployment.syncGit === 1">
+                            <el-form-item label="推送目标分支" style="margin-bottom: 0; margin-left: 20px;">
+                                <el-select v-model="deployment.targetBranch" placeholder="请选择或输入分支" filterable
+                                    allow-create style="width: 200px" :loading="branchLoading"
+                                    @visible-change="handleBranchDropdown" @change="triggerAutoSave">
+                                    <el-option v-for="branch in branchList" :key="branch" :label="branch"
+                                        :value="branch">
+                                        <i class="el-icon-git-commit" style="color: #909399; margin-right: 5px;"></i> {{
+                                        branch }}
+                                    </el-option>
+                                </el-select>
+                            </el-form-item>
+
+                            <el-form-item label="合并策略" style="margin-bottom: 0; margin-left: 20px;">
+                                <el-checkbox v-model="deployment.autoMerge" :true-label="1" :false-label="0"
+                                    @change="triggerAutoSave">部署后合并至主分支</el-checkbox>
+                            </el-form-item>
+                        </template>
+                    </div>
                 </el-form>
             </div>
             <build-console ref="buildConsole" :visible="showConsole"
@@ -115,7 +153,7 @@
                         <span class="title">
                             <i class="el-icon-collection"></i> 元数据处理
                             <el-tag size="mini" effect="plain" class="ml-10" v-if="compStateText">{{ compStateText
-                            }}</el-tag>
+                                }}</el-tag>
                         </span>
                         <span class="count" v-if="compTotal > 0">{{ compDone }} / {{ compTotal }}</span>
                     </div>
@@ -460,6 +498,7 @@ import { download } from "@/utils/request";
 import { getToken } from "@/utils/auth";
 import BuildConsole from "./components/BuildConsole";
 import DiffViewerDialog from "./components/DiffViewerDialog";
+import { getCurrentConfig, getRemoteBranches } from "@/api/salesforce/gitConfig";
 
 export default {
     name: "DeploymentDetail",
@@ -473,7 +512,10 @@ export default {
                 testLevel: 'NoTestRun',
                 specifiedTests: '',
                 checkOnly: false,
-                errorMsg: '' // 初始化字段
+                errorMsg: '', // 初始化字段
+                syncGit: 1,
+                targetBranch: '',
+                autoMerge: 0
             },
             localCheckOnly: false,
             isQuickDeploy: false,
@@ -558,6 +600,11 @@ export default {
                 icon: 'el-icon-check'
             },
             saveTimer: null, // 防抖定时器
+            hasGitConfig: false,
+            gitConfigName: '',
+            branchList: [],
+            branchLoading: false,
+            branchLoaded: false,
         };
     },
     computed: {
@@ -725,6 +772,7 @@ export default {
         this.deploymentId = this.$route.query.id || this.$route.params.id;
         if (this.deploymentId) {
             this.initData();
+            this.checkGitConfig(); //页面加载时嗅探全局 Git 配置
         } else {
             this.$modal.msgError("缺少部署包ID");
         }
@@ -1350,6 +1398,33 @@ export default {
             this.validating = false;
             this.deploying = false;
         },
+        //检查全局 Git 配置状态
+        checkGitConfig() {
+            getCurrentConfig().then(res => {
+                if (res.data && res.data.isActive === 1) {
+                    this.hasGitConfig = true;
+                    this.gitConfigName = res.data.name;
+                } else {
+                    this.hasGitConfig = false;
+                }
+            }).catch(() => {
+                this.hasGitConfig = false;
+            });
+        },
+
+        //按需懒加载获取分支列表
+        handleBranchDropdown(visible) {
+            if (visible && !this.branchLoaded) {
+                this.branchLoading = true;
+                getRemoteBranches().then(res => {
+                    this.branchList = res.data || [];
+                    this.branchLoaded = true;
+                    this.branchLoading = false;
+                }).catch(() => {
+                    this.branchLoading = false;
+                });
+            }
+        },
         getDetail() {
             return getDeployment(this.deploymentId).then(res => {
                 this.configLoaded = false;
@@ -1358,7 +1433,29 @@ export default {
                     this.localCheckOnly = true;
                     newData.checkOnly = true;
                 }
-                this.deployment = newData;
+                // this.deployment = newData;
+
+                // 兼容 MyBatis-Plus 将 tinyint(1) 序列化为 Boolean (true/false) 的坑
+                // 强制将其转换为前端 Switch 和 v-if 严格需要的 Number (1/0)
+                if (newData.syncGit !== undefined && newData.syncGit !== null) {
+                    newData.syncGit = (newData.syncGit === true || newData.syncGit === 1 || String(newData.syncGit) === '1') ? 1 : 0;
+                } else {
+                    newData.syncGit = 1; // 兜底默认值
+                }
+
+                if (newData.autoMerge !== undefined && newData.autoMerge !== null) {
+                    newData.autoMerge = (newData.autoMerge === true || newData.autoMerge === 1 || String(newData.autoMerge) === '1') ? 1 : 0;
+                } else {
+                    newData.autoMerge = 0; // 兜底默认值
+                }
+
+                // 合并数据，防止覆盖掉我们在 data() 中初始化的对象结构，导致 Vue 失去响应式
+                this.deployment = { ...this.deployment, ...newData };
+
+                //如果之前已经配过了目标分支，先放到选项池里回显
+                if (newData.targetBranch) {
+                    this.branchList = [newData.targetBranch];
+                }
 
                 // 【新增】如果当前状态是“进行中”，自动展开控制台，方便用户查看进度
                 // 注意：这里复用了 computed 中的 isProcessing 逻辑判断
@@ -1732,7 +1829,7 @@ export default {
             }, 1000); // 1秒后执行保存，避免频繁请求
         },
 
-        // 【新增】执行保存逻辑
+        // 【优化】执行保存逻辑
         doSaveConfig() {
             const specTestsStr = this.specifiedTestsArr.join(',');
 
@@ -1740,7 +1837,11 @@ export default {
             const data = {
                 id: this.deploymentId,
                 testLevel: this.deployment.testLevel,
-                specifiedTests: specTestsStr
+                specifiedTests: specTestsStr,
+                // 严谨：确保传给后端的全部是标准的 1 或 0
+                syncGit: this.deployment.syncGit === 1 || this.deployment.syncGit === true ? 1 : 0,
+                targetBranch: this.deployment.targetBranch,
+                autoMerge: this.deployment.autoMerge === 1 || this.deployment.autoMerge === true ? 1 : 0
             };
 
             updateDeployment(data).then(res => {

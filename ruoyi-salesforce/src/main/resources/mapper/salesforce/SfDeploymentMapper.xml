@@ -19,12 +19,15 @@
         <result property="deployType" column="deploy_type"/>
         <result property="demandNo" column="demand_no"/>
         <result property="demandPersonnel" column="demand_personnel"/>
+        <result property="syncGit" column="sync_git"/>
+        <result property="autoMerge" column="auto_merge"/>
+        <result property="targetBranch" column="target_branch"/>
     </resultMap>
 
     <select id="selectSfDeploymentList" parameterType="com.ruoyi.salesforce.domain.SfDeployment"
             resultMap="SfDeploymentResult">
         select d.id, d.tenant_id, d.title, d.source_org_id, d.target_org_id, d.status, d.create_time, d.create_by, d.user_id,
-        d.dept_id, d.deploy_type, d.demand_no, d.demand_personnel
+        d.dept_id, d.deploy_type, d.demand_no, d.demand_personnel, d.sync_git, d.auto_merge, d.target_branch
         from sf_deployment d
         <where>
             <if test="title != null  and title != ''">and d.title like concat('%', #{title}, '%')</if>
