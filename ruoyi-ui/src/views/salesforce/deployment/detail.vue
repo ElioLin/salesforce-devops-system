@@ -513,7 +513,7 @@ export default {
                 specifiedTests: '',
                 checkOnly: false,
                 errorMsg: '', // 初始化字段
-                syncGit: 1,
+                syncGit: 0,
                 targetBranch: '',
                 autoMerge: 0
             },
@@ -1440,7 +1440,7 @@ export default {
                 if (newData.syncGit !== undefined && newData.syncGit !== null) {
                     newData.syncGit = (newData.syncGit === true || newData.syncGit === 1 || String(newData.syncGit) === '1') ? 1 : 0;
                 } else {
-                    newData.syncGit = 1; // 兜底默认值
+                    newData.syncGit = 0; // 兜底默认值
                 }
 
                 if (newData.autoMerge !== undefined && newData.autoMerge !== null) {

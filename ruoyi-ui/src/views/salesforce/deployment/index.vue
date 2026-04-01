@@ -544,7 +544,7 @@ export default {
         deployType: null,
         demandNo: null,
         demandPersonnel: null,
-        syncGit: 1,
+        syncGit: 0,
         targetBranch: null,
         autoMerge: 0
       };
@@ -574,8 +574,8 @@ export default {
       this.branchList = [];
       this.form = {
         testLevel: 'RunSpecifiedTests',
-        syncGit: 1, // 默认开启同步
-        autoMerge: 1
+        syncGit: 0, // 默认开启同步
+        autoMerge: 0
       };
       this.open = true;
       this.title = "新建部署包";
