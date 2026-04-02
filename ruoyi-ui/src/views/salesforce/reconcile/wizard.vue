@@ -46,7 +46,8 @@
                 <el-form-item label="默认排除字段" prop="globalExcludedFields">
                     <el-input type="textarea" v-model="globalExcludedFields" placeholder="输入以逗号分隔的API名" :rows="2" />
                     <div style="font-size: 12px; color: #909399; line-height: 1.4; margin-top: 4px;">
-                        <i class="el-icon-magic-stick" style="color: #E6A23C"></i> <b>智能辅助</b>：新增比对对象时，系统会自动将这些字段加入排除列表。系统已记住您的配置习惯。（PS:该默认排除的字段不会存入数据库）
+                        <i class="el-icon-magic-stick" style="color: #E6A23C"></i>
+                        <b>智能辅助</b>：新增比对对象时，系统会自动将这些字段加入排除列表。系统已记住您的配置习惯。（PS:该默认排除的字段不会存入数据库）
                     </div>
                 </el-form-item>
                 <el-form-item label="备注" prop="remark">
@@ -58,8 +59,8 @@
         <div v-show="activeStep === 1" class="step-content flex-center">
             <div class="transfer-wrapper" v-loading="loadingObjects">
                 <el-transfer v-model="selectedObjects" :data="allObjects" :titles="['可选对象', '已选对象']" filterable
-                    filter-placeholder="输入对象名搜索" :button-texts="[' 移除 ', ' 添加 ']" @change="handleObjSelectionChange"
-                    class="custom-transfer">
+                    :filter-method="filterMethod" filter-placeholder="输入对象名或对象API搜索（支持空格隔开多个精确搜索）" :button-texts="[' 移除 ', ' 添加 ']"
+                    @change="handleObjSelectionChange" class="custom-transfer">
                     <span slot-scope="{ option }">
                         <el-tooltip :content="option.key" placement="top" :open-delay="1000">
                             <span>{{ option.label }}</span>
@@ -190,6 +191,42 @@ export default {
         }
     },
     methods: {
+        /**
+         * 穿梭框高阶搜索过滤逻辑 (支持：单次输入模糊匹配，Excel批量粘贴精确匹配)
+         */
+        filterMethod(query, item) {
+            // 1. 输入为空时，展示全部
+            if (!query) return true;
+
+            // 2. 智能分词：按照 空格、换行符(\n)、制表符(\t)、以及中英文字符的逗号和分号进行拆分
+            const keywords = query.toLowerCase()
+                .split(/[\s,;，；\n\t]+/)
+                .filter(k => k.trim() !== '');
+
+            // 3. 如果切分后没有有效关键词，默认展示全部
+            if (keywords.length === 0) return true;
+
+            // 获取当前待选对象的 label(中文名) 和 key(API名)，并去除前后首尾空格
+            const label = (item.label || '').toLowerCase().trim();
+            const key = (item.key || '').toLowerCase().trim();
+
+            // ==========================================
+            // 4. 【核心增强】：双模智能探针，识别当前是单搜还是批量粘贴
+            // 触发批量模式条件：拆分出多个有效词，或者原始输入包含特定的批量分隔符(如换行、逗号)
+            // ==========================================
+            const isBatchMode = keywords.length > 1 || /[\n\t,;，；]/.test(query);
+
+            if (isBatchMode) {
+                // 🔴 批量搜索模式 -> 执行【精确匹配】 (Exact Match)
+                // 必须完全等于 API名 或 Label 名才放行
+                return keywords.some(keyword => label === keyword || key === keyword);
+            } else {
+                // 🟢 单个搜索模式 -> 执行【模糊匹配】 (Fuzzy Match)
+                // 只要包含用户输入的内容就放行
+                const keyword = keywords[0];
+                return label.includes(keyword) || key.includes(keyword);
+            }
+        },
         init(jobId, startStep = 0) {
             this.reset();
             this.startStep = startStep;

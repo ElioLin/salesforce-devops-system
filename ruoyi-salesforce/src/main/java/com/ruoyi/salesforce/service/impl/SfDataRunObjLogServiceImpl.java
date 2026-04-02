@@ -63,7 +63,7 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
      * 核心功能：读取本地 CSV 文件并进行内存分页和筛选
      */
     @Override
-    public Map<String, Object> previewCsvData(Long objLogId, int pageNum, int pageSize, String diffType, String fieldName) {
+    public Map<String, Object> previewCsvData(Long objLogId, int pageNum, int pageSize, String diffType, String fieldName, Boolean excludePostCutoff) {
         // 1. 获取日志记录
         SfDataRunObjLog objLog = objLogMapper.selectById(objLogId);
         if(objLog == null) {
@@ -123,6 +123,12 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
                 item.put("fieldName", row.get(3));
                 item.put("sourceValue", row.get(4));
                 item.put("targetValue", row.get(5));
+                if (row.size() >= 10) {
+                    item.put("sourceCreatedDate", row.get(6));
+                    item.put("targetCreatedDate", row.get(7));
+                    item.put("sourceLastModifiedDate", row.get(8));
+                    item.put("targetLastModifiedDate", row.get(9));
+                }
                 filteredList.add(item);
             }
         }

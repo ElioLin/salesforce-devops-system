@@ -67,6 +67,7 @@ public class SfDataJob implements Serializable {
     private List<String> objectNames;
 
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @TableField(updateStrategy = FieldStrategy.IGNORED)
     private Date dataEndTime;
 
     @TableField(exist = false)

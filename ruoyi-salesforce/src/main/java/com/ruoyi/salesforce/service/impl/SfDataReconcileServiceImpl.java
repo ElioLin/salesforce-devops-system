@@ -287,7 +287,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             String srcKey = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
             String srcSoql = buildDynamicSoql(job.getSourceOrgId(), config, srcKey, job.getDataEndTime(), true);
             String tgtKey = StringUtils.defaultIfEmpty(config.getTargetKeyField(), "Id");
-            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey, null, false);
+            String tgtSoql = buildDynamicSoql(job.getTargetOrgId(), config, tgtKey, job.getDataEndTime(), false);
 
             if(!checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
 
@@ -325,7 +325,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
                     publishProgress(job.getId(), objLog.getId(), "RUNNING", "正在比对数据...", pct);
                 }
             };
-            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resTempFile, config, totalEstimatedRows, progressCallback, checkRunning);
+            SfReconcileAlgorithm.ReconcileStats stats = algorithm.execute(srcFile, tgtFile, resTempFile, config, totalEstimatedRows, progressCallback, checkRunning, job.getDataEndTime());
 
             if(resTempFile.exists()) {
                 // true 表示如果 resFile 已存在则直接覆盖（等价于删除旧的换新的）
@@ -336,6 +336,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             objLog.setTotalSource(stats.getTotalSource());
             objLog.setTotalTarget(stats.getTotalTarget());
             objLog.setDiffCount(stats.getDiffCount());
+            objLog.setIgnoredPostCutoffCount(stats.getIgnoredPostCutoffCount());
             objLog.setResultFilePath(resPath);
 
             updateObjLogStatus(objLog, "FINISHED", "比对完成", 100);
@@ -399,6 +400,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         Set<String> queryFields = new LinkedHashSet<>();
 
         boolean hasCreatedDate = false;
+        boolean hasLastModifiedDate = false;
 
         // 确保 KeyField 存在
         String effectiveKeyField = StringUtils.isEmpty(keyField) ? "Id" : keyField;
@@ -411,6 +413,8 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             if("CreatedDate".equalsIgnoreCase(apiName)) {
                 hasCreatedDate = true;
             }
+
+            if("LastModifiedDate".equalsIgnoreCase(apiName)) hasLastModifiedDate = true;
 
             if(excludedSet.contains(apiName)) continue;
             if("base64".equalsIgnoreCase(type) || "address".equalsIgnoreCase(type)) continue;
@@ -429,7 +433,9 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
                 queryFields.add(apiName);
             }
         }
-
+        if(hasLastModifiedDate) {
+            queryFields.add("LastModifiedDate");
+        }
         StringBuilder sb = new StringBuilder("SELECT ");
         sb.append(String.join(", ", queryFields));
         sb.append(" FROM ").append(objectName);
@@ -554,6 +560,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             json.put("totalSource", stats.getTotalSource());
             json.put("totalTarget", stats.getTotalTarget());
             json.put("diffCount", stats.getDiffCount());
+            json.put("ignoredPostCutoffCount", 0);
         }
 
         DeployWebSocketServer.sendMessage("reconcile_" + jobId, json.toJSONString());
@@ -586,6 +593,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         objLog.setTotalSource(0);
         objLog.setTotalTarget(0);
         objLog.setDiffCount(0);
+        objLog.setIgnoredPostCutoffCount(0);
 //        objLog.setResultFilePath(""); // 清空旧结果路径
         objLog.setUpdateTime(new Date());
         objLogMapper.updateById(objLog);

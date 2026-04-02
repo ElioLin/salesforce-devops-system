@@ -33,11 +33,12 @@ public class SfReconcileAlgorithm {
         private int totalSource = 0;
         private int totalTarget = 0;
         private int diffCount = 0;
+        private int ignoredPostCutoffCount = 0;
         private int missingTarget = 0;
         private int missingSource = 0;
     }
 
-    public ReconcileStats execute(File sourceFile, File targetFile, File resultFile, SfDataObjConfig config, int totalRows, Consumer<Integer> progressCallback, java.util.function.BooleanSupplier checkRunning) {
+    public ReconcileStats execute(File sourceFile, File targetFile, File resultFile, SfDataObjConfig config, int totalRows, Consumer<Integer> progressCallback, java.util.function.BooleanSupplier checkRunning, Date dataEndTime) {
         log.info("开始执行高精度比对，对象: {}", config.getObjectName());
         ReconcileStats stats = new ReconcileStats();
 
@@ -67,7 +68,8 @@ public class SfReconcileAlgorithm {
             ) {
                 fos.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF}); // BOM
                 CsvWriter writer = CsvUtil.getWriter(bw);
-                writer.write(new String[]{"Source_Key", "Target_Key", "Diff_Type", "Field_Name", "Source_Value", "Target_Value"});
+                writer.write(new String[]{"Source_Key", "Target_Key", "Diff_Type", "Field_Name", "Source_Value", "Target_Value",
+                        "Source_CreatedDate", "Target_CreatedDate", "Source_LastModifiedDate", "Target_LastModifiedDate"});
 
                 CsvReader srcReader = CsvUtil.getReader(srcBr, csvConfig);
                 CsvReader tgtReader = CsvUtil.getReader(tgtBr, csvConfig);
@@ -85,6 +87,11 @@ public class SfReconcileAlgorithm {
 
                     int srcKeyIdx = findColIndex(srcHeader, srcKeyField);
                     int tgtKeyIdx = findColIndex(tgtHeader, tgtKeyField);
+
+                    int srcCdIdx = findColIndex(srcHeader, "CreatedDate");
+                    int tgtCdIdx = findColIndex(tgtHeader, "CreatedDate");
+                    int srcMdIdx = findColIndex(srcHeader, "LastModifiedDate");
+                    int tgtMdIdx = findColIndex(tgtHeader, "LastModifiedDate");
 
                     CsvRow srcRow = srcIter.hasNext() ? srcIter.next() : null;
                     CsvRow tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
@@ -111,6 +118,11 @@ public class SfReconcileAlgorithm {
                         String sKey = getNormalizedKey(srcRow, srcKeyIdx);
                         String tKey = getNormalizedKey(tgtRow, tgtKeyIdx);
 
+                        String sCd = (srcRow != null && srcCdIdx != -1) ? srcRow.get(srcCdIdx) : "";
+                        String tCd = (tgtRow != null && tgtCdIdx != -1) ? tgtRow.get(tgtCdIdx) : "";
+                        String sMd = (srcRow != null && srcMdIdx != -1) ? srcRow.get(srcMdIdx) : "";
+                        String tMd = (tgtRow != null && tgtMdIdx != -1) ? tgtRow.get(tgtMdIdx) : "";
+
                         int compare;
                         if(sKey == null && tKey == null) compare = 0;
                         else if(sKey == null) compare = 1;
@@ -121,7 +133,7 @@ public class SfReconcileAlgorithm {
                         if(compare == 0) {
                             stats.setTotalSource(stats.getTotalSource() + 1);
                             stats.setTotalTarget(stats.getTotalTarget() + 1);
-                            boolean hasDiff = compareFields(srcRow, tgtRow, srcHeader, tgtHeader, writer, config, stats, sKey, tKey);
+                            boolean hasDiff = compareFields(srcRow, tgtRow, srcHeader, tgtHeader, writer, config, stats, sKey, tKey, dataEndTime, sCd, tCd, sMd, tMd);
                             if(hasDiff) stats.setDiffCount(stats.getDiffCount() + 1);
                             srcRow = srcIter.hasNext() ? srcIter.next() : null;
                             tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
@@ -129,13 +141,13 @@ public class SfReconcileAlgorithm {
                             stats.setTotalSource(stats.getTotalSource() + 1);
                             stats.setMissingTarget(stats.getMissingTarget() + 1);
                             stats.setDiffCount(stats.getDiffCount() + 1);
-                            writeDiff(writer, sKey, "", "MISSING_IN_TARGET", "-", "Row Exists", "Row Missing", stats);
+                            writeDiff(writer, sKey, "", "MISSING_IN_TARGET", "-", "Row Exists", "Row Missing", stats, sCd, "", sMd, "");
                             srcRow = srcIter.hasNext() ? srcIter.next() : null;
                         } else {
                             stats.setTotalTarget(stats.getTotalTarget() + 1);
                             stats.setMissingSource(stats.getMissingSource() + 1);
                             stats.setDiffCount(stats.getDiffCount() + 1);
-                            writeDiff(writer, "", tKey, "MISSING_IN_SOURCE", "-", "Row Missing", "Row Exists", stats);
+                            writeDiff(writer, "", tKey, "MISSING_IN_SOURCE", "-", "Row Missing", "Row Exists", stats, "", tCd, "", tMd);
                             tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
                         }
                     }
@@ -347,29 +359,51 @@ public class SfReconcileAlgorithm {
         return id15 + suffix.toString();
     }
 
-    private boolean compareFields(CsvRow src, CsvRow tgt, CsvRow srcHeader, CsvRow tgtHeader,
-                                  CsvWriter writer, SfDataObjConfig config, ReconcileStats stats,
-                                  String srcKey, String tgtKey) {
-        boolean hasDiff = false;
-        String srcKeyName = StringUtils.defaultIfEmpty(config.getSourceKeyField(), "Id");
+    private boolean compareFields(CsvRow src, CsvRow tgt, CsvRow srcHeader, CsvRow tgtHeader, CsvWriter writer, SfDataObjConfig config, ReconcileStats stats, String srcKey, String tgtKey, Date dataEndTime, String sCd, String tCd, String sMd, String tMd) {
+        boolean hasRealDiff = false;
 
-        for(int i = 0; i < srcHeader.size(); i++) {
-            String fieldName = cleanHeader(srcHeader.get(i));
-            if(fieldName.equalsIgnoreCase(srcKeyName)) continue;
+        // 【新增提取】：获取当前双端行数据的最后修改时间
+        Date srcLmd = null;
+        Date tgtLmd = null;
+        if(dataEndTime != null) {
+            if(StringUtils.isNotEmpty(sMd)) srcLmd = cn.hutool.core.date.DateUtil.parse(sMd);
+            if(StringUtils.isNotEmpty(tMd)) tgtLmd = cn.hutool.core.date.DateUtil.parse(tMd);
+        }
 
-            int tgtIdx = findSmartColIndex(tgtHeader, fieldName, config.getTargetKeyField());
+        for(int sIdx = 0; sIdx < srcHeader.size(); sIdx++) {
+            String colName = cleanHeader(srcHeader.get(sIdx));
+            // 忽略非业务比对字段
+            if(colName.equalsIgnoreCase("LastModifiedDate") || colName.equalsIgnoreCase(config.getSourceKeyField()))
+                continue;
 
-            if(tgtIdx != -1) {
-                String sVal = src.get(i);
-                String tVal = tgt.size() > tgtIdx ? tgt.get(tgtIdx) : "";
+            int tIdx = findSmartColIndex(tgtHeader, colName, config.getTargetKeyField());
+            if(tIdx == -1) continue;
 
-                if(!isVisuallyEqual(sVal, tVal)) {
-                    writeDiff(writer, srcKey, tgtKey, "VALUE_DIFF", fieldName, sVal, tVal, stats);
-                    hasDiff = true;
+            String sVal = src.get(sIdx);
+            String tVal = tgt.get(tIdx);
+
+            if(!isVisuallyEqual(sVal, tVal)) {
+                // 【核心逻辑：移动靶安全判定】
+                boolean isPostCutoff = false;
+                if(dataEndTime != null) {
+                    // 只要有一端的修改时间晚于我们的截断时间，就属于业务后置修改
+                    if((srcLmd != null && srcLmd.after(dataEndTime)) || (tgtLmd != null && tgtLmd.after(dataEndTime))) {
+                        isPostCutoff = true;
+                    }
+                }
+
+                if(isPostCutoff) {
+                    // 安全忽略，写入特殊类型
+                    stats.setIgnoredPostCutoffCount(stats.getIgnoredPostCutoffCount() + 1);
+                    writeDiff(writer, srcKey, tgtKey, "POST_CUTOFF_CHANGE", colName, sVal, tVal, stats, sCd, tCd, sMd, tMd);
+                } else {
+                    // 真实的迁移异常
+                    hasRealDiff = true;
+                    writeDiff(writer, srcKey, tgtKey, "VALUE_DIFF", colName, sVal, tVal, stats, sCd, tCd, sMd, tMd);
                 }
             }
         }
-        return hasDiff;
+        return hasRealDiff; // 注意：返回的是否有真实异常，外部收到 true 才会把总 diffCount + 1
     }
 
     private int findSmartColIndex(CsvRow header, String colName, String targetKeyField) {
@@ -441,10 +475,21 @@ public class SfReconcileAlgorithm {
         return false;
     }
 
-    private void writeDiff(CsvWriter writer, String sKey, String tKey, String type, String field, String sVal, String tVal, ReconcileStats stats) {
+    /**
+     * 将差异结果写入 CSV (自带长文本安全截断机制)
+     */
+    private void writeDiff(CsvWriter writer, String sKey, String tKey, String type, String field, String sVal, String tVal, ReconcileStats stats, String sCd, String tCd, String sMd, String tMd) {
+        // 【核心防御】：Salesforce 的富文本可能长达十万字符，必须截断以防 CSV 崩溃及前端渲染卡死
         String safeS = sVal == null ? "" : StrUtil.sub(sVal, 0, 3000);
         String safeT = tVal == null ? "" : StrUtil.sub(tVal, 0, 3000);
         String safeField = field == null ? "" : field;
-        writer.write(new String[]{sKey, tKey, type, safeField, safeS, safeT});
+
+        writer.write(new String[]{
+                sKey, tKey, type, safeField, safeS, safeT,
+                sCd == null ? "" : sCd,
+                tCd == null ? "" : tCd,
+                sMd == null ? "" : sMd,
+                tMd == null ? "" : tMd
+        });
     }
 }

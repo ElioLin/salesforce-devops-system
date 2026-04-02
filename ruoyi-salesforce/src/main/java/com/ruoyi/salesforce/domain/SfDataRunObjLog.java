@@ -47,4 +47,9 @@ public class SfDataRunObjLog implements Serializable {
      * 租户归属ID (SaaS公司隔离)
      */
     private String tenantId;
+
+    /**
+     * 截止后安全忽略的变更数
+     */
+    private Integer ignoredPostCutoffCount;
 }

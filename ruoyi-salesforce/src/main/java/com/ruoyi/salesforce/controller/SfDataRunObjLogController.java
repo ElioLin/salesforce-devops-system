@@ -50,16 +50,20 @@ public class SfDataRunObjLogController extends BaseController {
      * 在线预览单个对象的比对结果 (分页)
      */
     @GetMapping("/previewObj/{objLogId}")
-    public AjaxResult previewObjResult(
-            @PathVariable Long objLogId,
-            @RequestParam(defaultValue = "1") int pageNum,
-            @RequestParam(defaultValue = "50") int pageSize,
-            @RequestParam(required = false) String diffType,
-            @RequestParam(required = false) String fieldName) {
+    public AjaxResult preview(@PathVariable Long objLogId,
+                              @RequestParam(defaultValue = "1") int pageNum,
+                              @RequestParam(defaultValue = "50") int pageSize,
+                              @RequestParam(required = false) String diffType,
+                              @RequestParam(required = false) String fieldName,
+                              @RequestParam(required = false, defaultValue = "false") Boolean excludePostCutoff) {
 
-        // 【修改】调用 Service 的预览方法
-        Map<String, Object> result = objLogService.previewCsvData(objLogId, pageNum, pageSize, diffType, fieldName);
-        return AjaxResult.success(result);
+        try {
+            // 【修改】：将 excludePostCutoff 传入底层方法
+            Map<String, Object> result = objLogService.previewCsvData(objLogId, pageNum, pageSize, diffType, fieldName, excludePostCutoff);
+            return AjaxResult.success(result);
+        } catch (Exception e) {
+            return AjaxResult.error(e.getMessage());
+        }
     }
 
     /**

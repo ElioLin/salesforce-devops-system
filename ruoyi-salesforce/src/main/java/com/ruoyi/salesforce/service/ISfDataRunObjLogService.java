@@ -27,7 +27,7 @@ public interface ISfDataRunObjLogService {
      * @param fieldName 字段名过滤
      * @return 分页数据 Map(total, rows)
      */
-    Map<String, Object> previewCsvData(Long objLogId, int pageNum, int pageSize, String diffType, String fieldName);
+    Map<String, Object> previewCsvData(Long objLogId, int pageNum, int pageSize, String diffType, String fieldName, Boolean excludePostCutoff);
 
     /**
      * 获取任务监控聚合数据 (包含任务名、对象列表、中文Label)

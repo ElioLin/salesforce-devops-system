@@ -103,19 +103,31 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="结果统计 (Source / Target => Diff)" width="320" align="center">
+        <el-table-column label="结果统计" min-width="160" align="center">
           <template slot-scope="scope">
-            <div v-if="scope.row.status === 'FINISHED' || scope.row.status === 'PARTIAL_SUCCESS'" class="stats-bar">
-              <span class="stat-num source">{{ scope.row.totalSource !== undefined ? scope.row.totalSource : 0 }}</span>
-              <span class="divider">/</span>
-              <span class="stat-num target">{{ scope.row.totalTarget !== undefined ? scope.row.totalTarget : 0 }}</span>
-              <span class="arrow">➞</span>
-              <el-badge :value="scope.row.diffCount !== undefined ? scope.row.diffCount : 0" :max="9999"
-                :type="scope.row.diffCount > 0 ? 'danger' : 'success'" class="diff-badge">
-                <span class="stat-num diff">差异</span>
-              </el-badge>
+            <div v-if="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING'">-</div>
+
+            <div v-else-if="scope.row.status === 'FINISHED' || scope.row.status === 'FAILED'">
+              <div class="stats-bar">
+                <span class="stat-num source" title="源环境数据量">{{ scope.row.totalSource || 0 }}</span>
+                <span class="divider">/</span>
+                <span class="stat-num target" title="目标环境数据量">{{ scope.row.totalTarget || 0 }}</span>
+                <span class="arrow"><i class="el-icon-right"></i></span>
+                <el-badge :value="scope.row.diffCount || 0" :type="scope.row.diffCount > 0 ? 'danger' : 'success'"
+                  class="diff-badge">
+                </el-badge>
+              </div>
+
+              <div v-if="scope.row.ignoredPostCutoffCount > 0" style="margin-top: 4px;">
+                <el-tooltip effect="dark" content="单据在任务截断时间后被业务人员修改过，已安全忽略" placement="top">
+                  <el-tag type="info" size="mini" effect="plain" style="border-style: dashed;">
+                    后置变更: {{ scope.row.ignoredPostCutoffCount }}
+                  </el-tag>
+                </el-tooltip>
+              </div>
             </div>
-            <span v-else style="color: #C0C4CC">-</span>
+
+            <div v-else>-</div>
           </template>
         </el-table-column>
 
@@ -595,10 +607,16 @@ export default {
     },
 
     handlePreview(row) {
-      if (row.diffCount === 0) {
-        this.$message.info("恭喜，该对象没有发现任何差异数据！");
+      // 【核心修复】：如果有真实差异，或者有被忽略的后置变更，都允许打开预览面板！
+      const diffs = row.diffCount || 0;
+      const ignored = row.ignoredPostCutoffCount || 0;
+
+      if (diffs === 0 && ignored === 0) {
+        this.$message.success("恭喜，该对象数据完全一致，且无后置变更！");
         return;
       }
+
+      // 打开预览组件，传入参数
       this.$refs.previewRef.init(row.id, row.objectName);
     },
 
