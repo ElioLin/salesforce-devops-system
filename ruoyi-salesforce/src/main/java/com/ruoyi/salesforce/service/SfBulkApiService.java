@@ -165,7 +165,7 @@ public class SfBulkApiService {
                         HttpResponse response = HttpRequest.get(url)
                                 .header("Authorization", "Bearer " + org.getAccessToken())
                                 .header("Accept", "text/csv")
-                                .timeout(120000) // 放宽到 2 分钟超时，应对大文件传输
+                                .timeout(30 * 60 * 1000)
                                 .executeAsync();
 
                         if(response.getStatus() == 401) {

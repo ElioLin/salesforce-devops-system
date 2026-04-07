@@ -129,6 +129,8 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
                     item.put("sourceLastModifiedDate", row.get(8));
                     item.put("targetLastModifiedDate", row.get(9));
                 }
+                item.put("sourceId", row.get(10));
+                item.put("targetId", row.get(11));
                 filteredList.add(item);
             }
         }

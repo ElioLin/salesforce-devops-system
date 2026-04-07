@@ -2,16 +2,28 @@
     <div class="field-config-panel" style="height: 100%; display: flex; flex-direction: column;">
         <div class="panel-header">
             <span class="panel-title">{{ objectLabel }} - 字段策略</span>
-            <div class="header-actions" style="display: flex; align-items: center;">
-                <el-button type="warning" plain size="small" icon="el-icon-magic-stick" @click="autoMapReferences" style="margin-right: 15px">
-                    一键智能映射关联字段
+            <div class="header-actions" style="display: flex; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <el-button type="warning" plain size="small" icon="el-icon-magic-stick" @click="autoMapReferences">
+                    一键映射
                 </el-button>
-                <el-select v-model="filterType" placeholder="筛选字段类型" size="small" clearable
-                    style="width: 140px; margin-right: 10px">
+
+                <el-select v-model="filterCategory" placeholder="字段来源" size="small" clearable style="width: 110px">
+                    <el-option label="标准字段" value="standard" />
+                    <el-option label="自定义字段" value="custom" />
+                </el-select>
+
+                <el-select v-model="filterStatus" placeholder="配置状态" size="small" clearable style="width: 110px">
+                    <el-option label="已排除" value="excluded" />
+                    <el-option label="未排除" value="included" />
+                </el-select>
+
+                <el-select v-model="filterType" placeholder="字段类型" size="small" clearable style="width: 120px">
+                    <el-option label="formula" value="formula" style="color: #E6A23C; font-weight: bold;" />
                     <el-option v-for="type in fieldTypes" :key="type" :label="type" :value="type" />
                 </el-select>
-                <el-input v-model="filterKeyword" placeholder="搜索字段..." size="small" prefix-icon="el-icon-search" clearable
-                    style="width: 180px" />
+
+                <el-input v-model="filterKeyword" placeholder="搜索字段..." size="small" prefix-icon="el-icon-search"
+                    clearable style="width: 180px" />
             </div>
         </div>
 
@@ -29,15 +41,50 @@
 
         <el-table :data="filteredFields" height="calc(100vh - 250px)" border size="small" stripe
             v-loading="loadingFields" style="width: 100%; flex: 1;">
-            <el-table-column prop="name" label="字段API名" min-width="180" show-overflow-tooltip />
-            <el-table-column prop="label" label="标签" min-width="150" show-overflow-tooltip />
-            <el-table-column prop="type" label="类型" width="100" align="center">
+            <el-table-column prop="name" label="字段API名" min-width="180" show-overflow-tooltip>
                 <template slot-scope="scope">
-                    <el-tag size="mini" :type="getFieldTypeTag(scope.row.type)">{{ scope.row.type }}</el-tag>
+                    <i v-if="scope.row.custom" class="el-icon-setting" style="color: #409EFF; margin-right: 4px;"
+                        title="自定义字段"></i>
+                    <i v-else class="el-icon-box" style="color: #909399; margin-right: 4px;" title="标准字段"></i>
+                    {{ scope.row.name }}
                 </template>
             </el-table-column>
 
-            <el-table-column label="映射策略" min-width="250">
+            <el-table-column prop="label" label="标签" min-width="150" show-overflow-tooltip />
+
+            <el-table-column prop="type" label="类型" width="120" align="center">
+                <template slot-scope="scope">
+                    <el-tooltip v-if="scope.row.calculated" content="该字段为公式字段" placement="top">
+                        <el-tag size="mini" type="warning" effect="dark">
+                            <i class="el-icon-s-operation"></i> formula({{ scope.row.type }})
+                        </el-tag>
+                    </el-tooltip>
+                    <el-tag v-else size="mini" :type="getFieldTypeTag(scope.row.type)">{{ scope.row.type }}</el-tag>
+                </template>
+            </el-table-column>
+
+            <el-table-column min-width="250">
+                <template slot="header" slot-scope="scope">
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <span>底层公式逻辑</span>
+                        <el-tooltip content="开启后公式将自动换行完整显示，关闭则单行截断" placement="top">
+                            <el-switch v-model="formulaWrap" size="mini" active-color="#13ce66"
+                                inactive-color="#dcdfe6" />
+                        </el-tooltip>
+                    </div>
+                </template>
+                <template slot-scope="scope">
+                    <div v-if="scope.row.calculated" class="formula-container" :class="{ 'is-wrapped': formulaWrap }">
+                        <div class="formula-text">{{ scope.row.calculatedFormula || '隐含公式' }}</div>
+                        <el-button type="text" icon="el-icon-copy-document" size="mini" class="copy-btn"
+                            @click="copyText(scope.row.calculatedFormula)" title="复制完整公式">
+                        </el-button>
+                    </div>
+                    <span v-else style="color: #C0C4CC;">-</span>
+                </template>
+            </el-table-column>
+
+            <el-table-column label="映射策略" min-width="200">
                 <template slot-scope="scope">
                     <div v-if="isExcluded(scope.row.name)" class="status-excluded">
                         <i class="el-icon-circle-close"></i> 已排除
@@ -63,12 +110,11 @@
                 </template>
             </el-table-column>
         </el-table>
-
         <el-dialog title="关联字段映射配置" :visible.sync="mappingDialog.open" width="650px" append-to-body>
             <div v-loading="mappingDialog.loading">
                 <el-alert type="info" :closable="false" show-icon style="margin-bottom: 20px">
                     <div slot="title"><b>{{ mappingDialog.fieldName }}</b> (关联对象: <b>{{ mappingDialog.referenceTo
-                            }}</b>)</div>
+                    }}</b>)</div>
                     <div>请选择两端环境用于关联比对的唯一标识字段。</div>
                 </el-alert>
                 <el-form label-width="120px" size="small">
@@ -112,7 +158,10 @@ export default {
             loadingFields: false,
             filterType: '',
             filterKeyword: '',
+            filterCategory: '',
+            filterStatus: '',
             fieldTypes: [],
+            formulaWrap: false,
             mappingDialog: { open: false, loading: false, fieldName: '', relationshipName: '', referenceTo: '', sourceField: '', targetField: '', relFields: [] }
         };
     },
@@ -120,17 +169,38 @@ export default {
         filteredFields() {
             if (!this.currentFields) return [];
             return this.currentFields.filter(f => {
-                // 将关键字统一转为小写，并处理空值情况
+                // 1. 关键字匹配
                 const keyword = this.filterKeyword ? this.filterKeyword.toLowerCase() : '';
-                
-                // 同时匹配字段API名 (name) 和 字段标签 (label)
-                const matchKeyword = !keyword || 
-                    (f.name && f.name.toLowerCase().includes(keyword)) || 
+                const matchKeyword = !keyword ||
+                    (f.name && f.name.toLowerCase().includes(keyword)) ||
                     (f.label && f.label.toLowerCase().includes(keyword));
-                    
-                const matchType = !this.filterType || f.type === this.filterType;
-                
-                return matchKeyword && matchType;
+
+                // 2. 字段类型匹配 (兼容人工注入的 'formula' 类型过滤)
+                let matchType = true;
+                if (this.filterType) {
+                    if (this.filterType === 'formula') {
+                        matchType = f.calculated === true; // 如果选了公式，只展示 calculated 的
+                    } else {
+                        matchType = f.type === this.filterType;
+                    }
+                }
+
+                // 3. 【新增】字段类别匹配 (标准/自定义)
+                let matchCategory = true;
+                if (this.filterCategory) {
+                    if (this.filterCategory === 'custom') matchCategory = f.custom === true;
+                    if (this.filterCategory === 'standard') matchCategory = f.custom === false;
+                }
+
+                // 4. 【新增】配置状态匹配 (排除/映射/直连)
+                let matchStatus = true;
+                if (this.filterStatus) {
+                    const isExc = this.isExcluded(f.name);
+                    if (this.filterStatus === 'excluded') matchStatus = isExc;
+                    if (this.filterStatus === 'included') matchStatus = !isExc;
+                }
+
+                return matchKeyword && matchType && matchCategory && matchStatus;
             });
         }
     },
@@ -156,6 +226,24 @@ export default {
                 this.loadingFields = false;
                 this.$modal.msgError("获取字段失败: " + e.message);
             });
+        },
+        copyText(text) {
+            if (!text) return;
+            const input = document.createElement('textarea');
+            input.value = text;
+            // 使其不在屏幕上显示
+            input.style.position = 'fixed';
+            input.style.opacity = '0';
+            document.body.appendChild(input);
+            input.select();
+            try {
+                document.execCommand('copy');
+                this.$message.success('公式已复制到剪贴板！');
+            } catch (e) {
+                this.$message.error('复制失败，请手动选择复制。');
+            } finally {
+                document.body.removeChild(input);
+            }
         },
         getFieldTypeTag(type) {
             if (type === 'reference') return 'warning';
@@ -215,7 +303,7 @@ export default {
         //一键智能映射关联字段
         autoMapReferences() {
             if (!this.currentFields || this.currentFields.length === 0) return;
-            
+
             const map = JSON.parse(this.config.mappingConfig || '{}');
             const targetKey = this.config.targetKeyField || 'old_sfdc_id__c';
             let mappedCount = 0;
@@ -236,7 +324,7 @@ export default {
                 // 并且该字段当前没有被手动排除，也没有被映射过
                 if (f.type === 'reference' && f.relationshipName && f.referenceTo && f.referenceTo.length > 0) {
                     if (!map[f.name] && !this.isExcluded(f.name)) {
-                        
+
                         const refObj = f.referenceTo[0]; // 获取主关联对象名
                         let sourceField = 'Id';
                         let targetField = targetKey;
@@ -244,7 +332,7 @@ export default {
                         // ==========================================
                         // 【核心智能路由逻辑】
                         // ==========================================
-                        
+
                         // 1. 处理特殊的多态字段 (OwnerId 可能是 User 也可能是 Group)
                         // SOQL 中两者共有的、且能用于比对的最安全字段是 Name
                         if (f.name === 'OwnerId') {
@@ -267,10 +355,10 @@ export default {
                         }
 
                         // 生成最终的双端 JSON 路径
-                        map[f.name] = { 
-                            type: 'REFERENCE', 
-                            sourcePath: `${f.relationshipName}.${sourceField}`, 
-                            targetPath: `${f.relationshipName}.${targetField}` 
+                        map[f.name] = {
+                            type: 'REFERENCE',
+                            sourcePath: `${f.relationshipName}.${sourceField}`,
+                            targetPath: `${f.relationshipName}.${targetField}`
                         };
                         mappedCount++;
                     }
@@ -341,5 +429,39 @@ export default {
 
 .btn-recover {
     color: #67C23A;
+}
+
+.formula-container {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    width: 100%;
+}
+
+.formula-text {
+    font-family: Consolas, Menlo, monospace;
+    color: #E6A23C;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    margin-right: 8px;
+    line-height: 1.5;
+}
+
+/* 当开启换行时的样式 */
+.formula-container.is-wrapped .formula-text {
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.copy-btn {
+    padding: 0;
+    font-size: 14px;
+    color: #909399;
+}
+
+.copy-btn:hover {
+    color: #409EFF;
 }
 </style>

@@ -114,6 +114,11 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
                     map.put("label", f.getString("label"));
                     map.put("type", f.getString("type"));
 
+                    // 【提取自定义标识与公式属性】
+                    map.put("custom", f.getBooleanValue("custom")); // 是否是自定义字段
+                    map.put("calculated", f.getBooleanValue("calculated")); // 是否是公式字段
+                    map.put("calculatedFormula", f.getString("calculatedFormula")); // 具体的公式逻辑内容
+
                     // 关联关系
                     map.put("relationshipName", f.getString("relationshipName"));
                     JSONArray referenceTo = f.getJSONArray("referenceTo");

@@ -299,11 +299,13 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
 
             // 2. 依次等待云端处理完成并获取行数
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "等待云端打包源数据...", 20);
-            waitForJob(job.getSourceOrgId(), srcJobId, checkRunning);
+            // 【优化】：将 jobId, objLogId 和 环境名称 传给 waitForJob
+            waitForJob(job.getSourceOrgId(), srcJobId, job.getId(), objLog.getId(), "源环境", checkRunning,25);
             int srcRows = bulkApiService.getJobRecordCount(job.getSourceOrgId(), srcJobId);
 
             publishProgress(job.getId(), objLog.getId(), "RUNNING", "等待云端打包目标数据...", 30);
-            waitForJob(job.getTargetOrgId(), tgtJobId, checkRunning);
+            // 【优化】：将 jobId, objLogId 和 环境名称 传给 waitForJob
+            waitForJob(job.getTargetOrgId(), tgtJobId, job.getId(), objLog.getId(), "目标环境", checkRunning, 35);
             int tgtRows = bulkApiService.getJobRecordCount(job.getTargetOrgId(), tgtJobId);
 
             // 3. 依次拉取到本地硬盘
@@ -406,6 +408,8 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         String effectiveKeyField = StringUtils.isEmpty(keyField) ? "Id" : keyField;
         queryFields.add(effectiveKeyField);
 
+        queryFields.add("Id");
+
         for(Map<String, Object> field : fieldsMeta) {
             String apiName = (String) field.get("name");
             String type = (String) field.get("type");
@@ -417,16 +421,36 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             if("LastModifiedDate".equalsIgnoreCase(apiName)) hasLastModifiedDate = true;
 
             if(excludedSet.contains(apiName)) continue;
-            if("base64".equalsIgnoreCase(type) || "address".equalsIgnoreCase(type)) continue;
+
+            // 【举一反三 1：新增 location 类型复合字段的排除】
+            // Salesforce 的 address 和 location 属于复合字段，直接 SELECT 会引发 MALFORMED_QUERY 异常
+            if("base64".equalsIgnoreCase(type) || "address".equalsIgnoreCase(type) || "location".equalsIgnoreCase(type)) continue;
 
             if("reference".equalsIgnoreCase(type) && relationMap.containsKey(apiName)) {
                 JSONObject mappingObj = relationMap.get(apiName);
-                // 只有当“不是源环境（即目标环境）”并且配置了 targetPath 时，才使用 __r 的映射字段
-                if(!isSource && mappingObj != null && mappingObj.containsKey("targetPath")) {
-                    String targetPath = mappingObj.getString("targetPath");
-                    queryFields.add(targetPath);
+                if(mappingObj != null) {
+                    // 【核心修复 & 举一反三 2：增加强大的 SOQL 关联路径容错与降级机制】
+                    if(isSource && mappingObj.containsKey("sourcePath")) {
+                        String sourcePath = mappingObj.getString("sourcePath");
+                        // 拦截前端传来的 null.Id 或其他空路径
+                        if(StringUtils.isNotEmpty(sourcePath) && !sourcePath.startsWith("null.") && !sourcePath.contains(".null")) {
+                            queryFields.add(sourcePath);
+                        } else {
+                            log.warn("检测到异常的 Source 关联路径 [{}] (字段API:{})，已自动降级回退为查基础字段", sourcePath, apiName);
+                            queryFields.add(apiName); // 兜底降级：直接查该字段本身的 ID 值
+                        }
+                    } else if(!isSource && mappingObj.containsKey("targetPath")) {
+                        String targetPath = mappingObj.getString("targetPath");
+                        if(StringUtils.isNotEmpty(targetPath) && !targetPath.startsWith("null.") && !targetPath.contains(".null")) {
+                            queryFields.add(targetPath);
+                        } else {
+                            log.warn("检测到异常的 Target 关联路径 [{}] (字段API:{})，已自动降级回退为查基础字段", targetPath, apiName);
+                            queryFields.add(apiName); // 兜底降级
+                        }
+                    } else {
+                        queryFields.add(apiName); // 兜底降级
+                    }
                 } else {
-                    // 如果是源环境，或者没有配 targetPath，老老实实查原本的 API Name（例如 OA_Owner__c）
                     queryFields.add(apiName);
                 }
             } else {
@@ -508,30 +532,55 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     }
 
     /**
-     * 等待 Bulk Job 完成 (详细实现)
+     * 等待 Bulk Job 完成 (智能指数退避轮询版)
+     * 完美解决大对象超时及 API 限制消耗问题
      */
-    private void waitForJob(Long orgId, String jobId, java.util.function.BooleanSupplier checkRunning) throws InterruptedException {
-        // 轮询 180 次，每次 2 秒，共 6 分钟
-        for(int i = 0; i < 180; i++) {
-            if(!checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
-            String state = bulkApiService.checkJobStatus(orgId, jobId);
+    private void waitForJob(Long orgId, String sfBulkJobId, Long jobId, Long objLogId, String sysName, java.util.function.BooleanSupplier checkRunning, Integer percent) throws InterruptedException {
+        long startTime = System.currentTimeMillis();
+        // 【优化1：放大超时阈值】对于千万级数据，将超时硬限制提升至 2 小时
+        long timeoutMillis = 2 * 60 * 60 * 1000L;
+
+        // 【优化2：指数退避参数】
+        long currentInterval = 3000L; // 初始轮询间隔：3 秒 (保证小表极速响应)
+        long maxInterval = 30000L;    // 最大轮询间隔：30 秒 (控制 API 消耗)
+
+        while (System.currentTimeMillis() - startTime < timeoutMillis) {
+
+            // 响应前端中断信号
+            if (!checkRunning.getAsBoolean()) throw new RuntimeException("ABORTED_BY_USER");
+
+            // 调取 Salesforce 接口查询当前状态
+            String state = bulkApiService.checkJobStatus(orgId, sfBulkJobId);
 
             // 成功
-            if("JobComplete".equals(state)) {
+            if ("JobComplete".equals(state)) {
                 return;
             }
 
             // 失败或终止
-            if("Failed".equals(state) || "Aborted".equals(state)) {
-                String error = bulkApiService.getErrorMessage(orgId, jobId);
+            if ("Failed".equals(state) || "Aborted".equals(state)) {
+                String error = bulkApiService.getErrorMessage(orgId, sfBulkJobId);
                 throw new RuntimeException("Bulk Job Error: " + error);
             }
 
-            // 等待下一次轮询
-            Thread.sleep(2000);
+            // 【优化3：实时推送状态给前端】保持 WebSocket 长连接存活，并给用户直观反馈
+            long elapsedSeconds = (System.currentTimeMillis() - startTime) / 1000;
+            publishProgress(jobId, objLogId, "RUNNING", sysName + "数据云端拼命打包中(已耗时 " + elapsedSeconds + " 秒)...", percent);
+
+            // 休眠等待
+            Thread.sleep(currentInterval);
+
+            // 【优化4：核心指数退避算法】下次等待时间乘以 1.5 倍，最高不超过 30 秒
+            if (currentInterval < maxInterval) {
+                currentInterval = (long) (currentInterval * 1.5);
+                if (currentInterval > maxInterval) {
+                    currentInterval = maxInterval;
+                }
+            }
         }
+
         // 超时抛出异常
-        throw new RuntimeException("Bulk Job Timeout (6 min limit)");
+        throw new RuntimeException("Bulk Job Timeout (云端打包耗时超过 2 小时限制)");
     }
 
     private void publishProgress(Long jobId, Long objLogId, String status, String msg, int percent) {
@@ -560,7 +609,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             json.put("totalSource", stats.getTotalSource());
             json.put("totalTarget", stats.getTotalTarget());
             json.put("diffCount", stats.getDiffCount());
-            json.put("ignoredPostCutoffCount", 0);
+            json.put("ignoredPostCutoffCount", stats.getIgnoredPostCutoffCount());
         }
 
         DeployWebSocketServer.sendMessage("reconcile_" + jobId, json.toJSONString());

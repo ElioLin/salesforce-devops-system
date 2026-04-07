@@ -103,7 +103,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="结果统计" min-width="160" align="center">
+        <el-table-column label="结果统计(Source /Target => Diff)" min-width="160" align="center">
           <template slot-scope="scope">
             <div v-if="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING'">-</div>
 
@@ -554,6 +554,7 @@ export default {
               target.totalSource = msg.totalSource;
               target.totalTarget = msg.totalTarget;
               target.diffCount = msg.diffCount;
+              target.ignoredPostCutoffCount = msg.ignoredPostCutoffCount || 0;
             }
 
             this.$set(this.objList, index, target);
@@ -605,7 +606,6 @@ export default {
       if (status === 'FAILED') return 'exception';
       return '';
     },
-
     handlePreview(row) {
       // 【核心修复】：如果有真实差异，或者有被忽略的后置变更，都允许打开预览面板！
       const diffs = row.diffCount || 0;
@@ -616,8 +616,26 @@ export default {
         return;
       }
 
-      // 打开预览组件，传入参数
-      this.$refs.previewRef.init(row.id, row.objectName);
+      // ==========================================
+      // 【新增】：根据 JobMeta 中的 orgId，从 orgList 中匹配并提取真实的实例域名
+      // ==========================================
+      const sourceOrg = this.orgList.find(item => item.id === this.jobMeta.sourceOrgId);
+      const targetOrg = this.orgList.find(item => item.id === this.jobMeta.targetOrgId);
+
+      const sourceDomain = sourceOrg ? sourceOrg.instanceUrl : '';
+      const targetDomain = targetOrg ? targetOrg.instanceUrl : '';
+
+      // 打开预览组件，将环境的真实 instanceUrl 作为参数传递进去
+      // this.$refs.previewRef.init(row.id, row.objectName, sourceDomain, targetDomain);
+      this.$refs.previewRef.init(
+        row.id,
+        row.objectName,
+        sourceDomain,
+        targetDomain,
+        this.jobId,                // 传入 jobId 以便查配置
+        this.jobMeta.sourceOrgId,  // 传入源组织 ID 用于字段树渲染
+        row.objectLabel            // 传入中文标签用于 UI 显示
+      );
     },
 
     // 下载结果
