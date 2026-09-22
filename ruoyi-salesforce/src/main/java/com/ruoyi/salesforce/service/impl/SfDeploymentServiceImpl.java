@@ -1536,39 +1536,28 @@ public class SfDeploymentServiceImpl extends ServiceImpl<SfDeploymentMapper, SfD
         return result;
     }
 
-    private boolean isTextFile(String name) {
-        if(StringUtils.isEmpty(name)) return false;
-        String n = name.toLowerCase();
+    private boolean isTextFile(String fileName) {
+        if (fileName == null) return false;
+        String name = fileName.toLowerCase();
 
+        // 黄金法则：所有以 -meta.xml 结尾的文件必是文本 (涵盖了几乎所有元数据描述文件)
+        if (name.endsWith("-meta.xml")) return true;
+
+        String[] textExtensions = {
+                ".xml", ".cls", ".trigger", ".page", ".component", ".resource",
+                ".js", ".css", ".html", ".object", ".layout", ".labels",
+                ".workflow", ".profile", ".permissionset", ".md", ".flow",
+                ".flexipage", ".app", ".tab", ".site", ".sharingrules",
+                ".permissionsetgroup", ".report", ".dashboard", ".email",
+                ".group", ".queue", ".role", ".quickaction", ".namedcredential",
+                ".connectedapp", ".settings", ".aura", ".design", ".svg"
+        };
+        for (String ext : textExtensions) {
+            if (name.endsWith(ext)) return true;
+        }
         // 1. 核心修复：添加 .flexipage
         // 2. 扩展支持：添加 .tab (CustomTab), .app (CustomApp), .quickAction, .remoteSite 等
-        return n.endsWith(".xml")
-                || n.endsWith(".cls")
-                || n.endsWith(".trigger")
-                || n.endsWith(".page")       // Visualforce Page
-                || n.endsWith(".component")  // Visualforce Component
-                || n.endsWith(".flexipage")  // 【修复点】Lightning Page
-                || n.endsWith(".object")
-                || n.endsWith(".field")
-                || n.endsWith(".layout")
-                || n.endsWith(".profile")
-                || n.endsWith(".permissionset")
-                || n.endsWith(".tab")        // 【建议补充】Custom Tab
-                || n.endsWith(".app")        // 【建议补充】Custom App
-                || n.endsWith(".quickaction")// 【建议补充】Quick Action
-                || n.endsWith(".remotesite") // 【建议补充】Remote Site Setting
-                || n.endsWith(".group")      // 【建议补充】Public Group
-                || n.endsWith(".queue")      // 【建议补充】Queue
-                || n.endsWith(".role")       // 【建议补充】Role
-                || n.endsWith(".js")
-                || n.endsWith(".css")
-                || n.endsWith(".html")
-                || n.endsWith(".txt")
-                || n.endsWith(".json")
-                || n.endsWith(".labels")
-                || n.endsWith(".workflow")
-                || n.endsWith(".flow")
-                || n.endsWith(".svg");       // SVG 虽然是图片，但本质是 XML 文本，也可以预览
+        return false;       // SVG 虽然是图片，但本质是 XML 文本，也可以预览
     }
 
     private byte[] readStream(InputStream in) throws IOException {

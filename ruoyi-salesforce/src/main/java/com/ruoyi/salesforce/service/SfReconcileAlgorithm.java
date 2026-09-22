@@ -59,7 +59,7 @@ public class SfReconcileAlgorithm {
         // ==========================================
         try {
             csvConfig.disableComment();
-        } catch (NoSuchMethodError e) {
+        } catch(NoSuchMethodError e) {
             // 兼容性兜底：如果项目使用的 Hutool 版本较老没有 disableComment() 方法，则置空
             csvConfig.setCommentCharacter(null);
         }
@@ -107,14 +107,42 @@ public class SfReconcileAlgorithm {
                     int srcKeyIdx = findColIndex(srcHeader, srcKeyField);
                     int tgtKeyIdx = findColIndex(tgtHeader, tgtKeyField);
 
+                    // ======== 【新增 1】：预先提取基础字段 Index ========
                     int srcCdIdx = findColIndex(srcHeader, "CreatedDate");
                     int tgtCdIdx = findColIndex(tgtHeader, "CreatedDate");
                     int srcMdIdx = findColIndex(srcHeader, "LastModifiedDate");
                     int tgtMdIdx = findColIndex(tgtHeader, "LastModifiedDate");
-
                     int srcIdIdx = findColIndex(srcHeader, "Id");
                     int tgtIdIdx = findColIndex(tgtHeader, "Id");
 
+                    // ======== 【新增 2】：仅解析 1 次 Mapping JSON ========
+                    Map<String, JSONObject> relationMap = new HashMap<>();
+                    if(StringUtils.isNotEmpty(config.getMappingConfig())) {
+                        try {
+                            relationMap = com.alibaba.fastjson2.JSON.parseObject(config.getMappingConfig(), new com.alibaba.fastjson2.TypeReference<Map<String, com.alibaba.fastjson2.JSONObject>>() {
+                            });
+                        } catch(Exception e) {
+                            log.warn("解析 MappingConfig 失败", e);
+                        }
+                    }
+
+                    // ======== 【新增 3】：构建 O(1) 性能的列映射与净表头缓存 ========
+                    int fieldCount = srcHeader.size();
+                    int[] targetColMap = new int[fieldCount]; // 缓存每个源字段对应的目标字段 Index
+                    String[] cleanSrcHeaders = new String[fieldCount]; // 缓存干净的字段名，防止每行执行 cleanHeader
+
+                    for(int i = 0; i < fieldCount; i++) {
+                        String colName = cleanHeader(srcHeader.get(i));
+                        cleanSrcHeaders[i] = colName;
+                        // 提前过滤系统字段
+                        if(colName.equalsIgnoreCase("LastModifiedDate") ||
+                                colName.equalsIgnoreCase("Id") ||
+                                colName.equalsIgnoreCase(config.getSourceKeyField())) {
+                            targetColMap[i] = -2; // -2 表示忽略该列比对
+                        } else {
+                            targetColMap[i] = findSmartColIndex(tgtHeader, colName, config.getTargetKeyField(), relationMap);
+                        }
+                    }
                     CsvRow srcRow = srcIter.hasNext() ? srcIter.next() : null;
                     CsvRow tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
 
@@ -158,7 +186,8 @@ public class SfReconcileAlgorithm {
                         if(compare == 0) {
                             stats.setTotalSource(stats.getTotalSource() + 1);
                             stats.setTotalTarget(stats.getTotalTarget() + 1);
-                            boolean hasDiff = compareFields(srcRow, tgtRow, srcHeader, tgtHeader, writer, config, stats, sKey, tKey, dataEndTime, sCd, tCd, sMd, tMd, sId, tId);
+                            // 【修改】：传入 cleanSrcHeaders 和 targetColMap，移除无用的 config 参数 (如果内部不再需要)
+                            boolean hasDiff = compareFields(srcRow, tgtRow, cleanSrcHeaders, targetColMap, writer, stats, sKey, tKey, dataEndTime, sCd, tCd, sMd, tMd, sId, tId);
                             if(hasDiff) stats.setDiffCount(stats.getDiffCount() + 1);
                             srcRow = srcIter.hasNext() ? srcIter.next() : null;
                             tgtRow = tgtIter.hasNext() ? tgtIter.next() : null;
@@ -270,7 +299,7 @@ public class SfReconcileAlgorithm {
                 String[] arr = new String[row.size()];
                 for(int i = 0; i < row.size(); i++) {
                     String val = row.get(i);
-                    if (val != null) {
+                    if(val != null) {
                         // 【终极防御：抹平隐藏换行符】
                         // 拦截 Salesforce 长文本中游离的 \r (Mac回车)。
                         // 强制转为 \n，确保底层 CsvWriter 正常触发双引号包裹机制，防止 CSV 结构在硬盘上崩塌错位！
@@ -310,7 +339,7 @@ public class SfReconcileAlgorithm {
                     String[] arr = new String[row.size()];
                     for(int i = 0; i < row.size(); i++) {
                         String val = row.get(i);
-                        if (val != null) {
+                        if(val != null) {
                             // 再次确保合并写入时换行符的绝对纯净
                             val = val.replace("\r\n", "\n").replace("\r", "\n");
                         }
@@ -362,8 +391,8 @@ public class SfReconcileAlgorithm {
 
         @Override
         public void close() throws Exception {
-            if (this.stream != null) this.stream.close();
-            if (this.isr != null) this.isr.close();
+            if(this.stream != null) this.stream.close();
+            if(this.isr != null) this.isr.close();
         }
     }
 
@@ -409,62 +438,54 @@ public class SfReconcileAlgorithm {
         return id15 + suffix.toString();
     }
 
-    private boolean compareFields(CsvRow src, CsvRow tgt, CsvRow srcHeader, CsvRow tgtHeader, CsvWriter writer, SfDataObjConfig config, ReconcileStats stats, String srcKey, String tgtKey, Date dataEndTime, String sCd, String tCd, String sMd, String tMd, String sId, String tId) {
-        Map<String, JSONObject> relationMap = new HashMap<>();
-        if(StringUtils.isNotEmpty(config.getMappingConfig())) {
-            try {
-                relationMap = com.alibaba.fastjson2.JSON.parseObject(config.getMappingConfig(), new com.alibaba.fastjson2.TypeReference<Map<String, com.alibaba.fastjson2.JSONObject>>() {
-                });
-            } catch(Exception e) {
-                log.warn("解析 MappingConfig 失败", e);
-            }
-        }
+    // 【终极重构版】极速 compareFields：O(1) 寻址 + 日期懒加载
+    private boolean compareFields(CsvRow src, CsvRow tgt, String[] cleanSrcHeaders, int[] targetColMap, CsvWriter writer, ReconcileStats stats, String srcKey, String tgtKey, Date dataEndTime, String sCd, String tCd, String sMd, String tMd, String sId, String tId) {
         boolean hasRealDiff = false;
 
-        // 【新增提取】：获取当前双端行数据的最后修改时间
+        // 【核心优化】：延迟解析 Date。只有当整行数据真发现差异了，才去解析时间，省去 78 万次无用的 Date 格式化开销！
+        boolean lmdParsed = false;
         Date srcLmd = null;
-        Date tgtLmd = null;
-        if(dataEndTime != null) {
-            if(StringUtils.isNotEmpty(sMd)) srcLmd = cn.hutool.core.date.DateUtil.parse(sMd);
-            if(StringUtils.isNotEmpty(tMd)) tgtLmd = cn.hutool.core.date.DateUtil.parse(tMd);
-        }
 
-        for(int sIdx = 0; sIdx < srcHeader.size(); sIdx++) {
-            String colName = cleanHeader(srcHeader.get(sIdx));
-            // 忽略非业务比对字段
-            if(colName.equalsIgnoreCase("LastModifiedDate") ||
-                    colName.equalsIgnoreCase("Id") ||
-                    colName.equalsIgnoreCase(config.getSourceKeyField()))
-                continue;
+        // O(1) 级极速循环
+        for(int sIdx = 0; sIdx < cleanSrcHeaders.length; sIdx++) {
+            int tIdx = targetColMap[sIdx];
+            // tIdx 为 -1 说明目标环境没这个字段；-2 说明是系统忽略字段
+            if(tIdx < 0) continue;
 
-            int tIdx = findSmartColIndex(tgtHeader, colName, config.getTargetKeyField(), relationMap);
-            if(tIdx == -1) continue;
-
+            String colName = cleanSrcHeaders[sIdx];
             String sVal = src.get(sIdx);
             String tVal = tgt.get(tIdx);
 
             if(!isVisuallyEqual(sVal, tVal)) {
+
+                // 发现差异了！按需解析时间
+                if (dataEndTime != null && !lmdParsed) {
+                    if(StringUtils.isNotEmpty(sMd)) {
+                        try {
+                            srcLmd = cn.hutool.core.date.DateUtil.parse(sMd);
+                        } catch (Exception e) {
+                            log.warn("源修改时间解析失败: {}", sMd);
+                        }
+                    }
+                    lmdParsed = true;
+                }
+
                 // 【核心逻辑：移动靶安全判定】
                 boolean isPostCutoff = false;
-                if(dataEndTime != null) {
-                    // 只要有一端的修改时间晚于我们的截断时间，就属于业务后置修改
-                    if(srcLmd != null && srcLmd.after(dataEndTime)) {
-                        isPostCutoff = true;
-                    }
+                if(dataEndTime != null && srcLmd != null && srcLmd.after(dataEndTime)) {
+                    isPostCutoff = true;
                 }
 
                 if(isPostCutoff) {
-                    // 安全忽略，写入特殊类型
                     stats.setIgnoredPostCutoffCount(stats.getIgnoredPostCutoffCount() + 1);
                     writeDiff(writer, srcKey, tgtKey, "POST_CUTOFF_CHANGE", colName, sVal, tVal, stats, sCd, tCd, sMd, tMd, sId, tId);
                 } else {
-                    // 真实的迁移异常
                     hasRealDiff = true;
                     writeDiff(writer, srcKey, tgtKey, "VALUE_DIFF", colName, sVal, tVal, stats, sCd, tCd, sMd, tMd, sId, tId);
                 }
             }
         }
-        return hasRealDiff; // 注意：返回的是否有真实异常，外部收到 true 才会把总 diffCount + 1
+        return hasRealDiff;
     }
 
     private int findSmartColIndex(CsvRow header, String colName, String targetKeyField, Map<String, JSONObject> relationMap) {
@@ -541,7 +562,7 @@ public class SfReconcileAlgorithm {
         // ==========================================
 
         // 4. 数值类型精度抹平 (如 1.0 vs 1.00，及浮点数底层噪音抹平)
-        if(NumberUtil.isNumber(v1) && NumberUtil.isNumber(v2)) {
+        if(isPossibleNumber(v1) && isPossibleNumber(v2) && NumberUtil.isNumber(v1) && NumberUtil.isNumber(v2)) {
             try {
                 BigDecimal b1 = NumberUtil.toBigDecimal(v1);
                 BigDecimal b2 = NumberUtil.toBigDecimal(v2);
@@ -584,7 +605,7 @@ public class SfReconcileAlgorithm {
                 // ==========================================
                 BigDecimal roundedB1 = b1.setScale(5, java.math.RoundingMode.HALF_UP);
                 BigDecimal roundedB2 = b2.setScale(5, java.math.RoundingMode.HALF_UP);
-                if (roundedB1.compareTo(roundedB2) == 0) {
+                if(roundedB1.compareTo(roundedB2) == 0) {
                     return true;
                 }
                 // ==========================================
@@ -597,8 +618,8 @@ public class SfReconcileAlgorithm {
 
         // 5. 15位 / 18位 ID 兼容处理
         if((v1.length() == 15 || v1.length() == 18) && (v2.length() == 15 || v2.length() == 18)) {
-            if(v1.matches("^[a-zA-Z0-9]+$") && v2.matches("^[a-zA-Z0-9]+$")) {
-                // 【修正 Bug】：将 equals 替换为 equalsIgnoreCase，真正实现兼容抹平
+            // 【重构】：用高性能的 isAlphanumeric 替代 matches 正则
+            if(isAlphanumeric(v1) && isAlphanumeric(v2)) {
                 if(v1.substring(0, 15).equalsIgnoreCase(v2.substring(0, 15))) {
                     return true;
                 }
@@ -606,6 +627,29 @@ public class SfReconcileAlgorithm {
         }
 
         return false;
+    }
+
+    /**
+     * 高性能：判断字符串是否全为英文字母和数字 (替代 regex matches)
+     */
+    private static boolean isAlphanumeric(String str) {
+        if (str == null || str.isEmpty()) return false;
+        for (int i = 0; i < str.length(); i++) {
+            char c = str.charAt(i);
+            if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 高性能：粗筛是否可能是数字 (防正则滥用)
+     */
+    private static boolean isPossibleNumber(String str) {
+        if(str == null || str.isEmpty()) return false;
+        char c = str.charAt(0);
+        return Character.isDigit(c) || c == '-' || c == '.';
     }
 
     /**
@@ -619,13 +663,13 @@ public class SfReconcileAlgorithm {
         int p1 = 0;
         int p2 = 0;
 
-        while (p1 < len1 || p2 < len2) {
+        while(p1 < len1 || p2 < len2) {
             // 指针 1：主动跳过 v1 中的游离回车符 \r
-            while (p1 < len1 && v1.charAt(p1) == '\r') {
+            while(p1 < len1 && v1.charAt(p1) == '\r') {
                 p1++;
             }
             // 指针 2：主动跳过 v2 中的游离回车符 \r
-            while (p2 < len2 && v2.charAt(p2) == '\r') {
+            while(p2 < len2 && v2.charAt(p2) == '\r') {
                 p2++;
             }
 
@@ -633,16 +677,16 @@ public class SfReconcileAlgorithm {
             boolean end2 = (p2 >= len2);
 
             // 如果双端同时结束，说明内容完全一致
-            if (end1 && end2) {
+            if(end1 && end2) {
                 return true;
             }
             // 如果一端结束而另一端还有内容（排除 \r 后长度不一），说明有差异
-            if (end1 || end2) {
+            if(end1 || end2) {
                 return false;
             }
 
             // 核心防御：真实的逐字符比对
-            if (v1.charAt(p1) != v2.charAt(p2)) {
+            if(v1.charAt(p1) != v2.charAt(p2)) {
                 return false;
             }
 
@@ -655,27 +699,28 @@ public class SfReconcileAlgorithm {
 
     /**
      * 新增私有辅助方法：多行文本智能标准化
-     * 处理 Salesforce 常见的行尾空格漂移及换行符不一致问题
      */
     private String normalizeMultilineText(String text) {
         if(StringUtils.isEmpty(text)) return text;
+
+        // 【性能优化】：如果根本不包含换行符，直接返回，跳过极其昂贵的 CRLF 正则替换！
+        if(!text.contains("\n") && !text.contains("\r")) {
+            return text;
+        }
+
         // 统一换行符标准
         text = CRLF.matcher(text).replaceAll("\n");
 
-        // 针对包含换行符的长文本，执行逐行清洗
-        if(text.contains("\n")) {
-            // 参数 -1 确保保留末尾的空行，防止极度严格的比对失真
-            String[] lines = text.split("\n", -1);
-            StringBuilder sb = new StringBuilder(text.length());
-            for(int i = 0; i < lines.length; i++) {
-                sb.append(StrUtil.trim(lines[i])); // 清理每一行首尾的脏空格和不可见字符
-                if(i < lines.length - 1) {
-                    sb.append("\n");
-                }
+        // 参数 -1 确保保留末尾的空行，防止极度严格的比对失真
+        String[] lines = text.split("\n", -1);
+        StringBuilder sb = new StringBuilder(text.length());
+        for(int i = 0; i < lines.length; i++) {
+            sb.append(StrUtil.trim(lines[i]));
+            if(i < lines.length - 1) {
+                sb.append("\n");
             }
-            return sb.toString();
         }
-        return text;
+        return sb.toString();
     }
 
     /**

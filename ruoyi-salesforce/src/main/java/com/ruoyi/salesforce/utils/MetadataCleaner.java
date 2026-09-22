@@ -46,7 +46,7 @@ public class MetadataCleaner {
         NODES_TO_REMOVE_IN_OBJECT_PARTIAL.add("profileSearchLayouts");
         NODES_TO_REMOVE_IN_OBJECT_PARTIAL.add("actionOverrides");
         NODES_TO_REMOVE_IN_OBJECT_PARTIAL.add("customHelpPage");
-        NODES_TO_REMOVE_IN_OBJECT_PARTIAL.add("listViews");
+//        NODES_TO_REMOVE_IN_OBJECT_PARTIAL.add("listViews");
     }
 
     public static byte[] clean(byte[] zipBytes, List<SfDeploymentItem> items) {
@@ -61,6 +61,12 @@ public class MetadataCleaner {
         Set<String> validRecordTypes = new HashSet<>();
         Set<String> validApps = new HashSet<>();
 
+        Set<String> validListViews = new HashSet<>();
+        Set<String> validValidationRules = new HashSet<>();
+        Set<String> validWebLinks = new HashSet<>();
+        Set<String> validCompactLayouts = new HashSet<>();
+        Set<String> validFieldSets = new HashSet<>();
+
         if(items != null) {
             for(SfDeploymentItem item : items) {
                 String type = item.getMetadataType();
@@ -74,6 +80,11 @@ public class MetadataCleaner {
                 else if("CustomObject".equals(type)) validObjects.add(name);
                 else if("RecordType".equals(type)) validRecordTypes.add(name);
                 else if("CustomApplication".equals(type)) validApps.add(name);
+                else if("ListView".equals(type)) validListViews.add(name);
+                else if("ValidationRule".equals(type)) validValidationRules.add(name);
+                else if("WebLink".equals(type)) validWebLinks.add(name);
+                else if("CompactLayout".equals(type)) validCompactLayouts.add(name);
+                else if("FieldSet".equals(type)) validFieldSets.add(name);
             }
         }
 
@@ -107,7 +118,9 @@ public class MetadataCleaner {
 
                         log.info("正在处理对象文件: {}, 部署模式: {}", name, isFullDeploy ? "全量(保留配置)" : "增量(执行清洗)");
 
-                        finalContent = cleanObjectFile(content, objectName, validFields, isFullDeploy);
+                        finalContent = cleanObjectFile(content, objectName, validFields, validListViews,
+                                validRecordTypes, validValidationRules, validWebLinks,
+                                validCompactLayouts, validFieldSets, isFullDeploy);
                     } catch(Exception e) {
                         log.error("清洗对象文件失败: " + name, e);
                     }
@@ -145,7 +158,11 @@ public class MetadataCleaner {
         return docToBytes(doc);
     }
 
-    private static byte[] cleanObjectFile(byte[] content, String objectName, Set<String> validFields, boolean isFullDeploy) throws Exception {
+    private static byte[] cleanObjectFile(byte[] content, String objectName,
+                                          Set<String> validFields, Set<String> validListViews,
+                                          Set<String> validRecordTypes, Set<String> validValidationRules,
+                                          Set<String> validWebLinks, Set<String> validCompactLayouts,
+                                          Set<String> validFieldSets, boolean isFullDeploy) throws Exception {
         Document doc = parseXml(content);
         Element root = doc.getDocumentElement();
 
@@ -153,6 +170,14 @@ public class MetadataCleaner {
         if(!isFullDeploy) {
             // 【核心变更】使用 Universal 移除方法
             removeBlacklistNodesUniversal(doc, NODES_TO_REMOVE_IN_OBJECT_PARTIAL);
+
+            filterUnrequestedObjectChildren(root, "listViews", objectName, validListViews);
+            filterUnrequestedObjectChildren(root, "fields", objectName, validFields);
+            filterUnrequestedObjectChildren(root, "recordTypes", objectName, validRecordTypes);
+            filterUnrequestedObjectChildren(root, "validationRules", objectName, validValidationRules);
+            filterUnrequestedObjectChildren(root, "webLinks", objectName, validWebLinks);
+            filterUnrequestedObjectChildren(root, "compactLayouts", objectName, validCompactLayouts);
+            filterUnrequestedObjectChildren(root, "fieldSets", objectName, validFieldSets);
         }
 
         // 2. 清洗 RecordType Picklist
@@ -173,6 +198,38 @@ public class MetadataCleaner {
             }
         }
         return docToBytes(doc);
+    }
+
+    /**
+     * 通用对象子元素精准白名单过滤
+     * 作用：遍历指定的子元素(如 fields, validationRules)，如果它不在前端勾选的白名单中，则从 XML 中安全移除。
+     * 这彻底阻断了 Salesforce API "搭便车"返回冗余数据的问题。
+     */
+    private static void filterUnrequestedObjectChildren(Element root, String tagName, String objectName, Set<String> validNames) {
+        NodeList nodes = root.getElementsByTagName(tagName);
+        List<Node> toRemove = new ArrayList<>();
+
+        for(int i = 0; i < nodes.getLength(); i++) {
+            Element el = (Element) nodes.item(i);
+            String fullName = getTagValue(el, "fullName"); // Salesforce XML内部是短名称，如 PAD_Import
+
+            if (fullName != null) {
+                // 拼接成长名称以匹配数据库中存储的 MemberName (如 Import_Field_Mapping__mdt.PAD_Import)
+                String fullMemberName = objectName + "." + fullName;
+
+                // 如果用户本次部署没有明确勾选这个子元素，就将其判定为冗余数据
+                if (!validNames.contains(fullMemberName)) {
+                    toRemove.add(el);
+                }
+            }
+        }
+
+        // 安全移除所有未选中的冗余节点
+        for(Node n : toRemove) {
+            if(n.getParentNode() != null) {
+                n.getParentNode().removeChild(n);
+            }
+        }
     }
 
     /**

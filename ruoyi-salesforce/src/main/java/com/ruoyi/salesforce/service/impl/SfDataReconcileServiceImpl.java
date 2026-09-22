@@ -255,6 +255,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
      * 单个对象的执行逻辑 (优化版：云端并发提取 + 严格磁盘回收)
      */
     private void executeObjectLog(SfDataJob job, SfDataRunObjLog objLog) {
+        long startTimeMs = System.currentTimeMillis();
         String srcPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_src.csv";
         String tgtPath = "/tmp/sf_reconcile/" + job.getId() + "_" + objLog.getId() + "_tgt.csv";
         String resPath = "/tmp/sf_reconcile/res_" + objLog.getId() + ".csv";
@@ -333,6 +334,8 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
                 // true 表示如果 resFile 已存在则直接覆盖（等价于删除旧的换新的）
                 FileUtil.move(resTempFile, resFile, true);
             }
+            long costTime = (System.currentTimeMillis() - startTimeMs) / 1000;
+            objLog.setCostTime(costTime);
 
             // 5. 保存结果
             objLog.setTotalSource(stats.getTotalSource());
@@ -342,18 +345,20 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
             objLog.setResultFilePath(resPath);
 
             updateObjLogStatus(objLog, "FINISHED", "比对完成", 100);
-            publishProgress(job.getId(), objLog.getId(), "FINISHED", "完成", 100, stats);
+            publishProgress(job.getId(), objLog.getId(), "FINISHED", "完成", 100, stats, costTime);
 
         } catch(Exception e) {
+            long costTime = (System.currentTimeMillis() - startTimeMs) / 1000;
+            objLog.setCostTime(costTime);
             // 异常分流处理
             if("ABORTED_BY_USER".equals(e.getMessage()) || !checkRunning.getAsBoolean()) {
                 log.info("对象 [{}] 被人工强行中止", objLog.getObjectName());
                 updateObjLogStatus(objLog, "ABORTED", "用户手动停止", 0);
-                publishProgress(job.getId(), objLog.getId(), "ABORTED", "已停止", 0);
+                publishProgress(job.getId(), objLog.getId(), "ABORTED", "已停止", 0, null, costTime);
             } else {
                 log.error("对象 [" + objLog.getObjectName() + "] 执行失败", e);
                 updateObjLogStatus(objLog, "FAILED", e.getMessage(), 0);
-                publishProgress(job.getId(), objLog.getId(), "FAILED", "异常: " + e.getMessage(), 0);
+                publishProgress(job.getId(), objLog.getId(), "FAILED", "异常: " + e.getMessage(), 0, null, costTime);
             }
         } finally {
             // 【终极防泄漏 & 回收机制】
@@ -595,7 +600,7 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
     }
 
     // 专供任务完成时，携带精准的统计数据推送到前端
-    private void publishProgress(Long jobId, Long objLogId, String status, String msg, int percent, SfReconcileAlgorithm.ReconcileStats stats) {
+    private void publishProgress(Long jobId, Long objLogId, String status, String msg, int percent, SfReconcileAlgorithm.ReconcileStats stats, Long costTime) {
         JSONObject json = new JSONObject();
         json.put("type", "OBJ_PROGRESS");
         json.put("jobId", jobId);
@@ -603,7 +608,9 @@ public class SfDataReconcileServiceImpl implements ISfDataReconcileService {
         json.put("status", status);
         json.put("message", msg);
         json.put("percent", percent);
-
+        if(costTime != null) {
+            json.put("costTime", costTime);
+        }
         // 将比对结果统计一并打包
         if(stats != null) {
             json.put("totalSource", stats.getTotalSource());

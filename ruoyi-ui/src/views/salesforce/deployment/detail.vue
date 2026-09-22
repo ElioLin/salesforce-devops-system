@@ -131,7 +131,7 @@
                                     <el-option v-for="branch in branchList" :key="branch" :label="branch"
                                         :value="branch">
                                         <i class="el-icon-git-commit" style="color: #909399; margin-right: 5px;"></i> {{
-                                        branch }}
+                                            branch }}
                                     </el-option>
                                 </el-select>
                             </el-form-item>
@@ -413,30 +413,22 @@
                         </div>
 
                         <div style="margin-bottom: 10px; padding: 0 2px;">
-                            <el-input v-model="previewSearchQuery" placeholder="搜索文件..." prefix-icon="el-icon-search"
-                                size="small" clearable>
-                            </el-input>
+                            <el-input v-model="previewSearchQuery" placeholder="搜索文件路径..." prefix-icon="el-icon-search"
+                                size="small" clearable></el-input>
                         </div>
 
-                        <div class="file-list-container">
-                            <ul class="file-ul">
-                                <li class="file-li" :class="{ active: previewDialog.currentFile === 'package.xml' }"
-                                    @click="selectPreviewFile('package.xml')"
-                                    v-if="'package.xml'.includes(previewSearchQuery.toLowerCase()) || !previewSearchQuery">
-                                    <i class="el-icon-s-cooperation" style="color:#E6A23C;"></i> package.xml
-                                </li>
-
-                                <li v-for="(file, index) in filteredPreviewFiles" :key="index" class="file-li"
-                                    :class="{ active: previewDialog.currentFile === file }"
-                                    @click="selectPreviewFile(file)">
-                                    <i class="el-icon-document" style="color:#909399;"></i> {{ file }}
-                                </li>
-
-                                <li v-if="filteredPreviewFiles.length === 0 && previewSearchQuery"
-                                    style="text-align:center; color:#909399; padding: 20px; font-size:12px">
-                                    无匹配文件
-                                </li>
-                            </ul>
+                        <div class="file-list-container custom-tree-scrollbar">
+                            <el-tree ref="previewTree" :data="previewDialog.fileTreeData"
+                                :props="{ label: 'label', children: 'children' }" :filter-node-method="filterNode"
+                                node-key="id" default-expand-all highlight-current @node-click="handleNodeClick"
+                                class="modern-file-tree">
+                                <span class="custom-tree-node" slot-scope="{ node, data }">
+                                    <span>
+                                        <i :class="getFileIcon(data)" :style="{ color: getIconColor(data) }"></i>
+                                        <span class="node-label">{{ node.label }}</span>
+                                    </span>
+                                </span>
+                            </el-tree>
                         </div>
                     </el-col>
 
@@ -566,7 +558,8 @@ export default {
                 fileContents: {},
                 packageXml: '',
                 currentFile: 'package.xml',
-                currentContent: ''
+                currentContent: '',
+                fileTreeData: []
             },
 
             columnFilters: {
@@ -766,6 +759,9 @@ export default {
                 }
             },
             immediate: true
+        },
+        previewSearchQuery(val) {
+            this.$refs.previewTree.filter(val);
         }
     },
     created() {
@@ -782,6 +778,72 @@ export default {
         if (this.statusTimer) clearInterval(this.statusTimer);
     },
     methods: {
+        // 树节点过滤逻辑
+        filterNode(value, data) {
+            if (!value) return true;
+            return data.fullPath.toLowerCase().includes(value.toLowerCase());
+        },
+
+        // 树点击处理
+        handleNodeClick(data) {
+            if (!data.isDir) {
+                this.selectPreviewFile(data.fullPath);
+            }
+        },
+
+        // 动态图标逻辑
+        getFileIcon(data) {
+            if (data.isDir) return 'el-icon-folder-opened';
+            if (data.label === 'package.xml') return 'el-icon-s-cooperation';
+            const ext = data.label.split('.').pop();
+            if (['cls', 'trigger'].includes(ext)) return 'el-icon-document-checked';
+            return 'el-icon-document';
+        },
+
+        getIconColor(data) {
+            if (data.isDir) return '#E6A23C';
+            if (data.label === 'package.xml') return '#F56C6C';
+            return '#909399';
+        },
+
+        /**
+         * 核心算法：将扁平数组转换为树结构
+         */
+        buildFileTree(files) {
+            const root = [];
+            // 确保 package.xml 始终在首位
+            if (files.includes('package.xml')) {
+                root.push({ id: 'package.xml', label: 'package.xml', fullPath: 'package.xml', isDir: false });
+            }
+
+            files.forEach(path => {
+                if (path === 'package.xml') return;
+                const parts = path.split('/');
+                let currentLevel = root;
+                let currentId = '';
+
+                parts.forEach((part, index) => {
+                    currentId = currentId ? `${currentId}/${part}` : part;
+                    const isDir = index < parts.length - 1;
+                    let existingNode = currentLevel.find(node => node.label === part);
+
+                    if (!existingNode) {
+                        existingNode = {
+                            id: currentId,
+                            label: part,
+                            fullPath: path,
+                            isDir: isDir,
+                            children: isDir ? [] : null
+                        };
+                        currentLevel.push(existingNode);
+                    }
+                    if (isDir) {
+                        currentLevel = existingNode.children;
+                    }
+                });
+            });
+            return root;
+        },
         getDictLabelByValue(value) {
             if (!value) return '未知状态';
             const datas = this.dict.type.sys_salesforce_deploy_status;
@@ -1207,15 +1269,13 @@ export default {
                 this.previewDialog.fileContents = data.fileContents || {};
                 this.previewDialog.packageXml = data.packageXml || '';
 
-                let pkgKey = Object.keys(this.previewDialog.fileContents).find(k => k.endsWith('package.xml'));
-                if (pkgKey) {
-                    this.selectPreviewFile(pkgKey);
-                } else if (this.previewDialog.packageXml) {
-                    this.previewDialog.currentContent = this.previewDialog.packageXml;
-                } else if (this.previewDialog.files.length > 0) {
-                    this.selectPreviewFile(this.previewDialog.files[0]);
-                }
+                // 【关键修改】调用转换算法
+                this.previewDialog.fileTreeData = this.buildFileTree(this.previewDialog.files);
 
+                // 默认选中
+                if (this.previewDialog.fileTreeData.length > 0) {
+                    this.selectPreviewFile(this.previewDialog.fileTreeData[0].fullPath);
+                }
                 this.previewDialog.loading = false;
             }).catch(() => {
                 this.previewDialog.loading = false;
@@ -1230,13 +1290,39 @@ export default {
             const content = this.previewDialog.fileContents[fileName];
             this.previewDialog.currentContent = content || '(无法预览或文件为空)';
         },
+
         getLanguage(fileName) {
-            if (!fileName) return 'xml';
-            if (fileName.endsWith('.cls') || fileName.endsWith('.trigger')) return 'java';
-            if (fileName.endsWith('.js')) return 'javascript';
-            if (fileName.endsWith('.css')) return 'css';
-            if (fileName.endsWith('.json')) return 'json';
-            return 'xml';
+            if (!fileName) return 'text';
+            const name = fileName.toLowerCase();
+
+            // 映射为 XML 的类型 (Salesforce 绝大多数元数据底层都是 XML)
+            if (name.endsWith('.xml') ||
+                name.endsWith('.object') ||
+                name.endsWith('.layout') ||
+                name.endsWith('.labels') ||
+                name.endsWith('.workflow') ||
+                name.endsWith('.profile') ||
+                name.endsWith('.permissionset') ||
+                name.endsWith('.md') ||           // Custom Metadata 关键修复
+                name.endsWith('.flow') ||         // Flow
+                name.endsWith('.flexipage') ||    // Lightning Page
+                name.endsWith('.app') ||
+                name.endsWith('.sharingrules') ||
+                name.endsWith('.report') ||
+                name.endsWith('.dashboard') ||
+                name.endsWith('.permissionsetgroup')
+            ) {
+                return 'xml';
+            }
+
+            if (name.endsWith('.js')) return 'javascript';
+            if (name.endsWith('.css')) return 'css';
+            if (name.endsWith('.html')) return 'html';
+
+            // Apex 使用 java 模式高亮效果最佳
+            if (name.endsWith('.cls') || name.endsWith('.trigger')) return 'java';
+
+            return 'text';
         },
         handleBrowserAction(event) {
             if (event.action === 'add') {
@@ -1980,13 +2066,44 @@ export default {
 
 .file-list-container {
     flex: 1;
-    border: 1px solid #dcdfe6;
+    border: 1px solid #ebeef5;
     border-radius: 4px;
-    overflow-y: auto;
-    background: #fff;
-    /* height: calc(100% - 45px); <-- 【删除】 */
-    height: 0;
-    /* 【新增】关键：让 flex 容器内的滚动生效 */
+    background-color: #fff;
+    overflow: auto;
+}
+
+.custom-tree-scrollbar::-webkit-scrollbar {
+    width: 6px;
+}
+
+.custom-tree-scrollbar::-webkit-scrollbar-thumb {
+    background: #e1e1e1;
+    border-radius: 3px;
+}
+
+.modern-file-tree {
+    padding: 10px 5px;
+}
+
+/* 选中节点的样式 */
+::v-deep .el-tree-node.is-current>.el-tree-node__content {
+    background-color: #f0f7ff !important;
+    border-right: 3px solid #409eff;
+}
+
+::v-deep .el-tree-node__content:hover {
+    background-color: #f5f7fa;
+}
+
+.node-label {
+    margin-left: 8px;
+    color: #606266;
+}
+
+.custom-tree-node {
+    font-size: 13px;
+    display: flex;
+    align-items: center;
 }
 
 .file-ul {

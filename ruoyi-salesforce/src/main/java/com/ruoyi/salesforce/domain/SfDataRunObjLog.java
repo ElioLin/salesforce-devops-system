@@ -52,4 +52,9 @@ public class SfDataRunObjLog implements Serializable {
      * 截止后安全忽略的变更数
      */
     private Integer ignoredPostCutoffCount;
+
+    /**
+     * 比对总耗时 (单位：秒)
+     */
+    private Long costTime;
 }

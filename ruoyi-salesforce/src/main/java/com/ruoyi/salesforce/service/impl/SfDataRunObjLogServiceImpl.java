@@ -61,6 +61,7 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
 
     /**
      * 核心功能：读取本地 CSV 文件并进行内存分页和筛选
+     * 【终极优化版：O(1) 空间复杂度，采用流式游标读取，彻底免疫 GB 级大文件导致的 OOM】
      */
     @Override
     public Map<String, Object> previewCsvData(Long objLogId, int pageNum, int pageSize, String diffType, String fieldName, Boolean excludePostCutoff) {
@@ -72,82 +73,85 @@ public class SfDataRunObjLogServiceImpl implements ISfDataRunObjLogService {
 
         String path = objLog.getResultFilePath();
         if(StringUtils.isEmpty(path)) {
-            // 如果还没生成文件，返回空数据
             return emptyResult();
         }
 
         File file = new File(path);
         if(!file.exists()) {
-            // 文件丢失或被清理
             return emptyResult();
         }
 
-        // 2. 使用 Hutool 读取 CSV (强制 UTF-8)
+        // 2. 初始化 CSV 配置
         CsvReadConfig config = CsvReadConfig.defaultConfig();
         config.setFieldSeparator(',');
         config.setTextDelimiter('\"');
 
-        List<CsvRow> allRows;
-        try {
-            allRows = CsvUtil.getReader(config).read(FileUtil.getReader(file, StandardCharsets.UTF_8)).getRows();
+        // 3. 核心流式读取引擎状态位
+        // counters[0] = 表头跳过标志, counters[1] = 符合过滤条件的总行数 (用于给前端计算分页)
+        final int[] counters = {0, 0};
+        List<Map<String, String>> pageResult = new ArrayList<>();
+        int fromIndex = (pageNum - 1) * pageSize;
+        int toIndex = fromIndex + pageSize;
+
+        // ==========================================
+        // 【核心修复：完美兼容各版本 Hutool】
+        // 显式创建 BufferedReader，交由 try-with-resources 自动安全关闭流
+        // ==========================================
+        try(java.io.BufferedReader reader = FileUtil.getReader(file, StandardCharsets.UTF_8)) {
+
+            // 调用你版本中支持的 API：read(Reader reader, boolean close, CsvRowHandler rowHandler)
+            // 第二个参数传 false，因为最外层的 try() 已经保证了安全关闭
+            CsvUtil.getReader(config).read(reader, false, (CsvRow row) -> {
+                // 跳过第一行的表头
+                if(counters[0] == 0) {
+                    counters[0] = 1;
+                    return;
+                }
+
+                // 确保列数足够防越界
+                if(row.size() < 6) return;
+
+                String rowDiffType = row.get(2);
+                String rowFieldName = row.get(3);
+
+                // 筛选条件匹配
+                boolean matchDiff = StringUtils.isEmpty(diffType) || (rowDiffType != null && rowDiffType.equalsIgnoreCase(diffType));
+                boolean matchField = StringUtils.isEmpty(fieldName) || (rowFieldName != null && rowFieldName.toLowerCase().contains(fieldName.toLowerCase()));
+
+                if(matchDiff && matchField) {
+                    // 如果该行命中了当前的页码范围，才将其组装成 Map 加入返回结果集
+                    if(counters[1] >= fromIndex && counters[1] < toIndex) {
+                        Map<String, String> item = new HashMap<>();
+                        item.put("sourceKey", row.get(0));
+                        item.put("targetKey", row.get(1));
+                        item.put("diffType", row.get(2));
+                        item.put("fieldName", row.get(3));
+                        item.put("sourceValue", row.get(4));
+                        item.put("targetValue", row.get(5));
+                        if(row.size() >= 10) {
+                            item.put("sourceCreatedDate", row.get(6));
+                            item.put("targetCreatedDate", row.get(7));
+                            item.put("sourceLastModifiedDate", row.get(8));
+                            item.put("targetLastModifiedDate", row.get(9));
+                        }
+                        if(row.size() >= 12) {
+                            item.put("sourceId", row.get(10));
+                            item.put("targetId", row.get(11));
+                        }
+                        pageResult.add(item);
+                    }
+                    // 只要匹配，总数就累加，最后扔给前端作为 total
+                    counters[1]++;
+                }
+            });
         } catch(Exception e) {
             log.error("读取结果文件失败: {}", path, e);
-            throw new ServiceException("文件读取失败，可能是文件损坏");
-        }
-
-        if(allRows == null || allRows.isEmpty()) {
-            return emptyResult();
-        }
-
-        // 3. 跳过表头 (第一行是 Source_Key, Target_Key...)
-        List<CsvRow> dataRows = allRows.size() > 1 ? allRows.subList(1, allRows.size()) : Collections.emptyList();
-
-        // 4. 内存过滤
-        List<Map<String, String>> filteredList = new ArrayList<>();
-        for(CsvRow row : dataRows) {
-            // 确保列数足够 [0]SrcKey, [1]TgtKey, [2]DiffType, [3]FieldName, [4]SrcVal, [5]TgtVal
-            if(row.size() < 6) continue;
-
-            String rowDiffType = row.get(2);
-            String rowFieldName = row.get(3);
-
-            // 筛选条件匹配
-            boolean matchDiff = StringUtils.isEmpty(diffType) || (rowDiffType != null && rowDiffType.equalsIgnoreCase(diffType));
-            boolean matchField = StringUtils.isEmpty(fieldName) || (rowFieldName != null && rowFieldName.toLowerCase().contains(fieldName.toLowerCase()));
-
-            if(matchDiff && matchField) {
-                Map<String, String> item = new HashMap<>();
-                item.put("sourceKey", row.get(0));
-                item.put("targetKey", row.get(1));
-                item.put("diffType", row.get(2));
-                item.put("fieldName", row.get(3));
-                item.put("sourceValue", row.get(4));
-                item.put("targetValue", row.get(5));
-                if (row.size() >= 10) {
-                    item.put("sourceCreatedDate", row.get(6));
-                    item.put("targetCreatedDate", row.get(7));
-                    item.put("sourceLastModifiedDate", row.get(8));
-                    item.put("targetLastModifiedDate", row.get(9));
-                }
-                item.put("sourceId", row.get(10));
-                item.put("targetId", row.get(11));
-                filteredList.add(item);
-            }
-        }
-
-        // 5. 内存分页
-        int total = filteredList.size();
-        int fromIndex = (pageNum - 1) * pageSize;
-        int toIndex = Math.min(fromIndex + pageSize, total);
-
-        List<Map<String, String>> pageResult = new ArrayList<>();
-        if(fromIndex < total) {
-            pageResult = filteredList.subList(fromIndex, toIndex);
+            throw new ServiceException("文件读取流式处理失败，可能是文件损坏");
         }
 
         Map<String, Object> resultMap = new HashMap<>();
-        resultMap.put("total", total);
-        resultMap.put("rows", pageResult);
+        resultMap.put("total", counters[1]); // 返回精确的过滤后总条数
+        resultMap.put("rows", pageResult);   // 返回且仅返回当前页的 50 或 100 条数据
         return resultMap;
     }
 

@@ -131,6 +131,19 @@
           </template>
         </el-table-column>
 
+        <el-table-column label="总耗时" width="130" align="center">
+          <template slot-scope="scope">
+            <span v-if="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING' || scope.row.costTime == null"
+              style="color:#C0C4CC;">
+              -
+            </span>
+            <el-tag v-else type="info" size="medium" effect="plain"
+              style="font-family: Consolas, monospace; font-weight: bold;">
+              <i class="el-icon-timer"></i> {{ formatCostTime(scope.row.costTime) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
         <el-table-column label="结果操作" width="220" align="center" fixed="right">
           <template slot-scope="scope">
             <el-button size="mini" type="text" icon="el-icon-setting"
@@ -383,6 +396,22 @@ export default {
       }
     },
 
+    /**
+     * 格式化耗时 (将秒转换为 X分Y秒 或 X秒)
+     */
+    formatCostTime(seconds) {
+      if (seconds === null || seconds === undefined) return '-';
+      if (seconds < 60) {
+        // 不足 60 秒，直接显示秒，补全两位数视觉效果更好 (如 05秒)
+        return `${seconds.toString().padStart(2, '0')}秒`;
+      } else {
+        // 超过 60 秒，拆分分钟和秒
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}分 ${s.toString().padStart(2, '0')}秒`;
+      }
+    },
+
     // 打开 Wizard，直接从选对象步骤(1)开始
     handleAddObjects() {
       this.$refs.wizardConfig.init(this.jobId, 1);
@@ -557,6 +586,10 @@ export default {
               target.ignoredPostCutoffCount = msg.ignoredPostCutoffCount || 0;
             }
 
+            if (msg.costTime !== undefined) {
+              target.costTime = msg.costTime;
+            }
+
             this.$set(this.objList, index, target);
 
             if (msg.status === 'FINISHED' || msg.status === 'FAILED') {
@@ -643,7 +676,8 @@ export default {
       const fileName = `reconcile_result_${row.objectName}.csv`;
       const loading = this.$loading({
         lock: true,
-        text: '正在下载结果文件...',
+        // 【优化】：由于大文件下载时间较长，给用户更安心的文案提示
+        text: '正在打包并下载结果文件，超大文件可能需要几分钟，请勿关闭页面...',
         spinner: 'el-icon-loading',
         background: 'rgba(0, 0, 0, 0.7)'
       });
@@ -652,7 +686,7 @@ export default {
         url: '/salesforce/dataRunObjLog/downloadObj/' + row.id,
         method: 'get',
         responseType: 'blob',
-        timeout: 60000
+        timeout: 1800000
       }).then(async (res) => {
         loading.close();
 
@@ -676,11 +710,11 @@ export default {
         } else {
           navigator.msSaveBlob(blob, fileName);
         }
-        this.$message.success("下载已开始");
+        this.$message.success("下载已完成");
       }).catch(err => {
         loading.close();
         console.error("下载出错", err);
-        this.$message.error("下载失败，请联系管理员");
+        this.$message.error("下载超时或网络中断，请检查网络连接");
       });
     },
 
