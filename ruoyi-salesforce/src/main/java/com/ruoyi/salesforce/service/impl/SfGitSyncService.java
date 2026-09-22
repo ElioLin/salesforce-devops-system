@@ -86,18 +86,16 @@ public class SfGitSyncService {
             extractZipToWorkspace(sourceZip, workspace);
 
             String authorName = deployment.getCreateBy() != null ? deployment.getCreateBy() : "SfDevOpsBot";
-            String authorEmail = "sf-devops-bot@local.domain";
+            String authorEmail = "sf-devops-bot@example.com";
             try {
                 // 根据账号名查询 RuoYi 系统的真实用户实体
                 com.ruoyi.common.core.domain.entity.SysUser sysUser = userService.selectUserByUserName(authorName);
                 if (sysUser != null && com.ruoyi.common.utils.StringUtils.isNotEmpty(sysUser.getEmail())) {
-                    authorEmail = sysUser.getEmail(); // 拿到真实邮箱！
-                } else {
-                    // 如果用户在 RuoYi 里没填邮箱，用公司默认域名做一个伪装兜底
-                    authorEmail = "yijian.lin@runner-corp.com.cn";
+                    authorEmail = sysUser.getEmail(); // 使用用户在系统中配置的邮箱
                 }
+                // 若未配置邮箱，则保留上面的通用机器人地址作为兜底
             } catch (Exception e) {
-                log.warn("无法获取用户 {} 的真实邮箱，将使用兜底配置", authorName);
+                log.warn("无法获取用户 {} 的邮箱，将使用兜底配置", authorName);
             }
 
             PersonIdent authorIdent = new PersonIdent(authorName, authorEmail, new Date(), java.util.TimeZone.getDefault());
