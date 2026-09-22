@@ -18,7 +18,7 @@
 
 1. **元数据跨环境部署** —— 在 Dev / UAT / Sandbox / Production 之间安全地迁移 Apex、LWC、对象、权限等元数据，
    支持部署前差异比对、部署前自动备份、一键回滚、以及部署结果自动同步到 Git 仓库。
-2. **迁移后数据质量验证** —— 针对 SFoA（Salesforce on Anywhere）等历史数据迁移场景，
+2. **迁移后数据质量验证** —— 针对 SFoA（Salesforce on Alibaba）等历史数据迁移场景，
    提供跨 Org 的大数据量「源端 vs 目标端」逐行比对能力，快速定位缺失行、字段值不一致等迁移缺陷。
 
 整个平台构建在 **[RuoYi-Vue](https://gitee.com/y_project/RuoYi-Vue)** 快速开发框架之上，
