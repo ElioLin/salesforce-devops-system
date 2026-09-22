@@ -98,8 +98,16 @@ public class SfMetadataServiceImpl implements ISfMetadataService {
 
     @Override
     @Async("metaTaskExecutor")
-    public void preloadMetadata(Long orgId, List<SfDeploymentItem> items) {
+    public void preloadMetadata(Long orgId, List<SfDeploymentItem> items, String currentTenantId) {
         if(items == null || items.isEmpty()) return;
+        SfOrg org = sfOrgService.selectSfOrgById(orgId);
+        if(org == null) return;
+
+        // 【核心安全防线：拦截跨租户恶意刷新字典】
+        if (!StringUtils.equals(org.getTenantId(), currentTenantId)) {
+            log.error("🚨 安全警告：触发跨租户越权预加载环境字典！被系统强制拦截。OrgId: {}", orgId);
+            return;
+        }
         log.info("开始预加载元数据内容，OrgId: {}, 数量: {}", orgId, items.size());
 
         // 【优化】不再使用 parallelStream (它使用全局ForkJoinPool)，改为提交到我们的专用池

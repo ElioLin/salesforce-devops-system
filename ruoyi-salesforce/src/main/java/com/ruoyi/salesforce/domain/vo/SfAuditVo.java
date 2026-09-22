@@ -25,4 +25,7 @@ public class SfAuditVo {
 
     /** 部署包标题 (新增) */
     private String deploymentTitle;
+
+    /** 租户归属ID (SaaS公司隔离) */
+    private String tenantId;
 }

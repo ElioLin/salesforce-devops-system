@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<!DOCTYPE mapper
-        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
-        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.ruoyi.salesforce.mapper.SfDeploymentHistoryMapper">
+
+    <resultMap type="SfDeploymentHistory" id="SfDeploymentHistoryResult">
+        <result property="id" column="id"/>
+        <result property="tenantId" column="tenant_id"/>
+    </resultMap>
 
     <resultMap id="AuditResult" type="com.ruoyi.salesforce.domain.vo.SfAuditVo">
         <result property="historyId" column="history_id"/>
+        <result property="tenantId" column="tenant_id"/>
         <result property="deploymentId" column="deployment_id"/>
         <result property="deploymentTitle" column="deployment_title"/>
 
@@ -23,12 +27,16 @@
     <select id="selectAuditList" resultMap="AuditResult">
         SELECT
         h.id as history_id,
+        h.tenant_id,
         h.deployment_id,
         s.title as deployment_title, h.type,
         h.status,
         h.create_by,
         h.start_time,
         h.backup_path,
+        h.git_commit_hash,
+        h.git_sync_status,
+        h.git_sync_log,
         d.metadata_type,
         d.member_name,
         d.action,
@@ -49,40 +57,62 @@
 
     <select id="selectDailyDeployCount" resultType="java.util.Map">
         SELECT
-            DATE_FORMAT(start_time, '%m-%d') as dateStr,
-            COUNT(*) as countVal
-        FROM sf_deployment_history
-        WHERE start_time >= DATE_SUB(CURDATE(), INTERVAL #{days} DAY)
-        GROUP BY DATE_FORMAT(start_time, '%m-%d')
+        DATE_FORMAT(h.start_time, '%m-%d') as dateStr,
+        COUNT(*) as countVal
+        FROM sf_deployment_history h
+        LEFT JOIN sf_deployment d ON h.deployment_id = d.id
+        <where>
+            h.start_time >= DATE_SUB(CURDATE(), INTERVAL #{days} DAY)
+        </where>
+        GROUP BY DATE_FORMAT(h.start_time, '%m-%d')
         ORDER BY dateStr ASC
     </select>
 
-    <select id="selectStatusDistribution" resultType="java.util.Map">
-        SELECT status as name, COUNT(*) as value
-        FROM sf_deployment_history
-        GROUP BY status
-    </select>
-
-    <select id="countWeeklyDeployments" resultType="Long">
-        SELECT COUNT(*) FROM sf_deployment_history
-        WHERE YEARWEEK(start_time, 1) = YEARWEEK(CURDATE(), 1)
-    </select>
-
-    <select id="countSuccessDeployments" resultType="Long">
-        SELECT COUNT(*) FROM sf_deployment_history WHERE status = 'Succeeded'
-    </select>
-
-    <select id="countTotalHistory" resultType="Long">
-        SELECT COUNT(*) FROM sf_deployment_history
-    </select>
-
-    <select id="selectRecentList" resultType="com.ruoyi.salesforce.domain.SfDeploymentHistory">
-        SELECT
-            h.*,
-            s.title as deploymentTitle
+    <select id="selectStatusDistribution" parameterType="SfDeploymentHistory" resultType="java.util.Map">
+        SELECT h.status as name, COUNT(*) as value
         FROM sf_deployment_history h
-                 LEFT JOIN sf_deployment s ON h.deployment_id = s.id
-        ORDER BY h.start_time DESC
-            LIMIT #{limit}
+        LEFT JOIN sf_deployment d ON h.deployment_id = d.id
+        <where>
+        </where>
+        GROUP BY h.status
     </select>
+
+    <select id="countWeeklyDeployments" parameterType="SfDeploymentHistory" resultType="Long">
+        SELECT COUNT(*)
+        FROM sf_deployment_history h
+        LEFT JOIN sf_deployment d ON h.deployment_id = d.id
+        <where>
+            YEARWEEK(h.start_time, 1) = YEARWEEK(CURDATE(), 1)
+        </where>
+    </select>
+
+    <select id="countSuccessDeployments" parameterType="SfDeploymentHistory" resultType="Long">
+        SELECT COUNT(*)
+        FROM sf_deployment_history h
+        LEFT JOIN sf_deployment d ON h.deployment_id = d.id
+        <where>
+            h.status = 'Succeeded'
+        </where>
+    </select>
+
+    <select id="countTotalHistory" parameterType="SfDeploymentHistory" resultType="Long">
+        SELECT COUNT(*)
+        FROM sf_deployment_history h
+        LEFT JOIN sf_deployment d ON h.deployment_id = d.id
+        <where>
+        </where>
+    </select>
+
+    <select id="selectRecentList" parameterType="SfDeploymentHistory" resultType="SfDeploymentHistory">
+        SELECT
+        h.*,
+        s.title as deploymentTitle
+        FROM sf_deployment_history h
+        LEFT JOIN sf_deployment s ON h.deployment_id = s.id
+        <where>
+        </where>
+        ORDER BY h.start_time DESC
+        LIMIT #{limit}
+    </select>
+
 </mapper>

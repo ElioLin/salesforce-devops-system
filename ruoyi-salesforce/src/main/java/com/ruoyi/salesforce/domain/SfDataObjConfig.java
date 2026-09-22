@@ -37,4 +37,7 @@ public class SfDataObjConfig implements Serializable {
     private Date createTime;
 
     public String mappingConfig;
+
+    /** 租户归属ID (SaaS公司隔离) */
+    private String tenantId;
 }

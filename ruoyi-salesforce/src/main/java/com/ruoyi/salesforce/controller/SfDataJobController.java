@@ -23,7 +23,6 @@ public class SfDataJobController extends BaseController {
     /**
      * 查询比对任务列表
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:list')")
     @GetMapping("/list")
     public TableDataInfo list(SfDataJob job) {
         startPage();
@@ -34,7 +33,6 @@ public class SfDataJobController extends BaseController {
     /**
      * 获取任务详细信息
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:query')")
     @GetMapping(value = "/{id}")
     public AjaxResult getInfo(@PathVariable("id") Long id) {
         return AjaxResult.success(jobService.selectJobById(id));
@@ -43,7 +41,6 @@ public class SfDataJobController extends BaseController {
     /**
      * 新增任务
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:add')")
     @Log(title = "数据比对任务", businessType = BusinessType.INSERT)
     @PostMapping
     public AjaxResult add(@RequestBody SfDataJob job) {
@@ -56,7 +53,6 @@ public class SfDataJobController extends BaseController {
     /**
      * 修改任务
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:edit')")
     @Log(title = "数据比对任务", businessType = BusinessType.UPDATE)
     @PutMapping
     public AjaxResult edit(@RequestBody SfDataJob job) {
@@ -67,7 +63,6 @@ public class SfDataJobController extends BaseController {
     /**
      * 删除任务
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:remove')")
     @Log(title = "数据比对任务", businessType = BusinessType.DELETE)
     @DeleteMapping("/{ids}")
     public AjaxResult remove(@PathVariable Long[] ids) {

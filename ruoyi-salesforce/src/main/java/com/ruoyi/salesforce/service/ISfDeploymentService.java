@@ -75,4 +75,6 @@ public interface ISfDeploymentService extends IService<SfDeployment> {
      * @return 新部署包ID
      */
     Long cloneDeployment(Long originalId, SfDeployment newConfig);
+
+    Map<String, String> calculateTypeExactDiff(Long sourceOrgId, Long targetOrgId, String metadataType, List<String> memberNames);
 }

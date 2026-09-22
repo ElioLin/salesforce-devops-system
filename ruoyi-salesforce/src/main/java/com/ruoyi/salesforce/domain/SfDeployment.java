@@ -5,6 +5,8 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.annotation.Version;
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.ruoyi.common.core.domain.BaseEntity;
 
 import java.util.Date;
 import java.util.HashMap;
@@ -14,14 +16,12 @@ import java.util.Map;
 /**
  * 部署包主对象 sf_deployment
  */
-@TableName("sf_deployment")
-public class SfDeployment {
+public class SfDeployment extends BaseEntity {
     private static final long serialVersionUID = 1L;
     /**
      * 【修复】重写父类 params 字段，并标记为数据库不存在
      * 解决 MyBatis-Plus 试图将 params 插入数据库导致的 TypeHandler 异常
      */
-    @TableId
     private Long id;
 
     private String title;
@@ -32,14 +32,112 @@ public class SfDeployment {
     private String specifiedTests;
     private String description;
     private String delFlag;
-    /**
-     * Salesforce异步处理ID
-     */
-    private String lastAsyncId;
+
+    private Long userId;
+
+    private String deployType;
+
+    private String demandNo;
+
+    private String demandPersonnel;
+
+    private Integer syncGit;
+
+    private String targetBranch;
+
+    private Integer autoMerge;
+
+    public Integer getSyncGit() {
+        return syncGit;
+    }
+
+    public void setSyncGit(Integer syncGit) {
+        this.syncGit = syncGit;
+    }
+
+    public Integer getAutoMerge() {
+        return autoMerge;
+    }
+
+    public void setAutoMerge(Integer autoMerge) {
+        this.autoMerge = autoMerge;
+    }
+
+    public String getTargetBranch() {
+        return targetBranch;
+    }
+
+    public void setTargetBranch(String targetBranch) {
+        this.targetBranch = targetBranch;
+    }
+
+    public String getDeployType() {
+        return deployType;
+    }
+    public void setDeployType(String deployType) {
+        this.deployType = deployType;
+    }
+
+    public String getDemandNo() {
+        return demandNo;
+    }
+    public void setDemandNo(String demandNo) {
+        this.demandNo = demandNo;
+    }
+
+    public String getDemandPersonnel() {
+        return demandPersonnel;
+    }
+    public void setDemandPersonnel(String demandPersonnel) {
+        this.demandPersonnel = demandPersonnel;
+    }
+
+    public Long getUserId() {
+        return userId;
+    }
+
+    public void setUserId(Long userId) {
+        this.userId = userId;
+    }
+
+    private Long deptId;
+
+    public Long getDeptId() {
+        return deptId;
+    }
+
+    public void setDeptId(Long deptId) {
+        this.deptId = deptId;
+    }
+
+    /** 租户归属ID (SaaS公司隔离) */
+    private String tenantId;
+
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId;
+    }
+
+    @TableField(exist = false)
+    private String remark;
+
+    @Override
+    public String getRemark() {
+        return remark;
+    }
+
+    @Override
+    public void setRemark(String remark) {
+        this.remark = remark;
+    }
 
     @TableField(exist = false)
     private Map<String, Object> params = new HashMap<>();
 
+    @Override
     public Map<String, Object> getParams() {
         if(params == null) {
             params = new HashMap<>();
@@ -47,9 +145,15 @@ public class SfDeployment {
         return params;
     }
 
+    @Override
     public void setParams(Map<String, Object> params) {
         this.params = params;
     }
+
+    /**
+     * Salesforce异步处理ID
+     */
+    private String lastAsyncId;
 
     /**
      * 错误信息
@@ -72,21 +176,6 @@ public class SfDeployment {
         this.errorMsg = errorMsg;
     }
 
-    /**
-     * 创建者
-     */
-    private String createBy;
-
-    /**
-     * 创建时间
-     */
-    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-    private Date createTime;
-
-    /**
-     * 更新者
-     */
-    private String updateBy;
 
     @Version
     private Long version;
@@ -98,12 +187,6 @@ public class SfDeployment {
     public void setVersion(Long version) {
         this.version = version;
     }
-
-    /**
-     * 更新时间
-     */
-    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-    private Date updateTime;
 
     // 【关键】子表数据列表，exist=false 表示这不是数据库字段
     @TableField(exist = false)
@@ -180,38 +263,6 @@ public class SfDeployment {
 
     public void setDelFlag(String delFlag) {
         this.delFlag = delFlag;
-    }
-
-    public String getCreateBy() {
-        return createBy;
-    }
-
-    public void setCreateBy(String createBy) {
-        this.createBy = createBy;
-    }
-
-    public Date getCreateTime() {
-        return createTime;
-    }
-
-    public void setCreateTime(Date createTime) {
-        this.createTime = createTime;
-    }
-
-    public String getUpdateBy() {
-        return updateBy;
-    }
-
-    public void setUpdateBy(String updateBy) {
-        this.updateBy = updateBy;
-    }
-
-    public Date getUpdateTime() {
-        return updateTime;
-    }
-
-    public void setUpdateTime(Date updateTime) {
-        this.updateTime = updateTime;
     }
 
     public List<SfDeploymentItem> getItemList() {

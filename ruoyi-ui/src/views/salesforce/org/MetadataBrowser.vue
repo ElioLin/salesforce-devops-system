@@ -33,10 +33,26 @@
         <el-col :span="6" class="text-right">
           <div class="filter-item">
             <span class="label">&nbsp;</span>
-            <el-button-group>
+            <el-button-group style="display: flex; align-items: center;">
               <el-button type="primary" icon="el-icon-refresh" @click="handleQuery">刷新列表</el-button>
-              <el-button type="warning" icon="el-icon-download" @click="handleSync"
-                :loading="syncLoading">强制同步</el-button>
+
+              <el-dropdown @command="handleExactDiffCommand" placement="bottom">
+                <el-button type="success" :loading="exactDiffLoading" :disabled="!localTargetOrgId || list.length === 0"
+                  style="border-radius: 0; margin-left: -1px; border-left-color: rgba(255,255,255,0.5);">
+                  <i class="el-icon-aim"></i> 精准哈希比对 <i class="el-icon-arrow-down el-icon--right"></i>
+                </el-button>
+                <el-dropdown-menu slot="dropdown">
+                  <el-dropdown-item command="filtered" :disabled="filteredList.length === 0">
+                    <i class="el-icon-finished"></i> 仅比对当前筛选出的名单 ({{ filteredList.length }}项)
+                  </el-dropdown-item>
+                  <el-dropdown-item command="all" divided>
+                    <i class="el-icon-document-copy"></i> 全量比对该类型所有数据 ({{ total }}项)
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </el-dropdown>
+
+              <el-button type="warning" icon="el-icon-download" @click="handleSync" :loading="syncLoading"
+                style="margin-left: -1px;">强制同步</el-button>
             </el-button-group>
           </div>
         </el-col>
@@ -62,7 +78,9 @@
     </div>
 
     <el-table ref="metaTable" :data="filteredList" style="width: 100%" border stripe highlight-current-row
-      row-key="fullName" @select="handleSelect" @select-all="handleSelectAll" height="500px">
+      row-key="fullName" @select="handleSelect" @select-all="handleSelectAll" height="500px"
+      v-loading="exactDiffLoading" :element-loading-text="exactDiffText" element-loading-spinner="el-icon-loading"
+      element-loading-background="rgba(255, 255, 255, 0.8)">
 
       <el-table-column type="selection" width="50" align="center" :selectable="checkSelectable" />
 
@@ -121,10 +139,22 @@
             </el-select>
           </div>
         </template>
+
         <template slot-scope="scope">
-          <el-tag size="mini" v-if="scope.row.diffStatus" :type="getDiffTagType(scope.row.diffStatus)" effect="light">
-            {{ scope.row.diffStatus }}
+          <el-tag size="mini" v-if="scope.row.diffStatus === 'Comparing'" type="primary" effect="plain"
+            style="border-style: dashed;">
+            Comparing <i class="el-icon-loading" style="margin-left: 3px;"></i>
           </el-tag>
+
+          <el-tooltip v-else :content="scope.row.exactDiffDone ? '基于底层文件代码 Hash 精确比对得出' : '基于上次修改时间粗略估算得出'"
+            placement="top">
+            <el-tag size="mini" v-if="scope.row.diffStatus" :type="getDiffTagType(scope.row.diffStatus)"
+              :effect="scope.row.exactDiffDone ? 'dark' : 'light'">
+              {{ scope.row.diffStatus }}
+              <i v-if="scope.row.exactDiffDone" class="el-icon-circle-check" style="margin-left: 3px;"></i>
+              <i v-else class="el-icon-time" style="margin-left: 3px; opacity: 0.6"></i>
+            </el-tag>
+          </el-tooltip>
         </template>
       </el-table-column>
 
@@ -144,8 +174,8 @@
         </span>
       </div>
 
-      <pagination v-show="total > 0" :total="filteredList.length" :page.sync="queryParams.pageNum"
-        :limit.sync="queryParams.pageSize" :page-sizes="[50, 100, 200, 300, 500]" @pagination="handlePagination" />
+      <pagination v-show="total > 0" :total="total" :page.sync="queryParams.pageNum" :limit.sync="queryParams.pageSize"
+        :page-sizes="[50, 100, 200, 300, 500]" @pagination="handlePagination" />
     </div>
 
   </div>
@@ -194,7 +224,10 @@ export default {
       dateFilter: 'all', // all, today, 3days, 7days
       onlyDiff: false,   // 仅显示差异
 
-      debounceTimer: null
+      debounceTimer: null,
+      exactDiffCache: {},
+      exactDiffLoading: false,
+      exactDiffText: '正在执行精准比对, 请稍候...'
     };
   },
   computed: {
@@ -381,6 +414,10 @@ export default {
       this.parentFilter = '';
       this.parentFilterOp = 'contains';
       this.diffFilter = '';
+      //清空精确比对缓存
+      this.exactDiffCache = {};
+
+      this.nameFilter = '';
       // 重置智能筛选
       this.dateFilter = 'all';
       this.onlyDiff = false;
@@ -394,6 +431,11 @@ export default {
     handleSmartFilterChange() {
       this.queryParams.pageNum = 1; // 重置页码
       // 筛选逻辑全在 computed: filteredList 中，这里只需触发视图更新
+      // 筛选逻辑虽然在 computed: filteredList 中自动生效了
+      // 但 UI 上的“打勾”状态需要手动重新应用
+      this.$nextTick(() => {
+        this.checkExistingRows(); // 关键：DOM 更新后，立即回显选中状态
+      });
     },
     handleInputSearch() {
       if (this.debounceTimer) {
@@ -483,8 +525,14 @@ export default {
 
         this.list = sourceList.map(item => {
           let status = '';
+          let exactDone = false; // 标记是否命中精准哈希缓存
 
-          if (this.localTargetOrgId) {
+          // 【核心优化】优先从精准缓存池中读取状态 (解决翻页状态丢失问题)
+          if (this.exactDiffCache && this.exactDiffCache[item.fullName]) {
+            status = this.exactDiffCache[item.fullName];
+            exactDone = true;
+          } else if (this.localTargetOrgId) {
+            // 降级为时间戳粗略比对
             const itemKey = item.fullName.toLowerCase();
             const targetDateStr = targetMap.get(itemKey);
 
@@ -493,15 +541,10 @@ export default {
             } else {
               const sourceTime = new Date(item.lastModifiedDate).getTime();
               const targetTime = new Date(targetDateStr).getTime();
-
-              if (sourceTime > targetTime) {
-                status = 'Changed';
-              } else {
-                status = 'Same';
-              }
+              status = sourceTime > targetTime ? 'Changed' : 'Same';
             }
           }
-          return { ...item, diffStatus: status };
+          return { ...item, diffStatus: status, exactDiffDone: exactDone };
         });
 
         this.loading = false;
@@ -523,22 +566,7 @@ export default {
     // 其实对于 el-table，只要数据在 filteredList 里，它会自动渲染
     // 但为了配合底部的 pagination 组件，我们需要处理页码事件
     handlePagination() {
-      // 由于是前端分页/过滤，其实不需要重新请求 fetchList，
-      // 但这里 pagination 组件 emit 的是 fetchList? 
-      // 不，我们在 template 里改为了 @pagination="handlePagination"
-
-      // 这里的逻辑：其实不需要做太多，因为 pagedList 计算属性依赖 pageNum
-      // 只要 pageNum 变了，Table data (如果是用 pagedList) 就会变
-      // 但目前 Table :data="filteredList"，意味着是“一页显示所有筛选结果”
-      // 如果想做前端分页，需要把 el-table :data 改为 pagedList
-
-      // 建议：为了简单直观，智能筛选模式下，直接展示所有结果 (filteredList)，
-      // 分页组件仅作为数据量展示，或者可以保留 fetchList 以支持服务端分页(如果未来需要)
-      // 在此代码中，我保持 Table :data="filteredList"，即“筛选即所得，不分页展示”
-      // 这样体验最好，因为用户就是为了找那几个文件。
-
-      // 如果数据量确实很大(>500)，建议 Table data 切回 pagedList
-      // 这里演示全量展示逻辑：
+      this.fetchList();
     },
 
     getDiffTagType(status) {
@@ -635,6 +663,136 @@ export default {
         type: this.queryParams.type,
         name: row.fullName
       });
+    },
+    /**
+     * 【优化】双模二阶段精确哈希比对 (支持真全量与跨分页)
+     */
+    async handleExactDiffCommand(command) {
+      if (!this.localTargetOrgId) return;
+
+      let memberNames = [];
+
+      if (command === 'filtered') {
+        memberNames = this.filteredList.map(item => item.fullName);
+        if (memberNames.length === 0) {
+          this.$modal.msgWarning("当前筛选结果为空，没有可比对的数据。");
+          return;
+        }
+        this.executeExactDiff(memberNames);
+      } else if (command === 'all') {
+        this.exactDiffLoading = true;
+        try {
+          // 【核心修复】为了获取“真全量”名单，向后端请求该类型下的所有数据目录 (无视当前页码)
+          const res = await request({
+            url: '/system/sf/meta/list',
+            method: 'get',
+            params: {
+              orgId: this.sourceOrgId,
+              type: this.queryParams.type,
+              pageNum: 1,
+              pageSize: 10000 // 暴力拉取全部目录字典
+            }
+          });
+
+          const allItems = res.rows || [];
+          memberNames = allItems.map(item => item.fullName);
+
+          if (memberNames.length === 0) {
+            this.exactDiffLoading = false;
+            this.$modal.msgWarning("该类型下没有元数据。");
+            return;
+          }
+          this.executeExactDiff(memberNames);
+        } catch (err) {
+          this.exactDiffLoading = false;
+          console.error("获取全量目录失败:", err);
+          this.$modal.msgError("获取全量元数据目录失败，请检查网络日志。");
+        }
+      }
+    },
+
+    /**
+     * 执行底层 Hash 比对并回写全局缓存 (支持自动分片防超时)
+     */
+     async executeExactDiff(memberNames) {
+      // 1. 移除之前的写死上限拦截，现在支持十万级数据自动分片
+      if (memberNames.length === 0) return;
+
+      // 2. 预先把所有被选中的数据状态变为 Comparing 转圈圈
+      this.list.forEach(item => {
+        if (memberNames.includes(item.fullName)) {
+          item.diffStatus = 'Comparing';
+          this.$set(item, 'exactDiffDone', false);
+        }
+      });
+
+      this.exactDiffLoading = true;
+      if (!this.exactDiffCache) this.exactDiffCache = {};
+      
+      // 【核心分片参数】每批次处理 800 条，兼顾速度与防止 Nginx 60秒超时
+      const chunkSize = 800; 
+      const totalChunks = Math.ceil(memberNames.length / chunkSize);
+      let totalUpdateCount = 0;
+      let isErrorOccurred = false;
+
+      // 3. 开始串行流水线作业
+      try {
+        for (let i = 0; i < totalChunks; i++) {
+          const currentChunkNum = i + 1;
+          const chunkMemberNames = memberNames.slice(i * chunkSize, (i + 1) * chunkSize);
+          
+          // 动态更新表格上的 Loading 文字进度
+          this.exactDiffText = `引擎极速比对中: 第 ${currentChunkNum} 批 / 共 ${totalChunks} 批 (进度: ${Math.min((i + 1) * chunkSize, memberNames.length)} / ${memberNames.length}) ...`;
+
+          // 等待当前批次完成，再发下一批 (设置局部超长 timeout 以防万一)
+          const res = await request({
+            url: '/salesforce/deployment/diff/exact',
+            method: 'post',
+            timeout: 120000, // 给单次请求 2 分钟宽裕时间
+            data: {
+              sourceOrgId: this.sourceOrgId,
+              targetOrgId: this.localTargetOrgId,
+              metadataType: this.queryParams.type,
+              memberNames: chunkMemberNames
+            }
+          });
+
+          const diffMap = res.data || {};
+          
+          // 将当前批次结果写入全局缓存池
+          for (let name in diffMap) {
+            this.exactDiffCache[name] = diffMap[name];
+            totalUpdateCount++;
+          }
+
+          // 实时渲染当前批次在屏幕上的 UI (绿色勾勾出现)
+          this.list.forEach(item => {
+            if (this.exactDiffCache[item.fullName]) {
+              item.diffStatus = this.exactDiffCache[item.fullName];
+              this.$set(item, 'exactDiffDone', true);
+            }
+          });
+        }
+      } catch (err) {
+        console.error("分批精确比对异常中断:", err);
+        isErrorOccurred = true;
+        this.$modal.msgError(`比对在执行中途发生网络异常中断。已成功完成 ${totalUpdateCount} 项，其余状态已重置。`);
+      } finally {
+        // 4. 清理兜底：把因为报错没跑完的 Comparing 状态恢复成 Unknown
+        this.list.forEach(item => {
+          if (item.diffStatus === 'Comparing') {
+            item.diffStatus = 'Unknown';
+          }
+        });
+
+        this.exactDiffLoading = false;
+        
+        if (!isErrorOccurred) {
+          this.$modal.msgSuccess(`🎯 全量精准比对完美收官！共分为 ${totalChunks} 个批次，成功校验 ${totalUpdateCount} 项元数据。`);
+        }
+        
+        this.checkExistingRows(); // 刷新勾选框状态
+      }
     }
   }
 };

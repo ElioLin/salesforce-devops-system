@@ -6,24 +6,30 @@ ruoyi:
   version: '@project.version@'
   # 版权年份
   copyrightYear: 2026
-  copyright: Copyright © 2026 SFDO. All rights reserved.
+  copyright: Copyright © 2026 Salesforce DevOps Platform. All rights reserved.
   # 文件路径 示例（ Windows配置D:/ruoyi/uploadPath，Linux配置 /home/ruoyi/uploadPath）
-  #profile: /home/sf-devops/uploadPath
-  profile: D:/ruoyi/uploadPath
+  # Windows 本地开发请改用：D:/ruoyi/uploadPath
+  profile: /home/sf-devops/uploadPath
   # 获取ip地址开关
   addressEnabled: false
   # 验证码类型 math 数字计算 char 字符验证
   captchaType: math
   # Salesforce配置
+  # 【重要】以下 clientId / clientSecret / GIT_AES_KEY 均为占位值，
+  #        请在 Salesforce 后台创建 Connected App 后替换为你自己的值。
+  #        严禁将真实密钥提交到版本库。
   salesforce:
-    # 你的回调地址，本地开发用 localhost，线上改成你的域名
-    #callbackUrl: http://192.168.156.202:8080/system/sf/callback
+    # OAuth2 回调地址，本地开发用 localhost，线上改成你的域名
     callbackUrl: http://localhost:8080/system/sf/callback
-    # 【新增】前端访问地址 (授权成功后跳转回这里，例如 Vue 项目的访问地址)
-    #frontendUrl: http://192.168.156.202:80
-    frontendUrl: http://localhost:80
-    clientId: 3MVG9pRzvMkjMb6kgFzuHUiyE9anfivt3g1oKlhtcKPeOlHNA2G22Rp5Dg78RUAFpP5ZYNAvNcFll5oINlJNE
-    clientSecret: F4D238AD0FAF6547094FABAF2BB1E9284E875F8D6E2256BB6E214D81EF24824B
+    # 前端访问地址 (授权成功后跳转回这里，例如 Vue 项目的访问地址)
+    frontendUrl: http://localhost
+    # Connected App 的 Consumer Key
+    clientId: your-salesforce-client-id
+    # Connected App 的 Consumer Secret
+    clientSecret: your-salesforce-client-secret
+    # Git 访问凭证的 AES 加密密钥
+    # 【注意】长度必须恰好为 16 个字符（AES-128），否则程序会回退到内置默认密钥
+    GIT_AES_KEY: ChangeMeAesKey16
 
 # 开发环境配置
 server:

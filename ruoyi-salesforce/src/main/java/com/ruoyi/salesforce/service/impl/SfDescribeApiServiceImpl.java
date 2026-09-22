@@ -29,7 +29,7 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
     @Autowired
     private RedisCache redisCache; // 注入 Redis 缓存工具
 
-    private static final long CACHE_TIME = 24;
+    private static final long CACHE_TIME = 2;
     private static final TimeUnit CACHE_UNIT = TimeUnit.HOURS;
 
     @Override
@@ -113,6 +113,11 @@ public class SfDescribeApiServiceImpl implements ISfDescribeApiService {
                     map.put("name", f.getString("name"));
                     map.put("label", f.getString("label"));
                     map.put("type", f.getString("type"));
+
+                    // 【提取自定义标识与公式属性】
+                    map.put("custom", f.getBooleanValue("custom")); // 是否是自定义字段
+                    map.put("calculated", f.getBooleanValue("calculated")); // 是否是公式字段
+                    map.put("calculatedFormula", f.getString("calculatedFormula")); // 具体的公式逻辑内容
 
                     // 关联关系
                     map.put("relationshipName", f.getString("relationshipName"));

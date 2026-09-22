@@ -18,8 +18,12 @@ yarn-error.log*
 .DS_Store
 
 # --- 敏感配置 (非常重要！！！) ---
-# 如果你的 application.yml 或 application-druid.yml 里写了真实的数据库密码或SF密钥
-# 请选择以下一种方式：
-# 1. 忽略整个配置文件（自己本地保留，服务器上手动配）
-# src/main/resources/application-druid.yml
-# 2. 或者确保上传的是脱敏后的版本（把密码改成 ******）
+# 仓库中的 application.yml / application-druid.yml 已脱敏为占位值，
+# 真实值保存在 local-secrets/ 目录（仅本机保留，禁止提交）。
+local-secrets/
+*.original
+application-local.yml
+application-*-local.yml
+
+# 打包产物，勿提交
+*.zip

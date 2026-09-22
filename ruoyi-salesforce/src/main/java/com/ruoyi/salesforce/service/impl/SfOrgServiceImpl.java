@@ -4,6 +4,8 @@ import java.util.List;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.ruoyi.common.utils.DateUtils;
+import com.ruoyi.common.utils.SecurityUtils;
+import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.salesforce.service.ISfOrgService;
 import org.springframework.stereotype.Service;
 import com.ruoyi.salesforce.mapper.SfOrgMapper;
@@ -54,6 +56,8 @@ public class SfOrgServiceImpl extends ServiceImpl<SfOrgMapper, SfOrg> implements
     @Override
     public int insertSfOrg(SfOrg sfOrg) {
         sfOrg.setCreateTime(DateUtils.getNowDate());
+        sfOrg.setUserId(SecurityUtils.getUserId());
+        sfOrg.setDeptId(SecurityUtils.getDeptId());
         return this.baseMapper.insertSfOrg(sfOrg);
     }
 

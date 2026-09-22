@@ -15,7 +15,7 @@ import com.ruoyi.common.xss.Xss;
 
 /**
  * 用户对象 sys_user
- * 
+ *
  * @author ruoyi
  */
 public class SysUser extends BaseEntity
@@ -92,6 +92,10 @@ public class SysUser extends BaseEntity
 
     /** 角色ID */
     private Long roleId;
+
+    /** 租户ID (公司标识) */
+    @Excel(name = "租户编号", type = Type.IMPORT)
+    private String tenantId;
 
     public SysUser()
     {
@@ -312,6 +316,14 @@ public class SysUser extends BaseEntity
         this.roleId = roleId;
     }
 
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId;
+    }
+
     @Override
     public String toString() {
         return new ToStringBuilder(this,ToStringStyle.MULTI_LINE_STYLE)
@@ -335,6 +347,7 @@ public class SysUser extends BaseEntity
             .append("updateTime", getUpdateTime())
             .append("remark", getRemark())
             .append("dept", getDept())
+            .append("tenantId", getTenantId())
             .toString();
     }
 }

@@ -12,7 +12,7 @@ import com.ruoyi.common.core.domain.BaseEntity;
 
 /**
  * 角色表 sys_role
- * 
+ *
  * @author ruoyi
  */
 public class SysRole extends BaseEntity
@@ -63,6 +63,19 @@ public class SysRole extends BaseEntity
 
     /** 角色菜单权限 */
     private Set<String> permissions;
+
+    /** 租户ID (公司标识) */
+    @Excel(name = "租户编号", type = Excel.Type.IMPORT)
+    private String tenantId;
+
+    public String getTenantId() {
+        return tenantId;
+    }
+
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId;
+    }
 
     public SysRole()
     {
@@ -236,6 +249,7 @@ public class SysRole extends BaseEntity
             .append("updateBy", getUpdateBy())
             .append("updateTime", getUpdateTime())
             .append("remark", getRemark())
+            .append("tenantId", getTenantId())
             .toString();
     }
 }

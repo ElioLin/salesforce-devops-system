@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import lombok.Data;
+
 import java.io.Serializable;
 import java.util.Date;
 
@@ -39,4 +40,9 @@ public class SfDataRunLog implements Serializable {
 
     private String resultFilePath;
     private String errorMsg;
+
+    /**
+     * 租户归属ID (SaaS公司隔离)
+     */
+    private String tenantId;
 }

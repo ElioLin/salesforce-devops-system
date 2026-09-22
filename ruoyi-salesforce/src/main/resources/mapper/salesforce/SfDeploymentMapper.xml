@@ -3,50 +3,57 @@
 <mapper namespace="com.ruoyi.salesforce.mapper.SfDeploymentMapper">
 
     <resultMap type="com.ruoyi.salesforce.domain.SfDeployment" id="SfDeploymentResult">
-        <result property="id"             column="id"             />
-        <result property="title"          column="title"          />
-        <result property="sourceOrgId"    column="source_org_id"  />
-        <result property="targetOrgId"    column="target_org_id"  />
-        <result property="status"         column="status"         />
-        <result property="testLevel"      column="test_level"     />
+        <result property="id" column="id"/>
+        <result property="tenantId" column="tenant_id"/>
+        <result property="title" column="title"/>
+        <result property="sourceOrgId" column="source_org_id"/>
+        <result property="targetOrgId" column="target_org_id"/>
+        <result property="status" column="status"/>
+        <result property="testLevel" column="test_level"/>
         <result property="specifiedTests" column="specified_tests"/>
-        <result property="description"    column="description"    />
-        <result property="createBy"       column="create_by"      />
-        <result property="createTime"     column="create_time"    />
+        <result property="description" column="description"/>
+        <result property="createBy" column="create_by"/>
+        <result property="createTime" column="create_time"/>
+        <result property="userId" column="user_id"/>
+        <result property="deptId" column="dept_id"/>
+        <result property="deployType" column="deploy_type"/>
+        <result property="demandNo" column="demand_no"/>
+        <result property="demandPersonnel" column="demand_personnel"/>
+        <result property="syncGit" column="sync_git"/>
+        <result property="autoMerge" column="auto_merge"/>
+        <result property="targetBranch" column="target_branch"/>
     </resultMap>
 
-<!--    <select id="selectSfDeploymentList" parameterType="com.ruoyi.salesforce.domain.SfDeployment" resultMap="SfDeploymentResult">-->
-<!--        select id, title, source_org_id, target_org_id, status, create_time, create_by-->
-<!--        from sf_deployment-->
-<!--        <where>-->
-<!--            <if test="title != null and title != ''"> and title like concat('%', #{title}, '%')</if>-->
-<!--            <if test="status != null and status != ''"> and status = #{status}</if>-->
-<!--            and del_flag = '0'-->
-<!--        </where>-->
-<!--    </select>-->
-
-    <select id="selectSfDeploymentList" parameterType="com.ruoyi.salesforce.domain.SfDeployment" resultMap="SfDeploymentResult">
-        select id, title, source_org_id, target_org_id, status, create_time, create_by
-        from sf_deployment
+    <select id="selectSfDeploymentList" parameterType="com.ruoyi.salesforce.domain.SfDeployment"
+            resultMap="SfDeploymentResult">
+        select d.id, d.tenant_id, d.title, d.source_org_id, d.target_org_id, d.status, d.create_time, d.create_by, d.user_id,
+        d.dept_id, d.deploy_type, d.demand_no, d.demand_personnel, d.sync_git, d.auto_merge, d.target_branch
+        from sf_deployment d
         <where>
-            <if test="title != null  and title != ''"> and title like concat('%', #{title}, '%')</if>
+            <if test="title != null  and title != ''">and d.title like concat('%', #{title}, '%')</if>
 
-            <if test="status != null  and status != ''"> and status = #{status}</if>
+            <if test="status != null  and status != ''">and d.status = #{status}</if>
 
-            <if test="createBy != null  and createBy != ''"> and create_by like concat('%', #{createBy}, '%')</if>
+            <if test="deployType != null  and deployType != ''">and d.deploy_type = #{deployType}</if>
+            <if test="demandNo != null  and demandNo != ''">and d.demand_no like concat('%', #{demandNo}, '%')</if>
+            <if test="demandPersonnel != null  and demandPersonnel != ''">and d.demand_personnel like concat('%', #{demandPersonnel}, '%')</if>
+
+            <if test="createBy != null  and createBy != ''">and d.create_by like concat('%', #{createBy}, '%')</if>
 
             <if test="params.beginTime != null and params.beginTime != ''">
-                and date_format(create_time,'%y%m%d') &gt;= date_format(#{params.beginTime},'%y%m%d')
+                and date_format(d.create_time,'%y%m%d') &gt;= date_format(#{params.beginTime},'%y%m%d')
             </if>
             <if test="params.endTime != null and params.endTime != ''">
-                and date_format(create_time,'%y%m%d') &lt;= date_format(#{params.endTime},'%y%m%d')
+                and date_format(d.create_time,'%y%m%d') &lt;= date_format(#{params.endTime},'%y%m%d')
             </if>
-            and del_flag = '0'
+            and d.del_flag = '0'
         </where>
-        order by create_time desc
+        order by d.create_time desc
     </select>
 
     <select id="selectSfDeploymentById" parameterType="Long" resultMap="SfDeploymentResult">
-        select * from sf_deployment where id = #{id}
+        select *
+        from sf_deployment
+        where id = #{id}
     </select>
 </mapper>

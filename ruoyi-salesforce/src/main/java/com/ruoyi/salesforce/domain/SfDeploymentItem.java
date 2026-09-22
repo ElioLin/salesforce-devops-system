@@ -31,6 +31,19 @@ public class SfDeploymentItem {
 
     private String lastModifiedByName;
 
+    /**
+     * 租户归属ID (SaaS公司隔离)
+     */
+    private String tenantId;
+
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId;
+    }
+
     public Date getLastModifiedDate() {
         return lastModifiedDate;
     }

@@ -3,6 +3,7 @@ package com.ruoyi.salesforce.service.impl;
 import cn.hutool.http.HttpRequest;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
+import com.github.pagehelper.util.StringUtil;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.salesforce.domain.SfOrg;
 import com.ruoyi.salesforce.service.ISfAuthService;
@@ -53,8 +54,7 @@ public class SfAuthServiceImpl implements ISfAuthService {
     // 【修复】刷新 Token 方法加锁，或者是被调用处加锁
     @Override
     public void refreshAccessToken(SfOrg org) {
-        String instance = "Sandbox".equalsIgnoreCase(org.getOrgType()) ? "https://test.salesforce.com" : "https://login.salesforce.com";
-        String tokenUrl = instance + "/services/oauth2/token";
+        String tokenUrl = getHost(org) + "/services/oauth2/token";
 
         try {
             String result = HttpRequest.post(tokenUrl)
@@ -93,5 +93,21 @@ public class SfAuthServiceImpl implements ISfAuthService {
                 || msg.contains("Session not found")
                 || msg.contains("Full authentication is required")
                 || msg.contains("missing session hash");
+    }
+
+    /**
+     * 【新增辅助方法】获取与 Controller 逻辑一致的登录 Host
+     */
+    private String getHost(SfOrg org) {
+        if(StringUtil.isNotEmpty(org.getCustomDomain())) {
+            String domain = org.getCustomDomain();
+            if(!domain.startsWith("http")) domain = "https://" + domain;
+            if(domain.endsWith("/")) domain = domain.substring(0, domain.length() - 1);
+            return domain;
+        }
+        if("Sandbox".equalsIgnoreCase(org.getOrgType())) {
+            return "https://test.salesforce.com";
+        }
+        return "https://login.salesforce.com";
     }
 }

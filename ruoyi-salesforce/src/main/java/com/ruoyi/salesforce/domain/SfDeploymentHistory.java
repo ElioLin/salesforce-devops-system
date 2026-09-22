@@ -7,11 +7,13 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
 
 @Data
 @EqualsAndHashCode(callSuper = false)
 @TableName("sf_deployment_history")
-public class SfDeploymentHistory {
+public class SfDeploymentHistory extends BaseEntity {
     private static final long serialVersionUID = 1L;
 
     @TableId(type = IdType.AUTO)
@@ -26,6 +28,9 @@ public class SfDeploymentHistory {
     private Date startTime;
     private Date endTime;
     private String errorMsg;
+    private String gitCommitHash;
+    private String gitSyncStatus;
+    private String gitSyncLog;
     /**
      * 创建者
      * 使用 fill = FieldFill.INSERT 标记
@@ -58,7 +63,20 @@ public class SfDeploymentHistory {
      */
     private String remark;
 
-    /** 部署包标题 (非数据库字段) */
+    /**
+     * 部署包标题 (非数据库字段)
+     */
     @TableField(exist = false)
     private String deploymentTitle;
+
+    @TableField(exist = false)
+    private Map<String, Object> params = new HashMap<>();
+
+    @TableField(exist = false)
+    private Integer limit;
+
+    /**
+     * 租户归属ID (SaaS公司隔离)
+     */
+    private String tenantId;
 }

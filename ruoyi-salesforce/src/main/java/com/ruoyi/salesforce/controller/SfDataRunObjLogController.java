@@ -2,6 +2,7 @@ package com.ruoyi.salesforce.controller;
 
 import com.ruoyi.common.core.controller.BaseController;
 import com.ruoyi.common.core.domain.AjaxResult;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.salesforce.domain.SfDataRunObjLog;
 import com.ruoyi.salesforce.mapper.SfDataRunLogMapper;
 import com.ruoyi.salesforce.service.ISfDataReconcileService;
@@ -39,7 +40,6 @@ public class SfDataRunObjLogController extends BaseController {
      * 获取任务监控详情
      * 逻辑已下沉至 Service
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:monitor')")
     @GetMapping("/monitor/{jobId}")
     public AjaxResult getJobMonitor(@PathVariable Long jobId) {
         Map<String, Object> data = objLogService.getMonitorData(jobId);
@@ -49,24 +49,26 @@ public class SfDataRunObjLogController extends BaseController {
     /**
      * 在线预览单个对象的比对结果 (分页)
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:preview')")
     @GetMapping("/previewObj/{objLogId}")
-    public AjaxResult previewObjResult(
-            @PathVariable Long objLogId,
-            @RequestParam(defaultValue = "1") int pageNum,
-            @RequestParam(defaultValue = "50") int pageSize,
-            @RequestParam(required = false) String diffType,
-            @RequestParam(required = false) String fieldName) {
+    public AjaxResult preview(@PathVariable Long objLogId,
+                              @RequestParam(defaultValue = "1") int pageNum,
+                              @RequestParam(defaultValue = "50") int pageSize,
+                              @RequestParam(required = false) String diffType,
+                              @RequestParam(required = false) String fieldName,
+                              @RequestParam(required = false, defaultValue = "false") Boolean excludePostCutoff) {
 
-        // 【修改】调用 Service 的预览方法
-        Map<String, Object> result = objLogService.previewCsvData(objLogId, pageNum, pageSize, diffType, fieldName);
-        return AjaxResult.success(result);
+        try {
+            // 【修改】：将 excludePostCutoff 传入底层方法
+            Map<String, Object> result = objLogService.previewCsvData(objLogId, pageNum, pageSize, diffType, fieldName, excludePostCutoff);
+            return AjaxResult.success(result);
+        } catch (Exception e) {
+            return AjaxResult.error(e.getMessage());
+        }
     }
 
     /**
      * 下载单个对象的比对结果文件
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:download')")
     @GetMapping("/downloadObj/{objLogId}")
     public void downloadObjResult(@PathVariable Long objLogId, HttpServletResponse response) throws IOException {
         SfDataRunObjLog objLog = objLogService.selectById(objLogId);
@@ -100,10 +102,9 @@ public class SfDataRunObjLogController extends BaseController {
     /**
      * 新增：重试/重新执行单个对象
      */
-    @PreAuthorize("@ss.hasPermi('salesforce:reconcile:monitor')")
     @PostMapping("/retry/{objLogId}")
     public AjaxResult retryObjLog(@PathVariable Long objLogId) {
-        reconcileService.retryObject(objLogId);
+        reconcileService.retryObject(objLogId, SecurityUtils.getLoginUser().getTenantId());
         return AjaxResult.success("重试指令已下达");
     }
 }

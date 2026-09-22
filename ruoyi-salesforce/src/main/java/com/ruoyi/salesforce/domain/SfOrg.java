@@ -79,6 +79,41 @@ public class SfOrg extends BaseEntity {
     @Excel(name = "自定义域名")
     private String customDomain;
 
+    @Excel(name = "权限用户Id")
+    private Long userId;
+
+    public Long getUserId() {
+        return userId;
+    }
+
+    public void setUserId(Long userId) {
+        this.userId = userId;
+    }
+
+    @Excel(name = "权限部门Id")
+    private Long deptId;
+
+    /**
+     * 租户归属ID (SaaS公司隔离)
+     */
+    private String tenantId;
+
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId;
+    }
+
+    public Long getDeptId() {
+        return deptId;
+    }
+
+    public void setDeptId(Long deptId) {
+        this.deptId = deptId;
+    }
+
     public void setCustomDomain(String customDomain) {
         this.customDomain = customDomain;
     }

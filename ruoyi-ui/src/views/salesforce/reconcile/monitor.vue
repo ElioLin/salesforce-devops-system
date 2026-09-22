@@ -1,32 +1,59 @@
 <template>
   <div class="app-container monitor-container">
     <el-card shadow="never" class="header-card">
-      <div slot="header" class="clearfix">
+      <div slot="header" class="clearfix" style="display: flex; align-items: center; justify-content: space-between;">
         <span class="page-title">
-          <i class="el-icon-monitor" style="margin-right: 8px;"></i>任务执行控制台
+          <i class="el-icon-monitor" style="margin-right: 8px;"></i>任务全景控制台
         </span>
-        <div style="float: right;">
-          <el-button plain size="small" icon="el-icon-back" @click="handleGoBack">返回列表</el-button>
+        <div style="display: flex; gap: 10px;">
+          <el-button v-if="overallStatus !== 'RUNNING' && overallStatus !== 'LOADING'" type="primary" size="small"
+            icon="el-icon-plus" @click="handleAddObjects">配置比对对象</el-button>
+
+          <el-button v-if="objList.length > 0 && overallStatus !== 'RUNNING' && overallStatus !== 'LOADING'"
+            type="success" size="small" icon="el-icon-video-play" @click="handleStartAllJob">启动全量验证</el-button>
+
+          <el-button v-if="overallStatus === 'RUNNING'" type="danger" size="small" icon="el-icon-video-pause"
+            @click="handleStopAllJob" :loading="stopping">强行停止全部任务</el-button>
+
+          <el-button plain size="small" icon="el-icon-back" @click="handleGoBack">返回任务列表</el-button>
         </div>
       </div>
-
       <div class="job-meta">
-        <el-descriptions :column="4" border size="medium">
+        <el-descriptions :column="3" border size="medium">
           <el-descriptions-item label="任务名称">
             <span style="font-weight: bold">{{ jobName || '-' }}</span>
             <el-tag size="mini" type="info" style="margin-left: 5px">#{{ jobId }}</el-tag>
           </el-descriptions-item>
-          <el-descriptions-item label="当前状态">
+
+          <el-descriptions-item label="源环境">
+            <el-tag type="info" size="mini"><i class="el-icon-cloudy"></i> {{ getOrgName(jobMeta.sourceOrgId)
+            }}</el-tag>
+          </el-descriptions-item>
+
+          <el-descriptions-item label="目标环境">
+            <el-tag type="success" size="mini"><i class="el-icon-cloudy-and-sunny"></i> {{
+              getOrgName(jobMeta.targetOrgId) }}</el-tag>
+          </el-descriptions-item>
+
+          <el-descriptions-item label="数据截断时间">
+            <el-tag v-if="jobMeta.dataEndTime" type="warning" size="small" effect="plain">
+              <i class="el-icon-time"></i> {{ jobMeta.dataEndTime }}
+            </el-tag>
+            <span v-else style="color: #909399; font-size: 12px; font-style: italic;">
+              全量拉取 (无限制)
+            </span>
+          </el-descriptions-item>
+
+          <el-descriptions-item label="任务状态">
             <el-tag :type="statusTagType" effect="dark">{{ overallStatus }}</el-tag>
           </el-descriptions-item>
-          <el-descriptions-item label="总进度">
-            <div style="width: 200px">
-              <el-progress :percentage="calcTotalProgress" :status="overallStatus === 'FINISHED' ? 'success' : ''"
-                :stroke-width="10"></el-progress>
+
+          <el-descriptions-item label="总进度 / 对象">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <el-progress style="width: 120px;" :percentage="calcTotalProgress"
+                :status="overallStatus === 'FINISHED' ? 'success' : ''" :stroke-width="10"></el-progress>
+              <span style="font-weight: bold; font-size: 12px; color: #909399">共 {{ objList.length }} 模块</span>
             </div>
-          </el-descriptions-item>
-          <el-descriptions-item label="对象数量">
-            <span style="font-weight: bold">{{ objList.length }}</span> 个对象
           </el-descriptions-item>
         </el-descriptions>
       </div>
@@ -39,7 +66,7 @@
           @click="fetchData">刷新数据</el-button>
       </div>
 
-      <el-table :data="objList" v-loading="loading" stripe border highlight-current-row row-key="id"
+      <el-table :data="objList" v-loading="loading" stripe border highlight-current-row row-key="objectName"
         style="width: 100%">
         <el-table-column prop="objectLabel" label="比对对象" min-width="200" show-overflow-tooltip>
           <template slot-scope="scope">
@@ -60,59 +87,147 @@
           <template slot-scope="scope">
             <el-progress :percentage="scope.row.progress || 0" :status="getProcessStatus(scope.row.status)"
               :stroke-width="18" :text-inside="true"></el-progress>
+
             <div class="progress-msg" v-if="scope.row.status === 'RUNNING'">
               <i class="el-icon-loading"></i> {{ scope.row.currentMsg || '正在处理中...' }}
             </div>
+
+            <div class="progress-msg waiting-msg"
+              v-else-if="scope.row.status === 'WAITING' || scope.row.status === 'INITIALIZING'">
+              <i class="el-icon-time"></i> {{ scope.row.currentMsg || '排队等待分配线程...' }}
+            </div>
+
             <div class="error-msg" v-else-if="scope.row.status === 'FAILED'">
               <i class="el-icon-warning"></i> {{ scope.row.errorMsg }}
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="结果统计 (Source / Target => Diff)" width="320" align="center">
+        <el-table-column label="结果统计(Source /Target => Diff)" min-width="160" align="center">
           <template slot-scope="scope">
-            <div v-if="scope.row.status === 'FINISHED' || scope.row.status === 'PARTIAL_SUCCESS'" class="stats-bar">
-              <span class="stat-num source">{{ scope.row.totalSource }}</span>
-              <span class="divider">/</span>
-              <span class="stat-num target">{{ scope.row.totalTarget }}</span>
-              <span class="arrow">➞</span>
-              <el-badge :value="scope.row.diffCount" :max="9999" :type="scope.row.diffCount > 0 ? 'danger' : 'success'"
-                class="diff-badge">
-                <span class="stat-num diff">差异</span>
-              </el-badge>
+            <div v-if="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING'">-</div>
+
+            <div v-else-if="scope.row.status === 'FINISHED' || scope.row.status === 'FAILED'">
+              <div class="stats-bar">
+                <span class="stat-num source" title="源环境数据量">{{ scope.row.totalSource || 0 }}</span>
+                <span class="divider">/</span>
+                <span class="stat-num target" title="目标环境数据量">{{ scope.row.totalTarget || 0 }}</span>
+                <span class="arrow"><i class="el-icon-right"></i></span>
+                <el-badge :value="scope.row.diffCount || 0" :type="scope.row.diffCount > 0 ? 'danger' : 'success'"
+                  class="diff-badge">
+                </el-badge>
+              </div>
+
+              <div v-if="scope.row.ignoredPostCutoffCount > 0" style="margin-top: 4px;">
+                <el-tooltip effect="dark" content="单据在任务截断时间后被业务人员修改过，已安全忽略" placement="top">
+                  <el-tag type="info" size="mini" effect="plain" style="border-style: dashed;">
+                    后置变更: {{ scope.row.ignoredPostCutoffCount }}
+                  </el-tag>
+                </el-tooltip>
+              </div>
             </div>
-            <span v-else style="color: #C0C4CC">-</span>
+
+            <div v-else>-</div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="总耗时" width="130" align="center">
+          <template slot-scope="scope">
+            <span v-if="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING' || scope.row.costTime == null"
+              style="color:#C0C4CC;">
+              -
+            </span>
+            <el-tag v-else type="info" size="medium" effect="plain"
+              style="font-family: Consolas, monospace; font-weight: bold;">
+              <i class="el-icon-timer"></i> {{ formatCostTime(scope.row.costTime) }}
+            </el-tag>
           </template>
         </el-table-column>
 
         <el-table-column label="结果操作" width="220" align="center" fixed="right">
           <template slot-scope="scope">
+            <el-button size="mini" type="text" icon="el-icon-setting"
+              :style="{ color: (scope.row.status === 'RUNNING' || scope.row.status === 'WAITING') ? '#C0C4CC' : '#909399' }"
+              :disabled="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING'"
+              @click="handleConfig(scope.row)">映射配置</el-button>
+
+            <el-button size="mini" type="text" icon="el-icon-video-play" style="color: #67C23A"
+              v-if="!scope.row.status || scope.row.status === 'IDLE'"
+              @click="handleStartSingleNew(scope.row)">启动</el-button>
+
+            <el-button size="mini" type="text" icon="el-icon-document-delete" style="color: #F56C6C"
+              v-if="scope.row.status === 'FAILED' || scope.row.status === 'ABORTED'"
+              @click="handleViewError(scope.row)">错误详情</el-button>
+
             <el-button size="mini" type="text" icon="el-icon-view" :disabled="scope.row.status !== 'FINISHED'"
               @click="handlePreview(scope.row)">预览</el-button>
+
             <el-button size="mini" type="text" icon="el-icon-download" :disabled="scope.row.status !== 'FINISHED'"
               @click="handleDownload(scope.row)">下载</el-button>
 
             <el-button size="mini" type="text" icon="el-icon-refresh-right" style="color: #E6A23C"
               v-if="scope.row.status === 'FINISHED' || scope.row.status === 'FAILED' || scope.row.status === 'ABORTED'"
               @click="handleRetry(scope.row)">重试</el-button>
+
+            <el-button v-if="scope.row.status === 'RUNNING' || scope.row.status === 'WAITING'" size="mini" type="text"
+              style="color: #F56C6C" icon="el-icon-video-pause" @click="handleStopObj(scope.row)">停止</el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
 
     <preview-result ref="previewRef" />
+
+
+    <el-dialog title="执行异常明细" :visible.sync="errorDialogVisible" width="650px" append-to-body
+      :close-on-click-modal="false">
+      <div style="padding: 10px 0;">
+        <el-alert title="数据比对引擎在执行该对象时遇到严重错误而中断，详细日志如下：" type="error" show-icon :closable="false"
+          style="margin-bottom: 15px;"></el-alert>
+        <div class="error-log-container">
+          {{ currentErrorMsg }}
+        </div>
+      </div>
+      <div slot="footer" class="dialog-footer">
+        <el-button @click="errorDialogVisible = false" size="small">关 闭</el-button>
+        <el-button type="primary" size="small" icon="el-icon-document-copy" @click="copyErrorMsg">一键复制日志</el-button>
+      </div>
+    </el-dialog>
+
+    <el-drawer :title="`正在配置: ${currentEditObj.objectLabel}`" :visible.sync="configDrawerVisible" direction="rtl"
+      size="60%" :destroy-on-close="true">
+      <div v-loading="drawerLoading" style="padding: 0 20px; height: calc(100vh - 130px);">
+        <field-mapping-panel v-if="currentEditConfig && !drawerLoading" :config="currentEditConfig"
+          :source-org-id="jobMeta.sourceOrgId" :object-label="currentEditObj.objectLabel" />
+      </div>
+      <div style="padding: 15px 20px; border-top: 1px solid #ebeef5; text-align: right; background: #fff;">
+        <el-button @click="configDrawerVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingConfig" @click="saveSingleConfig">保存并关闭</el-button>
+      </div>
+    </el-drawer>
+
+    <wizard-config ref="wizardConfig" @ok="handleWizardComplete" />
   </div>
 </template>
 
 <script>
+// API 与工具
 import { getJobMonitor, downloadObjUrl, retryObjLog } from "@/api/salesforce/dataRunObjLog";
-import PreviewResult from './preview';
-import { getToken } from "@/utils/auth"; // 必须引入 Token
+import { getToken } from "@/utils/auth";
 import request from '@/utils/request';
+import { getJob } from "@/api/salesforce/dataJob";
+import { listConfigs, batchSaveConfigs } from "@/api/salesforce/dataObjConfig";
+import { listOrg } from "@/api/salesforce/org";
+import { runJob, stopJob, stopObject } from "@/api/salesforce/reconcile";
+
+// 子组件
+import PreviewResult from './preview';
+import FieldMappingPanel from './components/FieldMappingPanel';
+import WizardConfig from "./wizard";
 
 export default {
   name: "JobMonitor",
-  components: { PreviewResult },
+  components: { PreviewResult, FieldMappingPanel, WizardConfig },
   data() {
     return {
       jobId: null,
@@ -123,20 +238,26 @@ export default {
       socket: null,
       timer: null,
       lockReconnect: false,
-      socketRetryCount: 0, // 增加重连计数防止死循环
+      socketRetryCount: 0,
+      configDrawerVisible: false,
+      drawerLoading: false,
+      savingConfig: false,
+      currentEditObj: {},
+      currentEditConfig: null,
+      fullConfigList: [],
+      jobMeta: {},
+      orgList: [], // 缓存环境字典
+      errorDialogVisible: false,
+      currentErrorMsg: '',
+      stopping: false,
     };
   },
   computed: {
-    // ... (保持不变)
-    // 【优化】计算总进度：基于所有对象的进度均值
+    // 计算总进度：基于所有对象的进度均值
     calcTotalProgress() {
       const totalCount = this.objList.length;
       if (totalCount === 0) return 0;
 
-      // 累加所有对象的 progress 字段
-      // 如果对象是 FINISHED 或 FAILED，视为 100%
-      // 如果是 WAITING，视为 0%
-      // 如果是 RUNNING，取实际 progress
       const sumProgress = this.objList.reduce((sum, item) => {
         let p = 0;
         if (item.status === 'FINISHED' || item.status === 'FAILED') {
@@ -147,7 +268,6 @@ export default {
         return sum + p;
       }, 0);
 
-      // 计算平均值
       return Math.floor(sumProgress / totalCount);
     },
     statusTagType() {
@@ -167,87 +287,167 @@ export default {
       return;
     }
 
+    // 获取 Org 字典用于翻译 ID
+    listOrg().then(res => {
+      this.orgList = res.rows || res.data || [];
+    });
+
+    // 拉取 Job 元数据信息 (包含环境信息)
+    getJob(this.jobId).then(res => {
+      this.jobMeta = res.data || {};
+    });
+
     this.fetchData();
-    // 5秒轮询兜底 (防止WS断连后界面不更新)
-    this.timer = setInterval(this.fetchData, 5000);
+    // 5秒轮询兜底
+    // this.timer = setInterval(this.fetchData, 5000);
   },
   beforeDestroy() {
     this.disconnectSocket();
-    if (this.timer) clearInterval(this.timer);
+    this.stopPolling();
+    // if (this.timer) clearInterval(this.timer);
   },
   methods: {
-    // ... (fetchData 等业务方法保持不变) ...
-    fetchData() {
-      getJobMonitor(this.jobId).then(res => {
-        const dataWrapper = res.data || {};
-        if (dataWrapper.jobName) this.jobName = dataWrapper.jobName;
-        const newData = Array.isArray(dataWrapper) ? dataWrapper : (dataWrapper.list || []);
+    /**
+       * 启动单个刚添加、从未执行过的新对象
+       */
+    handleStartSingleNew(row) {
+      // 获取配置表的 ID。假设你后端 monitor 接口里把 config 的 ID 放在了 objConfigId 或 id 里
+      const configId = row.objConfigId || row.id;
 
-        if (this.objList.length === 0) {
-          this.objList = newData;
-        } else {
-          newData.forEach(newItem => {
-            // 使用 String 转换确保 ID 类型匹配
-            const index = this.objList.findIndex(i => String(i.id) === String(newItem.id));
-            if (index !== -1) {
-              const oldItem = this.objList[index];
-
-              // --- 核心修复：防止进度回跳 (Jitter Fix) ---
-              // 只有当新数据的进度 >= 旧进度，或者状态发生了变更（如从 RUNNING 变为了 FINISHED）时，才更新
-              // 这样可以防止轮询到的“旧数据”覆盖掉 WebSocket 推送的“新数据”
-              let shouldUpdate = false;
-
-              // 1. 状态变了，必须更新
-              if (newItem.status !== oldItem.status) {
-                shouldUpdate = true;
-              }
-              // 2. 状态没变，但进度前进了，更新
-              else if (newItem.progress > oldItem.progress) {
-                shouldUpdate = true;
-              }
-              // 3. 差异数变了，更新
-              else if (newItem.diffCount !== oldItem.diffCount) {
-                shouldUpdate = true;
-              }
-
-              // 如果需要更新，或者强制覆盖其他字段（如 label）
-              if (shouldUpdate) {
-                // 注意：这里我们保留 oldItem 中可能存在的 currentMsg (实时消息)，
-                // 因为接口通常不返回实时的 currentMsg，只返回 errorMsg
-                const mergedItem = {
-                  ...oldItem,
-                  ...newItem,
-                  // 保护 progress 不被回滚：取最大值
-                  progress: Math.max(oldItem.progress || 0, newItem.progress || 0)
-                };
-                this.$set(this.objList, index, mergedItem);
-              }
-            } else {
-              this.objList.push(newItem);
-            }
-          });
-        }
-
-        this.updateOverallStatus();
-
-        // 智能连接 WebSocket
-        if (this.overallStatus === 'RUNNING' || this.overallStatus === 'WAITING') {
+      this.$confirm(`确认要独立启动对象【${row.objectLabel || row.objectName}】的比对任务吗?`, "启动确认", {
+        type: "info"
+      }).then(() => {
+        // 激活 WebSocket
+        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
           this.initWebSocket();
-        } else {
-          if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.disconnectSocket();
-          }
         }
 
-      }).catch(err => {
-        console.error("获取监控数据失败", err);
+        // 乐观锁更新 UI，让用户立刻看到反馈
+        const index = this.objList.indexOf(row);
+        if (index !== -1) {
+          const newItem = { ...row, status: 'WAITING', progress: 0, currentMsg: '正在准备引擎运行环境...' };
+          this.$set(this.objList, index, newItem);
+        }
+
+        // 触发大盘状态更新为运行中
+        this.overallStatus = 'RUNNING';
+
+        // 调用刚才新增的后端接口
+        request({
+          url: `/salesforce/reconcile/runObj/${this.jobId}/${configId}`,
+          method: 'post'
+        }).then(() => {
+          this.$message.success("对象已推入引擎队列");
+          this.startPolling(); // 确保轮询开启以防 WebSocket 抖动
+        }).catch(() => {
+          this.fetchData(); // 失败回滚视图
+        });
+      }).catch(() => { });
+    },
+    // --- 核心优化：全景控制台新增方法 ---
+    startPolling() {
+      this.stopPolling(); // 开启前先防抖清除，防止多开
+      this.timer = setInterval(() => {
+        this.fetchData(true); // true 表示静默刷新，不触发加载动画
+      }, 5000);
+    },
+    stopPolling() {
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+    },
+    // 翻译 Org 字典
+    getOrgName(id) {
+      if (!id) return '加载中...';
+      const org = this.orgList.find(item => item.id === id);
+      return org ? org.name : `ID:${id}`;
+    },
+
+    //打开错误详情弹窗
+    handleViewError(row) {
+      this.currentErrorMsg = row.errorMsg || '未能获取到详细的错误堆栈信息，系统可能发生了底层崩溃，请联系管理员查看服务器后台日志。';
+      this.errorDialogVisible = true;
+    },
+
+    //一键复制错误日志
+    copyErrorMsg() {
+      // 现代浏览器支持的 Clipboard API
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(this.currentErrorMsg).then(() => {
+          this.$message.success("错误日志已复制到剪贴板");
+        }).catch(() => {
+          this.$message.error("复制失败，请手动选择文字进行复制");
+        });
+      } else {
+        // 兼容模式 (传统的 execCommand)
+        const textArea = document.createElement("textarea");
+        textArea.value = this.currentErrorMsg;
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        try {
+          document.execCommand('copy');
+          this.$message.success("错误日志已复制到剪贴板");
+        } catch (err) {
+          this.$message.error("复制失败，请手动选择文字进行复制");
+        }
+        document.body.removeChild(textArea);
+      }
+    },
+
+    /**
+     * 格式化耗时 (将秒转换为 X分Y秒 或 X秒)
+     */
+    formatCostTime(seconds) {
+      if (seconds === null || seconds === undefined) return '-';
+      if (seconds < 60) {
+        // 不足 60 秒，直接显示秒，补全两位数视觉效果更好 (如 05秒)
+        return `${seconds.toString().padStart(2, '0')}秒`;
+      } else {
+        // 超过 60 秒，拆分分钟和秒
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}分 ${s.toString().padStart(2, '0')}秒`;
+      }
+    },
+
+    // 打开 Wizard，直接从选对象步骤(1)开始
+    handleAddObjects() {
+      this.$refs.wizardConfig.init(this.jobId, 1);
+    },
+
+    // Wizard 配置完毕后的回调
+    handleWizardComplete() {
+      this.fetchData();
+    },
+
+    // 启动当前任务下所有对象的全量验证
+    handleStartAllJob() {
+      this.$confirm('确认启动当前配置的所有对象的全量验证任务?', '提示', { type: 'warning' }).then(() => {
+        // 将整体状态乐观设为 RUNNING
+        this.overallStatus = 'RUNNING';
+        this.objList.forEach(item => {
+          if (item.status !== 'FINISHED' && item.status !== 'RUNNING') {
+            item.status = 'WAITING';
+            item.currentMsg = '进入执行队列...';
+          }
+        });
+        runJob(this.jobId).then(() => {
+          this.$message.success("全量验证指令下发成功！");
+          this.initWebSocket();
+          this.fetchData();
+        });
       });
     },
+
+    // 状态更新逻辑优化，支持空任务状态
     updateOverallStatus() {
       if (this.objList.length === 0) {
-        this.overallStatus = 'WAITING';
+        this.overallStatus = 'IDLE'; // 空白任务归为 IDLE，可点击配置或添加
         return;
       }
+
       const hasRunning = this.objList.some(i => i.status === 'RUNNING');
       const hasWaiting = this.objList.some(i => i.status === 'WAITING');
       const allFinished = this.objList.every(i => i.status === 'FINISHED' || i.status === 'FAILED');
@@ -256,31 +456,103 @@ export default {
         this.overallStatus = 'RUNNING';
       } else if (allFinished) {
         this.overallStatus = 'FINISHED';
-        if (this.timer) clearInterval(this.timer);
+        // if (this.timer) clearInterval(this.timer);
+      } else {
+        // 当列表中存在刚刚新增的对象 (状态为 IDLE) 时，它既不是 RUNNING 也不是全部完成
+        // 我们需要显式地将大盘状态归为 IDLE，以此重新激活顶部的操作按钮
+        this.overallStatus = 'IDLE';
       }
     },
 
-    // --- 核心优化：WebSocket 连接逻辑 (参考 detail.vue) ---
+    // --- 以下为原有业务逻辑 ---
+
+    fetchData(isSilent = false) {
+      if (!isSilent) this.loading = true; // 仅在非静默时展示表格 loading
+
+      getJobMonitor(this.jobId).then(res => {
+        const dataWrapper = res.data || {};
+        if (dataWrapper.jobName) this.jobName = dataWrapper.jobName;
+        const newData = Array.isArray(dataWrapper) ? dataWrapper : (dataWrapper.list || []);
+
+        if (this.objList.length === 0) {
+          this.objList = newData;
+        } else {
+          // 对比合并数据，防止进度回跳 (这部分逻辑保持原有完全不变)
+          newData.forEach(newItem => {
+            const index = this.objList.findIndex(i => i.objectName === newItem.objectName);
+            if (index !== -1) {
+              const oldItem = this.objList[index];
+              let shouldUpdate = false;
+
+              if (newItem.status !== oldItem.status) shouldUpdate = true;
+              else if (newItem.progress > oldItem.progress) shouldUpdate = true;
+              else if (newItem.diffCount !== oldItem.diffCount) shouldUpdate = true;
+
+              if (shouldUpdate) {
+                const mergedItem = {
+                  ...oldItem,
+                  ...newItem,
+                  progress: Math.max(oldItem.progress || 0, newItem.progress || 0)
+                };
+                this.$set(this.objList, index, mergedItem);
+              }
+            } else {
+              this.objList.push(newItem);
+            }
+          });
+
+          // 若有被后端删除的对象，同步剔除
+          this.objList = this.objList.filter(oldItem =>
+            newData.some(newItem => newItem.objectName === oldItem.objectName)
+          );
+        }
+
+        this.updateOverallStatus();
+
+        // ==========================================
+        // 【核心优化 6】：智能轮询与 WS 启停判断
+        // ==========================================
+        const activeStatuses = ['RUNNING', 'WAITING', 'INITIALIZING'];
+        const isJobRunning = activeStatuses.includes(this.overallStatus);
+        const hasActiveObjects = this.objList.some(obj => activeStatuses.includes(obj.status));
+
+        if (isJobRunning || hasActiveObjects) {
+          // 当有任务在执行时，确保 HTTP 轮询和 WS 都开启
+          if (!this.timer) {
+            this.startPolling();
+          }
+          this.initWebSocket();
+        } else {
+          // 没有任何任务执行时 (如 IDLE, FINISHED)，彻底关闭 HTTP 轮询！
+          this.stopPolling();
+          // 未执行时，关闭冗余的 WS 连接 (前端点"启动"时会在 handleStartAllJob 中重新连上)
+          if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.disconnectSocket();
+          }
+        }
+        // ==========================================
+
+        if (!isSilent) this.loading = false;
+      }).catch(err => {
+        console.error("获取监控数据失败", err);
+        if (!isSilent) this.loading = false;
+        this.stopPolling(); // 发生网络异常时停止轮询，防止服务器被死循环请求压垮
+      });
+    },
+
+    // WebSocket 连接逻辑
     initWebSocket() {
       if (!this.jobId) return;
-      // 如果已经连接或正在连接，不再创建新的
       if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
         return;
       }
 
-      // 1. 自动判断协议 (ws/wss)
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      // 2. 获取当前域名 (如 localhost:80, 192.168.1.5:8080)
       const host = window.location.host;
-      // 3. 获取 API 基础路径 (如 /dev-api 或 /prod-api)
       const baseUrl = process.env.VUE_APP_BASE_API;
-      // 4. 获取 Token
       const token = getToken();
 
-      // 5. 拼接完整 URL
-      // 注意：这里必须拼接 "reconcile_" 前缀，这是后端区分不同业务的关键
       const url = `${protocol}://${host}${baseUrl}/websocket/reconcile_${this.jobId}?token=${token}`;
-
       console.log("正在连接 WebSocket:", url);
 
       this.socket = new WebSocket(url);
@@ -299,8 +571,6 @@ export default {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'OBJ_PROGRESS') {
-          // console.log("收到进度:", msg); 
-          // ID 类型安全匹配
           const index = this.objList.findIndex(i => String(i.id) === String(msg.objLogId));
 
           if (index !== -1) {
@@ -309,10 +579,19 @@ export default {
             target.progress = msg.percent;
             target.currentMsg = msg.message;
 
-            // 强制刷新视图 (Vue 2 关键)
+            if (msg.totalSource !== undefined) {
+              target.totalSource = msg.totalSource;
+              target.totalTarget = msg.totalTarget;
+              target.diffCount = msg.diffCount;
+              target.ignoredPostCutoffCount = msg.ignoredPostCutoffCount || 0;
+            }
+
+            if (msg.costTime !== undefined) {
+              target.costTime = msg.costTime;
+            }
+
             this.$set(this.objList, index, target);
 
-            // 状态变更后，触发一次全量刷新以更新统计数字
             if (msg.status === 'FINISHED' || msg.status === 'FAILED') {
               if (this.refreshTimer) clearTimeout(this.refreshTimer);
               this.refreshTimer = setTimeout(() => this.fetchData(), 1000);
@@ -326,17 +605,14 @@ export default {
 
     websocketOnError(e) {
       console.error("WebSocket 连接异常");
-      // 错误处理交由 onClose 统一触发重连
     },
 
     websocketOnClose(e) {
       console.log("WebSocket 连接断开", e);
       this.socket = null;
-      // 避免死循环重连：仅在非正常关闭且重试次数少于3次时重连
       if (e.code !== 1000 && e.code !== 1008 && this.socketRetryCount < 3) {
         this.socketRetryCount++;
         setTimeout(() => {
-          console.log("尝试重连 WebSocket...");
           this.initWebSocket();
         }, 3000);
       }
@@ -344,12 +620,12 @@ export default {
 
     disconnectSocket() {
       if (this.socket) {
-        this.socket.close(); // 正常关闭 code=1000
+        this.socket.close();
         this.socket = null;
       }
     },
 
-    // ... (辅助方法保持不变) ...
+    // 辅助状态样式方法
     getStatusTag(status) {
       const map = { 'WAITING': 'info', 'RUNNING': 'primary', 'FINISHED': 'success', 'FAILED': 'danger' };
       return map[status] || 'info';
@@ -364,20 +640,44 @@ export default {
       return '';
     },
     handlePreview(row) {
-      if (row.diffCount === 0) {
-        this.$message.info("恭喜，该对象没有发现任何差异数据！");
+      // 【核心修复】：如果有真实差异，或者有被忽略的后置变更，都允许打开预览面板！
+      const diffs = row.diffCount || 0;
+      const ignored = row.ignoredPostCutoffCount || 0;
+
+      if (diffs === 0 && ignored === 0) {
+        this.$message.success("恭喜，该对象数据完全一致，且无后置变更！");
         return;
       }
-      this.$refs.previewRef.init(row.id, row.objectName);
+
+      // ==========================================
+      // 【新增】：根据 JobMeta 中的 orgId，从 orgList 中匹配并提取真实的实例域名
+      // ==========================================
+      const sourceOrg = this.orgList.find(item => item.id === this.jobMeta.sourceOrgId);
+      const targetOrg = this.orgList.find(item => item.id === this.jobMeta.targetOrgId);
+
+      const sourceDomain = sourceOrg ? sourceOrg.instanceUrl : '';
+      const targetDomain = targetOrg ? targetOrg.instanceUrl : '';
+
+      // 打开预览组件，将环境的真实 instanceUrl 作为参数传递进去
+      // this.$refs.previewRef.init(row.id, row.objectName, sourceDomain, targetDomain);
+      this.$refs.previewRef.init(
+        row.id,
+        row.objectName,
+        sourceDomain,
+        targetDomain,
+        this.jobId,                // 传入 jobId 以便查配置
+        this.jobMeta.sourceOrgId,  // 传入源组织 ID 用于字段树渲染
+        row.objectLabel            // 传入中文标签用于 UI 显示
+      );
     },
-    // 下载比对结果 (修复 401 认证失败问题)
+
+    // 下载结果
     handleDownload(row) {
       const fileName = `reconcile_result_${row.objectName}.csv`;
-
-      // 显示加载遮罩
       const loading = this.$loading({
         lock: true,
-        text: '正在下载结果文件...',
+        // 【优化】：由于大文件下载时间较长，给用户更安心的文案提示
+        text: '正在打包并下载结果文件，超大文件可能需要几分钟，请勿关闭页面...',
         spinner: 'el-icon-loading',
         background: 'rgba(0, 0, 0, 0.7)'
       });
@@ -385,12 +685,11 @@ export default {
       request({
         url: '/salesforce/dataRunObjLog/downloadObj/' + row.id,
         method: 'get',
-        responseType: 'blob', // 【关键】必须指定响应类型为 blob
-        timeout: 60000 // 防止大文件下载超时
+        responseType: 'blob',
+        timeout: 1800000
       }).then(async (res) => {
         loading.close();
 
-        // 检查是否返回了 JSON 格式的错误信息 (例如文件不存在)
         if (res.type === 'application/json') {
           const text = await res.text();
           const json = JSON.parse(text);
@@ -398,45 +697,41 @@ export default {
           return;
         }
 
-        // 处理文件流下载
         const blob = new Blob([res]);
         if ('download' in document.createElement('a')) {
-          // 非 IE 下载
           const elink = document.createElement('a');
           elink.download = fileName;
           elink.style.display = 'none';
           elink.href = URL.createObjectURL(blob);
           document.body.appendChild(elink);
           elink.click();
-          URL.revokeObjectURL(elink.href); // 释放 URL 对象
+          URL.revokeObjectURL(elink.href);
           document.body.removeChild(elink);
         } else {
-          // IE10+ 下载
           navigator.msSaveBlob(blob, fileName);
         }
-        this.$message.success("下载已开始");
+        this.$message.success("下载已完成");
       }).catch(err => {
         loading.close();
         console.error("下载出错", err);
-        this.$message.error("下载失败，请联系管理员");
+        this.$message.error("下载超时或网络中断，请检查网络连接");
       });
     },
+
     handleGoBack() {
       this.$router.push('/salesforce/reconcile');
     },
+
     handleRetry(row) {
       this.$confirm(`确认要重新执行对象【${row.objectLabel || row.objectName}】的比对任务吗?`, "警告", {
         confirmButtonText: "确定",
         cancelButtonText: "取消",
         type: "warning"
       }).then(() => {
-        // 如果断开了，尝试立即重连
         if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-          console.log("重试触发，主动建立连接...");
           this.initWebSocket();
         }
 
-        // 乐观更新
         const index = this.objList.indexOf(row);
         if (index !== -1) {
           const newItem = { ...row, status: 'WAITING', progress: 0, currentMsg: '请求发送中...' };
@@ -449,6 +744,89 @@ export default {
           this.fetchData();
         });
       }).catch(() => { });
+    },
+
+    // 打开对象映射配置
+    async handleConfig(row) {
+      this.currentEditObj = row;
+      this.configDrawerVisible = true;
+      this.drawerLoading = true;
+
+      try {
+        if (!this.jobMeta.sourceOrgId) {
+          const jobRes = await getJob(this.jobId);
+          this.jobMeta = jobRes.data;
+        }
+
+        const confRes = await listConfigs(this.jobId);
+        this.fullConfigList = confRes.data || [];
+
+        this.currentEditConfig = this.fullConfigList.find(c => c.objectName === row.objectName);
+
+        if (!this.currentEditConfig) {
+          this.$message.warning("未找到该对象的原始配置数据。");
+        }
+      } catch (err) {
+        console.error(err);
+        this.$message.error("加载配置失败");
+      } finally {
+        this.drawerLoading = false;
+      }
+    },
+
+    // 保存单个映射配置
+    async saveSingleConfig() {
+      this.savingConfig = true;
+      try {
+        await batchSaveConfigs(this.jobId, this.fullConfigList);
+        this.$message.success("映射策略保存成功！您可以直接点击“重试”重新验证数据。");
+        this.configDrawerVisible = false;
+      } catch (err) {
+        this.$message.error("保存失败");
+      } finally {
+        this.savingConfig = false;
+      }
+    },
+    /**
+     * 全局停止任务
+     */
+    handleStopAllJob() {
+      this.$confirm('确定要强制停止整个比对任务吗？正在执行中的对象将被立刻中断，并销毁已生成的残次文件与云端请求。', '高危操作确认', {
+        confirmButtonText: '确定停止',
+        cancelButtonText: '暂不停止',
+        type: 'error'
+      }).then(() => {
+        this.stopping = true;
+        stopJob(this.jobId).then(res => {
+          this.$message.success("停止指令已下发，各节点正在快速安全中断...");
+          this.stopping = false;
+          // 后端处理完后，原有的 WebSocket 会自动推送 ABORTED 状态来更新页面，或者可以在此强制刷新一下列表
+          // this.getList(); 
+        }).catch(() => {
+          this.stopping = false;
+        });
+      }).catch(() => {
+        // 取消停止
+      });
+    },
+
+    /**
+     * 停止单个对象
+     */
+    handleStopObj(row) {
+      this.$confirm(`确定要强制停止对象 [${row.objectName}] 的比对吗？云端正在提取的数据和本地残留将一并销毁。`, '警告', {
+        confirmButtonText: '确定停止',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }).then(() => {
+        stopObject(row.id).then(res => {
+          this.$message.success(`对象 [${row.objectName}] 停止指令已下发`);
+          // 乐观更新 UI（防抖），等后端 WebSocket 推送最终状态
+          row.status = 'ABORTED';
+        });
+      }).catch(() => {
+        // 取消停止
+      });
     }
   }
 };
@@ -494,6 +872,40 @@ export default {
   font-size: 12px;
   color: #F56C6C;
   margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%; // 确保能触发截断
+}
+
+.error-log-container {
+  background-color: #1e1e1e; // 暗黑背景
+  color: #f56c6c; // 报错专属红字
+  padding: 15px;
+  border-radius: 6px;
+  font-family: 'Consolas', 'Courier New', monospace; // 程序员最爱的等宽字体
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap; // 保留换行符并自动折行
+  word-wrap: break-word;
+  max-height: 400px; // 限制最大高度
+  overflow-y: auto; // 内容过多时出滚动条
+  border: 1px solid #dcdfe6;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+// 定义滚动条的美化（仅在 webkit 浏览器生效，提升暗色容器的高级感）
+.error-log-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.error-log-container::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 4px;
+}
+
+.error-log-container::-webkit-scrollbar-track {
+  background: #1e1e1e;
 }
 
 .stats-bar {
@@ -527,36 +939,36 @@ export default {
   }
 
   .diff-badge {
-    /* 1. 设置为 Flex 容器，让内部的文字和 Badge 数字水平排列 */
     display: inline-flex;
     align-items: center;
-    /* 垂直居中 */
     margin-left: 5px;
-    /* 整体与左侧箭头的距离 */
 
-    /* 2. 深度选择器修改 Element UI 内部样式 */
     ::v-deep .el-badge__content {
-      /* 关键：取消默认的绝对定位，变为流式布局 */
       position: static;
       transform: none;
-      /* 移除默认的缩放位移 */
-
-      /* 样式微调 */
       margin-left: 6px;
-      /* 文字“差异”与数字之间的间距 */
       border: none;
-      /* 移除默认白边，视觉更干净 */
-
-      /* 3. 大数字适配：防止数字过大导致变形 */
       height: 20px;
       line-height: 20px;
       border-radius: 10px;
       padding: 0 8px;
-      /* 左右留足空间，数字再大也能撑开 */
-
-      /* 4. 可选：如果你希望数字稍微偏上一点点，不像现在这么正中，可以加下面这行 */
-      /* transform: translateY(-1px); */
     }
   }
+}
+
+.progress-msg {
+  font-size: 12px;
+  color: #409EFF; // RUNNING 状态的蓝色
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 【新增】：排队状态的专属颜色（灰色/橘色系都可以，这里用偏常规的提示灰） */
+.waiting-msg {
+  color: #909399;
+  font-style: italic;
+  /* 用斜体增加“等待感” */
 }
 </style>
